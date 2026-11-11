@@ -1,0 +1,38 @@
+# python
+__pycache__/
+*.pyc
+
+# local data and config (never publish)
+data/
+work/
+config.json
+config.backup*.json
+
+# build artifacts
+dist/
+build/
+_internal/
+LocalHarness.exe
+LocalHarness.spec
+*.log
+
+# legacy experiments (contains old secret.py placeholders)
+src/
+
+# other tools' local state
+.kilo/
+
+# test scratch artifacts
+tests/.tmp/
+tests/probe.txt
+
+# credentials, environments and editor state
+.env
+.env.*
+*.pem
+*.key
+.venv/
+venv/
+.qoder/
+.backup*/
+*.zip

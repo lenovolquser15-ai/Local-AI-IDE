@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "note": "Локальный каталог LocalHarness. Добавляй записи: id/name/desc/url (raw .py) или file (имя в plugins/_templates). Удалённый каталог — config.json → plugin_catalog_url.",
+  "entries": [
+    {
+      "id": "waitfor",
+      "name": "waitfor",
+      "version": "1.0",
+      "desc": "Пауза (sleep) и ожидание TCP-порта (wait_port) — ждать, пока поднимется сервер или допишется лог. Максимум 600 секунд.",
+      "file": "waitfor.py",
+      "tools": ["sleep", "wait_port"]
+    },
+    {
+      "id": "netprobe",
+      "name": "netprobe",
+      "version": "1.0",
+      "desc": "DNS-lookup и HTTP-пинг через обход сломанного DNS (harness.dnsfix / netio). Полезно, когда getaddrinfo на машине не работает.",
+      "file": "netprobe.py",
+      "tools": ["dns_lookup", "http_ping"]
+    },
+    {
+      "id": "notes",
+      "name": "notes",
+      "version": "1.0",
+      "desc": "Долговременные заметки агента: remember(text) и recall(query) по data/notes.md. Работает и в обычном чате, и в режиме цели.",
+      "file": "notes.py",
+      "tools": ["note_add", "note_find"]
+    }
+  ]
+}

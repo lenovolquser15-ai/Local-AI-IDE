@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="ru" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LocalHarness</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<div id="app" class="app">
+
+  <aside id="side" class="side">
+    <div class="logo-row">
+      <button id="railBtn" class="icon" title="Свернуть панель">◧</button>
+      <div class="brand">Local<i>Harness</i></div>
+      <span class="grow"></span>
+      <span class="dot idle" id="provDot" title="локальный сервер моделей"></span>
+    </div>
+    <button id="newChat" class="new-session"><span class="plus">+</span><span class="text">Новая сессия</span></button>
+    <div class="side-label">Сессии</div>
+    <input id="sessionSearch" class="field session-search" type="search" placeholder="Поиск сессий…" aria-label="Поиск сессий">
+    <div id="sessions" class="sessions"></div>
+    <div class="side-foot">
+      <label class="autostart-label"><input id="autostart" type="checkbox" disabled> Запускать с Windows</label>
+      <div class="chip" id="desktopStatus"></div>
+      <div class="chip" id="dnsChip">dns: …</div>
+      <div class="chip" id="modelCount">моделей: …</div>
+      <div class="chip" id="toolsChip">инструментов: …</div>
+      <div class="chip" id="plugChip">плагины: …</div>
+    </div>
+  </aside>
+
+  <main class="center">
+    <header class="head">
+      <span class="head-title" id="sessionTitle">новая сессия</span>
+      <span class="grow"></span>
+      <span class="stat" id="speed" title="скорость генерации"></span>
+      <span class="stat" id="stat"></span>
+      <button id="stopBtn" class="danger" disabled>Остановить</button>
+    </header>
+
+    <div class="ctxbar" id="ctxBar" hidden>
+      <div class="ctxbar-track">
+        <div class="ctxbar-fill" id="ctxFill"></div>
+        <div class="ctxbar-mark" id="ctxMark"></div>
+      </div>
+      <div class="ctxbar-meta">
+        <span id="ctxLabel">контекст</span>
+        <span class="grow"></span>
+        <span class="ctxbar-limit" id="ctxLimit"></span>
+      </div>
+    </div>
+
+    <nav class="views" id="views">
+      <button class="view-tab active" id="tabChat" data-view="chat">Чат</button>
+      <button class="view-tab" id="tabPlugins" data-view="plugins">Плагины</button>
+      <button class="view-tab" id="tabLM" data-view="lm">LM Studio</button>
+    </nav>
+
+    <div id="modelWarning" class="model-warning" role="status" hidden></div>
+    <section id="log" class="log">
+      <div class="thread" id="thread"></div>
+    </section>
+
+    <section id="viewPlugins" class="pageview" hidden>
+      <div class="page-inner">
+        <div class="page-head">
+          <div>
+            <div class="page-title">Плагины</div>
+            <div class="page-sub" id="plugDir">папка: …</div>
+          </div>
+          <span class="grow"></span>
+          <input type="text" id="plugSearch" class="field" placeholder="фильтр по названию…">
+          <button id="plugReload" class="ghost">перечитать папку</button>
+        </div>
+        <div class="plug-grid">
+          <section class="plate">
+            <div class="plate-title">Установленные</div>
+            <div id="plugInstalled" class="cardlist"></div>
+          </section>
+          <section class="plate">
+            <div class="plate-title">Каталог — скачать и поставить</div>
+            <div id="plugCatalog" class="cardlist"></div>
+            <div class="urlrow">
+              <input type="text" id="plugUrl" class="field grow" placeholder="https://…/plugin.py — прямой линк на файл">
+              <button id="plugInstallUrl" class="primary">Скачать</button>
+            </div>
+            <div class="page-sub" id="plugCatalogNote">Каталог — локальный список из plugins\catalog.json. Добавь свой источник в config.json → plugin_catalog_url.</div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <section id="viewLM" class="pageview" hidden>
+      <div class="page-inner">
+        <div class="page-head">
+          <div>
+            <div class="page-title">LM Studio</div>
+            <div class="page-sub" id="lmBase">сервер: …</div>
+          </div>
+          <span class="grow"></span>
+          <button id="lmsWake" class="ghost">разбудить сервер</button>
+          <button id="lmsRefresh" class="ghost">обновить</button>
+        </div>
+        <div class="plug-grid two">
+          <section class="plate">
+            <div class="plate-title">В памяти</div>
+            <div id="lmLoaded" class="cardlist"></div>
+          </section>
+          <section class="plate">
+            <div class="plate-title">На диске</div>
+            <div id="lmDisk" class="cardlist"></div>
+            <div class="lm-options">
+              <label>Контекст LM Studio <input id="lmContext" class="small-field" type="number" min="512" step="512"></label>
+              <label>TTL, сек <input id="lmTtl" class="small-field" type="number" min="0" step="60" placeholder="0 = выкл."></label>
+            </div>
+            <div class="urlrow">
+              <input type="text" id="lmQuery" class="field grow" placeholder="имя модели, напр. qwen/qwen3-4b-instruct">
+              <button id="lmDownload" class="primary">Скачать</button>
+            </div>
+            <pre id="lmJobLog" class="joblog" hidden></pre>
+             <div class="urlrow vision-row"><label class="file-pick">Изображение для vision<input type="file" id="visionFile" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label><span class="page-sub" id="visionName">не выбрано</span><button id="visionClear" class="ghost" type="button">очистить</button></div>
+             <div class="urlrow import-row"><input type="text" id="lmImportPath" class="field grow" placeholder="C:\\Models\\model.gguf — локальный файл с Hugging Face"><select id="lmImportMode" class="compact"><option value="copy">копировать</option><option value="hard-link">hard-link</option><option value="symbolic-link">symlink</option><option value="move">переместить</option></select><button id="lmImport" class="primary">Импортировать</button></div>
+             <div class="page-sub">Vision: прикрепи картинку к сообщению и выбери мультимодальную модель. Импорт использует официальный lms import.</div>
+            <div class="settings-block">
+              <div class="plate-title">Системный промпт</div>
+              <textarea id="systemPrompt" class="settings-text" rows="7" placeholder="Дополнительные правила для модели…"></textarea>
+              <button id="saveSystemPrompt" class="primary">Сохранить промпт</button>
+              <div class="page-sub">Добавляется к базовым правилам LocalHarness и инструментам.</div>
+            </div>
+          </section>
+        </div>
+      </div>
+    </section>
+
+    <footer class="composer">
+      <div class="band warn-band" id="approveBand" hidden></div>
+      <div class="band goal-band" id="goalBand" hidden>
+        <span class="goal-state" id="goalState">цель: не активна</span>
+        <span class="goal-text" id="goalText"></span>
+      </div>
+      <div class="quick-controls" aria-label="Быстрые настройки">
+        <label class="check-pill"><input type="checkbox" id="showReasoning" checked><span>⌁ Показывать раздумья</span></label>
+        <label class="check-pill"><input type="checkbox" id="expandReasoning"><span>Разворачивать раздумья</span></label>
+        <label class="check-pill"><input type="checkbox" id="autoCompress" checked><span>Сжимать контекст</span></label>
+      </div>
+      <div class="input-shell">
+        <div class="attach-strip" id="attachStrip" hidden></div>
+        <textarea id="input" rows="2" placeholder="Что сделать на компе? Enter — отправить, Shift+Enter — перенос"></textarea>
+        <div class="composer-row">
+          <select id="provider" class="compact" title="Провайдер"></select>
+          <select id="model" class="compact wide" title="Модель"></select>
+          <select id="protocol" class="compact" title="Как модель вызывает инструменты">
+            <option value="auto">tools: auto</option>
+            <option value="native">native</option>
+            <option value="json">json</option>
+          </select>
+          <select id="profile" class="compact" title="Набор инструментов">
+            <option value="core">core</option>
+            <option value="full">full</option>
+          </select>
+          <select id="perms" class="compact" title="Сколько прав дать модели">
+            <option value="auto">права: авто</option>
+            <option value="unrestricted">права: всё</option>
+            <option value="ask">права: спрашивать</option>
+          </select>
+          <button id="thinkBtn" class="icon" title="Показывать размышления модели">⌁</button>
+          <label class="goal-toggle" title="Модель работает, пока сама не подтвердит достижение цели">
+            <input type="checkbox" id="goalMode"><span>цель</span>
+          </label>
+          <input type="text" id="goalCriteria" placeholder="критерий готовности" hidden>
+          <span class="grow"></span>
+          <span class="hint" id="modeHint"></span>
+          <button id="attachBtn" class="icon" title="Прикрепить картинки (или Ctrl+V / перетащи в поле)">🖼</button>
+          <input type="file" id="attachFile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+          <button id="send" class="primary">Отправить</button>
+        </div>
+      </div>
+    </footer>
+  </main>
+
+  <aside id="right" class="right">
+    <div class="right-head">Траектория</div>
+    <div class="usage" id="usage">—</div>
+    <div class="right-label">Действия</div>
+    <div id="trace" class="trace"></div>
+  </aside>
+
+</div>
+<dialog id="deleteDialog" aria-labelledby="deleteQuestion">
+  <form method="dialog">
+    <p id="deleteQuestion"></p>
+    <div class="dialog-actions">
+      <button value="cancel" autofocus>Отмена</button>
+      <button class="danger" value="delete">Удалить</button>
+    </div>
+  </form>
+</dialog>
+<script src="/app.js"></script>
+</body>
+</html>
