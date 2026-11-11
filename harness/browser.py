@@ -84,7 +84,9 @@ def _connect(ws_url):
         resp += chunk
     if b"101" not in resp.split(b"\r\n")[0]:
         raise BrowserError("рукопожатие WebSocket не прошло: %s" % resp.split(b"\r\n")[0])
-    return sock, _Frame(resp.split(b"\r\n\r\n", 1)[1] + b"")
+    frame = _Frame(sock)
+    frame.buf = resp.split(b"\r\n\r\n", 1)[1]
+    return sock, frame
 
 
 def _send(sock, payload):

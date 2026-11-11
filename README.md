@@ -4,9 +4,17 @@
 > tool use (shell, files, browser via CDP, multi-engine web search), goal mode with
 > automatic context compaction, session history with Markdown export, Windows build via PyInstaller.
 >
-> **Quick start (Windows):** install LM Studio and load a model, then `python -m harness serve`
-> (Python 3.10+, deps from `requirements.txt`) or build the exe with `build-exe.cmd`.
-> The UI opens automatically at `http://127.0.0.1:7788`. Documentation below is in Russian.
+> **Quick start (Windows):** download `LocalHarness-Setup-v1.0.0.exe` from
+> [Releases](https://github.com/B3B3097/Local-Harness/releases) (or use the portable zip),
+> install LM Studio and load a model. The UI opens at `http://127.0.0.1:7788`.
+> From source: Python 3.10+, deps from `requirements.txt`, `python -m harness serve`.
+> Documentation below is in Russian.
+
+## Скриншоты
+
+![Чат: сессии, шкала контекста, раздумья, траектория](docs/screenshots/ui-chat.png)
+
+![Вкладка плагинов: установленные и каталог](docs/screenshots/ui-plugins.png)
 
 Агент на **локальной** модели (LM Studio / Ollama) с полным доступом к этому ПК и интернетом,
 несмотря на сломанное разрешение имён в Windows.
@@ -18,6 +26,7 @@
 
 | как | что делает |
 |---|---|
+| `LocalHarness-Setup-v1.0.0.exe` (из Releases) | установщик: без прав администратора, ярлык в меню Пуск, опциональный автозапуск; обновление и удаление не трогают `data` и `config.json` |
 | `LocalHarness.exe` (после сборки) или `lh.cmd` | поднимает сервер на `127.0.0.1:7788` и открывает окно Chrome в режиме приложения |
 | `python -m harness serve` | то же из исходников |
 | `python -m harness cli "сделай X"` | разовый запрос в терминале |
@@ -427,6 +436,20 @@ build-exe.cmd
 Свежая сборка без старого экземпляра использует безопасные значения по умолчанию и не копирует личный
 корневой `config.json`. Данные создаются рядом с exe; `LH_DATA` и `LH_CONFIG` позволяют выбрать другие пути.
 Перед публикацией сборки проверь отсутствие личных `data`, `work`, `config.json` и установленных сторонних плагинов.
+
+### Установщик
+
+Из чистой релизной сборки собирается Inno Setup-установщик (`installer.iss`):
+
+```
+LH_BUILD_DIST=dist/release build-exe.cmd
+build-installer.cmd
+```
+
+Результат: `dist\LocalHarness-Setup-v<версия>.exe`. Установка per-user в `%LOCALAPPDATA%\Programs\LocalHarness`,
+без прав администратора. Автозапуск (опциональный флажок) пишет HKCU Run в том же формате, что и флажок
+в интерфейсе, — они совместимы. При обновлении и удалении пользовательские `data`, `work` и `config.json`
+остаются на месте. Перед установкой поверх работающей версии закрой приложение через меню трея.
 
 ## Разбудить модель
 
