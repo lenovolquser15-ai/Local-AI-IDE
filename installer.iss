@@ -5,7 +5,7 @@
 #define MyAppName "LocalHarness"
 #define MyAppVersion "1.0.0"
 #define MyAppPublisher "LocalHarness contributors"
-#define MyAppURL "https://github.com/B3B3097/Local-Harness"
+#define MyAppURL "https://github.com/lenovolquser15-ai/Local-AI-IDE"
 #define MyAppExeName "LocalHarness.exe"
 
 [Setup]
