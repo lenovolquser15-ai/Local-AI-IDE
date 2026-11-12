@@ -9,6 +9,8 @@
 > install LM Studio and load a model. The UI opens at `http://127.0.0.1:7788`.
 > From source: Python 3.10+, deps from `requirements.txt`, `python -m harness serve`.
 > Documentation below is in Russian.
+>
+> **Telegram-канал:** [t.me/RemingOstai](https://t.me/RemingOstai)
 
 ## Скриншоты
 
