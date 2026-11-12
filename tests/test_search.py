@@ -1,10 +1,16 @@
-"""Регрессы глобального поиска: перебор движков, дедуп, вертикали, диагностика ошибок."""
+"""Регрессы глобального поиска: перебор движков, дедуп, вертикали, диагностика ошибок,
+кэш, кулдаун отказавших движков, параллель по провайдерам и RRF-слияние."""
 import json
 import os
 import sys
+import time
 
-sys.path.insert(0, "C:/LocalHarness")
-os.environ["LH_DATA"] = "C:/LocalHarness/tests/.tmp"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
+# config.json is gitignored and absent on a fresh clone: load() must return defaults
+os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
+from harness import config as config_mod  # noqa: E402
 from harness import search as search_mod  # noqa: E402
 from harness.agent import Bridge  # noqa: E402
 
@@ -86,6 +92,10 @@ HN_JSON = json.dumps({"hits": [{"title": "HN story", "url": "https://news.ycombi
 ARXIV_XML = """<feed><entry><title>Paper title</title>
 <id>http://arxiv.org/abs/1234</id><summary>Paper summary</summary></entry></feed>"""
 
+SEARXNG_JSON = json.dumps({"results": [
+    {"title": "Searx Result запрос", "url": "https://searx.example.org/x", "content": "Snippet запрос"},
+    {"title": "Example A запрос", "url": "https://example.com/a", "content": "Snippet A запрос"}]})
+
 
 def main():
     # 1. разбор выдачи DuckDuckGo
@@ -112,6 +122,7 @@ def main():
         search_mod._fetch = old_fetch
 
     # 2. перебор движков: первый молчит — берём второй, дедуп по URL
+    search_mod.reset_state()
     try:
         search_mod._fetch = fake_fetch({"html.duckduckgo.com": DDG_HTML,
                                         "lite.duckduckgo.com": LITE_HTML,
@@ -126,6 +137,7 @@ def main():
         search_mod._fetch = old_fetch
 
     # 3. движок падает — поиск не падает, ошибка попадает в отчёт
+    search_mod.reset_state()
     try:
         search_mod._fetch = fake_fetch({"html.duckduckgo.com": RuntimeError("anomaly"),
                                         "lite.duckduckgo.com": LITE_HTML})
@@ -160,6 +172,7 @@ def main():
             search_mod._fetch = old_fetch
 
     # 5. вертикали добирают выдачу, когда поисковики молчат
+    search_mod.reset_state()
     try:
         search_mod._fetch = fake_fetch({"html.duckduckgo.com": RuntimeError("anomaly"),
                                         "lite.duckduckgo.com": RuntimeError("anomaly"),
@@ -173,6 +186,7 @@ def main():
         search_mod._fetch = old_fetch
 
     # 6. неизвестный движок и алиасы
+    search_mod.reset_state()
     res = search_mod.search("запрос", engine="яндекс")
     check(not res["results"] and res["errors"], "неизвестный движок: нет понятной ошибки")
     check("duckduckgo" in res["errors"]["яндекс"], "неизвестный движок: не перечислены доступные")
@@ -196,6 +210,7 @@ def main():
         search_mod._fetch = old_fetch
 
     # 6b. в auto-режиме заглушка первого движка не съедает выдачу
+    search_mod.reset_state()
     try:
         search_mod._fetch = fake_fetch({"lite.duckduckgo.com": LITE_HTML,
                                         "html.duckduckgo.com": "<html>anomaly.js</html>",
@@ -209,6 +224,7 @@ def main():
         search_mod._fetch = old_fetch
 
     # 6c. выдача не по теме считается отказом движка, а не ответом
+    search_mod.reset_state()
     try:
         search_mod._fetch = fake_fetch({"html.duckduckgo.com": JUNK_BING_HTML,
                                         "lite.duckduckgo.com": JUNK_BING_HTML,
@@ -254,6 +270,7 @@ def main():
         search_mod._fetch = old_fetch
 
     # 6e. имя движка нечувствительно к регистру, пробелам и дефисам
+    search_mod.reset_state()
     try:
         search_mod._fetch = fake_fetch({"rightdao.com": RIGHTDAO_HTML})
         res = search_mod.search("asyncio", engine="Right Dao", count=2)
@@ -278,7 +295,8 @@ def main():
 
     # 7. инструмент web_search отдаёт источники и ошибки
     from harness import tools as tools_mod
-    tk = tools_mod.Toolkit({"workspace": "C:/LocalHarness/tests/.tmp", "search_engine": "auto"})
+    search_mod.reset_state()
+    tk = tools_mod.Toolkit({"workspace": os.path.join(ROOT, "tests", ".tmp"), "search_engine": "auto"})
     try:
         search_mod._fetch = fake_fetch({"html.duckduckgo.com": DDG_HTML})
         res = tk.call("web_search", {"query": "запрос"})
@@ -289,8 +307,8 @@ def main():
 
     # 8. повтор одного и того же успешного поиска замечается агентом
     from harness.agent import Agent
-    cfg = json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
-    cfg["workspace"] = "C:/LocalHarness/tests/.tmp"
+    cfg = config_mod.load()
+    cfg["workspace"] = os.path.join(ROOT, "tests", ".tmp")
     agent = Agent(cfg, Bridge(), "test-repeat")
     hints = []
     for _ in range(5):
@@ -300,8 +318,161 @@ def main():
     check("engine=wikipedia" in hints[2], "повтор поиска: подсказка не советует другой источник (%r)" % hints[2])
     check("СТОП" in hints[4], "повтор поиска: нет стопа на пятом (%r)" % hints[4])
     check(agent.stalled, "повтор поиска: подход не оборвался")
-    check(agent._watch_repeat_ok("list_dir", {"path": "C:/LocalHarness"}) == "",
+    check(agent._watch_repeat_ok("list_dir", {"path": ROOT}) == "",
           "повтор поиска: лишние инструменты не должны считаться повтором")
+
+    # 9. кэш: повторный успешный запрос не ходит в сеть
+    search_mod.reset_state()
+    try:
+        fetch = fake_fetch({"html.duckduckgo.com": DDG_HTML})
+        search_mod._fetch = fetch
+        res1 = search_mod.search("кэш запрос", count=2)
+        calls_after_first = len(fetch.calls)
+        res2 = search_mod.search("кэш запрос", count=2)
+        check(res1["results"] and res2.get("cached") is True,
+              "кэш: повтор не помечен как кэшированный (%s)" % res2.get("cached"))
+        check(len(fetch.calls) == calls_after_first,
+              "кэш: повтор ушёл в сеть (%d -> %d)" % (calls_after_first, len(fetch.calls)))
+        check(res2["results"] == res1["results"], "кэш: результаты отличаются")
+        res2["results"].clear()
+        res3 = search_mod.search("кэш запрос", count=2)
+        check(res3["results"], "кэш: мутация ответа испортила кэш")
+    finally:
+        search_mod._fetch = old_fetch
+
+    # 10. кулдаун: движок с anomaly отдыхает, запасной того же провайдера работает
+    search_mod.reset_state()
+    try:
+        search_mod._fetch = fake_fetch({"html.duckduckgo.com": RuntimeError("anomaly"),
+                                        "lite.duckduckgo.com": LITE_HTML})
+        res1 = search_mod.search("кулдаун запрос", count=2)
+        check("duckduckgo" in res1["errors"], "кулдаун: отказ не записан (%s)" % res1["errors"])
+        fetch2 = fake_fetch({"html.duckduckgo.com": DDG_HTML, "lite.duckduckgo.com": LITE_HTML})
+        search_mod._fetch = fetch2
+        res2 = search_mod.search("кулдаун запрос второй", count=2)
+        check(not any("html.duckduckgo.com" in u for u in fetch2.calls),
+              "кулдаун: охлаждённый движок снова позвали (%s)" % fetch2.calls)
+        check(any("lite.duckduckgo.com" in u for u in fetch2.calls),
+              "кулдаун: запасной движок не позвали (%s)" % fetch2.calls)
+        check("cooldown" in res2["errors"].get("duckduckgo", ""),
+              "кулдаун: пропуск не объяснён в отчёте (%s)" % res2["errors"])
+        check(res2["results"], "кулдаун: выдача пропала совсем")
+    finally:
+        search_mod._fetch = old_fetch
+
+    # 11. истёкший кулдаун не мешает; явный выбор движка кулдаун игнорирует
+    search_mod.reset_state()
+    try:
+        with search_mod._state_lock:
+            search_mod._cooldown["duckduckgo"] = time.monotonic() - 1
+        fetch = fake_fetch({"html.duckduckgo.com": DDG_HTML})
+        search_mod._fetch = fetch
+        res = search_mod.search("запрос после отдыха", count=2)
+        check(any("html.duckduckgo.com" in u for u in fetch.calls),
+              "кулдаун: истёкший не сброшен (%s)" % fetch.calls)
+        search_mod.reset_state()
+        search_mod._fetch = fake_fetch({"html.duckduckgo.com": RuntimeError("anomaly")})
+        search_mod.search("явный запрос", count=2)
+        fetch2 = fake_fetch({"html.duckduckgo.com": DDG_HTML})
+        search_mod._fetch = fetch2
+        res2 = search_mod.search("явный запрос второй", engine="duckduckgo", count=2)
+        check(any("html.duckduckgo.com" in u for u in fetch2.calls),
+              "кулдаун: явный выбор движка не проигнорировал охлаждение")
+        check(res2["results"], "кулдаун: явный движок не отдал результаты")
+    finally:
+        search_mod._fetch = old_fetch
+
+    # 12. RRF: результат, общий для двух движков, обгоняет одиночного фаворита
+    search_mod.reset_state()
+    try:
+        search_mod._fetch = fake_fetch({"html.duckduckgo.com": DDG_HTML,
+                                        "lite.duckduckgo.com": LITE_HTML,
+                                        "bing.com": BING_HTML})
+        res = search_mod.search("запрос", count=3)
+        check(res["results"] and res["results"][0]["url"] == "https://example.org/b",
+              "rrf: общий результат двух движков не поднялся наверх (%s)"
+              % [r["url"] for r in res["results"]])
+    finally:
+        search_mod._fetch = old_fetch
+
+    # 13. провайдер: lite не дублирует успешный html (общий rate-limit)
+    search_mod.reset_state()
+    try:
+        fetch = fake_fetch({"html.duckduckgo.com": DDG_HTML, "lite.duckduckgo.com": LITE_HTML})
+        search_mod._fetch = fetch
+        res = search_mod.search("запрос", count=2)
+        check(res["results"], "провайдер: результаты пропали")
+        check(not any("lite.duckduckgo.com" in u for u in fetch.calls),
+              "провайдер: lite вызван вслед за успешным html (%s)" % fetch.calls)
+    finally:
+        search_mod._fetch = old_fetch
+    search_mod.reset_state()
+
+    # 14. SearXNG: выключен по умолчанию, включается URL-ом, первый в плане
+    search_mod.reset_state()
+    try:
+        fetch = fake_fetch({"html.duckduckgo.com": DDG_HTML})
+        search_mod._fetch = fetch
+        res = search_mod.search("запрос", count=2)
+        check(not any("/search?" in u and "format=json" in u for u in fetch.calls),
+              "searxng: позван без включения (%s)" % fetch.calls)
+        res = search_mod.search("запрос", engine="searxng", count=2)
+        check(not res["results"] and "не включён" in res["errors"].get("searxng", ""),
+              "searxng: явный выбор без включения не объяснён (%s)" % res["errors"])
+    finally:
+        search_mod._fetch = old_fetch
+    search_mod.reset_state()
+    try:
+        fetch = fake_fetch({"127.0.0.1:8080": SEARXNG_JSON, "html.duckduckgo.com": DDG_HTML})
+        search_mod._fetch = fetch
+        res = search_mod.search("запрос", count=3, searxng_url="http://127.0.0.1:8080")
+        check(res["sources"] and res["sources"][0] == "searxng",
+              "searxng: включённый не первый в источниках (%s)" % res["sources"])
+        urls = [r["url"] for r in res["results"]]
+        check("https://searx.example.org/x" in urls, "searxng: его результатов нет (%s)" % urls)
+        check(len(urls) == len(set(urls)), "searxng: дубль с DDG не убран (%s)" % urls)
+        rows = search_mod.searxng("запрос", count=2, base_url="http://127.0.0.1:8080/")
+        check(rows and rows[0]["source"] == "searxng", "searxng: прямой вызов не работает")
+    finally:
+        search_mod._fetch = old_fetch
+
+    # 15. SearXNG лежит — кулдаун, остальные движки продолжают отвечать
+    search_mod.reset_state()
+    try:
+        search_mod._fetch = fake_fetch({"127.0.0.1:8080": RuntimeError("connection refused"),
+                                        "html.duckduckgo.com": DDG_HTML})
+        res = search_mod.search("запрос", count=2, searxng_url="http://127.0.0.1:8080")
+        check("searxng" in res["errors"], "searxng: отказ не в отчёте (%s)" % res["errors"])
+        check(res["results"], "searxng: лежащий инстанс уронил выдачу")
+        fetch2 = fake_fetch({"127.0.0.1:8080": SEARXNG_JSON, "html.duckduckgo.com": DDG_HTML})
+        search_mod._fetch = fetch2
+        res2 = search_mod.search("запрос второй", count=2, searxng_url="http://127.0.0.1:8080")
+        check(not any("127.0.0.1:8080" in u for u in fetch2.calls),
+              "searxng: охлаждённый инстанс снова позвали (%s)" % fetch2.calls)
+        check(res2["results"], "searxng: без инстанса выдача пропала")
+    finally:
+        search_mod._fetch = old_fetch
+
+    # 16. кэш не смешивает включённый и выключенный SearXNG; инструмент читает галочку
+    search_mod.reset_state()
+    try:
+        search_mod._fetch = fake_fetch({"html.duckduckgo.com": DDG_HTML})
+        search_mod.search("кэш запрос", count=2)
+        fetch2 = fake_fetch({"127.0.0.1:8080": SEARXNG_JSON, "html.duckduckgo.com": DDG_HTML})
+        search_mod._fetch = fetch2
+        res = search_mod.search("кэш запрос", count=2, searxng_url="http://127.0.0.1:8080")
+        check(not res.get("cached") and "searxng" in res["sources"],
+              "searxng: кэш выключенного режима подсунут включённому (%s)" % res.get("cached"))
+        from harness import tools as tools_mod
+        tk = tools_mod.Toolkit({"workspace": os.path.join(ROOT, "tests", ".tmp"),
+                                "search_engine": "auto", "search_searxng": True,
+                                "search_searxng_url": "http://127.0.0.1:8080"})
+        res = tk.call("web_search", {"query": "запрос инструмент"})
+        check(res.get("ok") and "searxng" in res.get("sources", []),
+              "searxng: галочка в конфиге не дошла до инструмента (%s)" % res.get("sources"))
+    finally:
+        search_mod._fetch = old_fetch
+    search_mod.reset_state()
 
     print("FAILURES: %d" % len(failures))
     for item in failures:

@@ -1,9 +1,7 @@
 import gzip
-import io
 import json
 import re
 import urllib.parse
-from html import unescape as html_unescape
 import zlib
 from html.parser import HTMLParser
 
@@ -128,45 +126,6 @@ def request(method, url, headers=None, data=None, timeout=30.0, max_bytes=3_000_
 
 def get(url, timeout=30.0, headers=None):
     return request("GET", url, headers=headers, timeout=timeout)
-
-
-def web_search(query, count=8, engine="duckduckgo"):
-    if engine == "duckduckgo_html_post":
-        url = "https://html.duckduckgo.com/html/"
-        res = request("POST", url, data=urllib.parse.urlencode({"q": query, "kl": "wt-wt"}),
-                      headers={"content-type": "application/x-www-form-urlencoded"})
-    else:
-        url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query, "kl": "wt-wt"})
-        res = request("GET", url)
-    html = res.get("text", "")
-    if res["status"] >= 400 or "anomaly" in html[:2000].lower():
-        alt = "https://duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-        res = request("GET", alt)
-        html = res.get("text", "")
-    results = []
-    for link in re.finditer(
-        r'<a[^>]+class="result__a"[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>'
-        r'(?P<rest>.*?)(?=<a[^>]+class="result__a"|<div class="nav-link|$)',
-        html, re.S,
-    ):
-        href = html_unescape(link.group("href"))
-        target = href
-        if "uddg=" in href:
-            match = re.search(r"[?&]uddg=([^&]+)", href)
-            if match:
-                target = urllib.parse.unquote(match.group(1))
-        title = html_to_text(html_unescape(link.group("title")), 300)
-        snippet = ""
-        snip = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', link.group("rest") or "", re.S)
-        if snip:
-            snippet = html_to_text(html_unescape(snip.group(1)), 400)
-        if target.startswith("//"):
-            target = "https:" + target
-        if target.startswith("http") and title:
-            results.append({"title": title, "url": target, "snippet": snippet})
-        if len(results) >= count:
-            break
-    return {"query": query, "engine": engine, "results": results, "status": res["status"]}
 
 
 def web_fetch(url, limit=12000, timeout=30.0):

@@ -14,8 +14,12 @@ import time
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, "C:/LocalHarness")
-os.environ["LH_DATA"] = "C:/LocalHarness/tests/.tmp"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
+# config.json is gitignored and absent on a fresh clone: load() must return defaults
+os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
+from harness import config as config_mod  # noqa: E402
 from harness import server as server_mod  # noqa: E402
 from harness import session as session_mod  # noqa: E402
 from harness import tools as tools_mod  # noqa: E402
@@ -123,7 +127,7 @@ def post_json(url, payload):
 
 def main():
     # ---------- 1. веб-морда: кнопка, разные копии, отправка images ----------
-    ui_dirs = ["C:/LocalHarness/webui", "C:/LocalHarness/harness/webui"]
+    ui_dirs = [os.path.join(ROOT, "webui"), os.path.join(ROOT, "harness", "webui")]
     for name in ("index.html", "app.js", "style.css"):
         blobs = []
         for path in ui_dirs:
@@ -173,7 +177,7 @@ def main():
     threading.Thread(target=mock.serve_forever, daemon=True).start()
     time.sleep(0.3)
     try:
-        cfg = json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
+        cfg = config_mod.load()
         cfg["providers"]["imgmock"] = {"label": "ImgMock", "base_url": "http://127.0.0.1:%d/v1" % MOCK_PORT,
                                        "api_key": "x", "autostart": False}
         cfg["provider"] = "imgmock"
@@ -198,7 +202,7 @@ def main():
         mock.shutdown()
 
     # ---------- 4. shell/ssh не висят ----------
-    tk = tools_mod.Toolkit({"workspace": "C:/LocalHarness/tests/.tmp"})
+    tk = tools_mod.Toolkit({"workspace": os.path.join(ROOT, "tests", ".tmp")})
     bash = shutil.which("bash")
     if bash:
         started = time.time()

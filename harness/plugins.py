@@ -14,9 +14,7 @@ import importlib.util
 import json
 import os
 import re
-import shutil
 import threading
-import time
 
 from . import permissions
 from .config import app_root, load as load_cfg, save as save_cfg

@@ -10,9 +10,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, "C:/LocalHarness")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 # sessions must not land in the app's real data/sessions
-os.environ["LH_DATA"] = "C:/LocalHarness/tests/.tmp"
+os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
+# config.json is gitignored and absent on a fresh clone: load() must return defaults
+os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
+from harness import config as config_mod  # noqa: E402
 from harness import llm as llm_mod  # noqa: E402
 from harness import permissions  # noqa: E402
 from harness import plugins  # noqa: E402
@@ -21,7 +25,6 @@ from harness import session as session_mod  # noqa: E402
 from harness.agent import Agent, Bridge  # noqa: E402
 from harness.tools import Toolkit  # noqa: E402
 
-ROOT = "C:/LocalHarness"
 LOG = open(os.path.join(ROOT, "tests", "goals.log"), "w", encoding="utf-8", buffering=1)
 PORT = 12997
 QUEUES = {"native": [], "json": []}
@@ -109,7 +112,7 @@ class TestBridge(Bridge):
 
 
 def cfg_for():
-    base = json.load(open(os.path.join(ROOT, "config.json"), encoding="utf-8"))
+    base = config_mod.load()
     base["providers"] = {"scripted": {"label": "Scripted", "base_url": "http://127.0.0.1:%d/v1" % PORT, "api_key": "x"}}
     base["provider"] = "scripted"
     base["model"] = "scripted/goal"
@@ -148,7 +151,7 @@ def main():
     check("auto: системный путь с обратными слешами спрашивает",
           permissions.decide("write_file", {"path": "C:\\Windows\\Temp\\a.txt", "content": "a"}, "auto")[0] == "confirm")
     check("auto: рабочий путь не спрашивает",
-          permissions.decide("write_file", {"path": "C:/LocalHarness/work/a.txt", "content": "a"}, "auto")[0] == "allow")
+          permissions.decide("write_file", {"path": ROOT + "/work/a.txt", "content": "a"}, "auto")[0] == "allow")
 
     # ---- 2. the switch is really wired into the loop (safe tool, so nothing destructive runs)
     cfg = cfg_for()
@@ -214,6 +217,53 @@ def main():
     states4 = [e.get("state") for e in bridge4.events if e.get("type") == "goal"]
     check("цель: лимит подходов и честный провал",
           "exhausted" in states4 and not (res4.get("goal") or {}).get("achieved"), str(states4))
+
+    # ---- 4b. goal checklist: model marks points with evidence; unverified point is rejected
+    cfg_cl = cfg_for()
+    cfg_cl["goal_rounds"] = 2
+    cl_script = [
+        {"role": "assistant", "content": None, "tool_calls": [call("list_dir", {"path": ROOT})]},
+        {"role": "assistant", "content": None, "tool_calls": [call("check_goal_point", {
+            "index": 1, "evidence": "list_dir показал содержимое корня"})]},
+        {"role": "assistant", "content": None, "tool_calls": [call("check_goal_point", {
+            "index": 2, "evidence": "проверено инструментом"})]},
+        {"role": "assistant", "content": None, "tool_calls": [call("finish_goal", {
+            "achieved": True, "summary": "оба пункта проверены", "evidence": "list_dir + check_goal_point"})]},
+    ]
+    bridge_cl, res_cl = run_agent(cfg_cl, cl_script, "проверь папку",
+                                  goal={"objective": "проверь папку",
+                                        "criteria": "1. список папки\n2. текущее время"})
+    cl_events = [e for e in bridge_cl.events if e.get("type") == "goal"]
+    started_cl = [e for e in cl_events if e.get("state") == "checklist"]
+    points_cl = [e for e in cl_events if e.get("state") == "point"]
+    check("цель: чеклист разобран на пункты", started_cl and len(started_cl[0].get("points") or []) == 2,
+          json.dumps(started_cl, ensure_ascii=False)[:300])
+    check("цель: галочка ставится и событие несёт evidence",
+          bool(points_cl) and points_cl[-1].get("points", [{}])[0].get("done") is True
+          and "list_dir" in (points_cl[0].get("evidence") or ""),
+          json.dumps(points_cl, ensure_ascii=False)[:300])
+    check("цель: finish_goal закрыл цель с чеклистом", (res_cl.get("goal") or {}).get("achieved") is True,
+          json.dumps(res_cl.get("goal")))
+
+    # point marked before ANY real tool must be rejected
+    cfg_cl2 = cfg_for()
+    cfg_cl2["goal_rounds"] = 1
+    bad_script = [
+        {"role": "assistant", "content": None, "tool_calls": [call("check_goal_point", {
+            "index": 1, "evidence": "вроде сделал"})]},
+        {"role": "assistant", "content": None, "tool_calls": [call("list_dir", {"path": ROOT})]},
+        {"role": "assistant", "content": None, "tool_calls": [call("check_goal_point", {
+            "index": 1, "evidence": "list_dir показал корень"})]},
+        {"role": "assistant", "content": None, "tool_calls": [call("finish_goal", {
+            "achieved": True, "summary": "готово", "evidence": "list_dir"})]},
+    ]
+    bridge_bad, _ = run_agent(cfg_cl2, bad_script, "проверь",
+                              goal={"objective": "проверь", "criteria": "1. один пункт"})
+    dump_bad = json.dumps(bridge_bad.events, ensure_ascii=False)
+    check("цель: неотмеченный без проверки пункт отклонён", "ПУНКТ НЕ ПРОВЕРЕН" in dump_bad, dump_bad[:220])
+    check("цель: после проверки пункт отметился", any(
+        e.get("state") == "point" and e.get("done") for e in bridge_bad.events if e.get("type") == "goal"),
+        dump_bad[:220])
 
     # ---- LM Studio load settings
     import harness.server as server_mod

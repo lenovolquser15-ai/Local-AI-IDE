@@ -256,6 +256,25 @@ def _goal_brief(goal):
     return text
 
 
+def _split_checklist(criteria):
+    """Критерий-чеклист → отдельные пункты (нумерованные/маркированные строки)."""
+    items = []
+    for raw in str(criteria or "").splitlines():
+        line = re.sub(r"^(?:[-*•]|\d+[.)]|\[\s?[xX ]?\s?\])\s*", "", raw.strip()).strip()
+        if line:
+            items.append(line)
+    return items[:8]
+
+
+def _checklist_text(items):
+    if not items:
+        return ""
+    lines = ["ЧЕКЛИСТ ЦЕЛИ (отмечай выполненные через check_goal_point):"]
+    for i, item in enumerate(items, 1):
+        lines.append("%d. [%s] %s" % (i, "x" if item.get("done") else " ", item.get("text", "")))
+    return "\n".join(lines)
+
+
 def _plural(n, one, few, many):
     if n % 10 == 1 and n % 100 != 11:
         return one
@@ -279,10 +298,10 @@ def _goal_rounds_limit(goal, default):
 REFINE_PROMPT = (
     "Ты готовишь цель для автономного агента с инструментами (PowerShell, SSH/VPS, файлы, скриншоты). "
     "Переформулируй цель пользователя в чёткую задачу, сохранив весь смысл и реквизиты. "
-    "Придумай измеримый критерий готовности — чеклист из 2-4 пунктов, каждый проверяется командой, "
+    "Разбей цель на чеклист из 2-4 измеримых пунктов, каждый проверяется командой, "
     "файлом или скриншотом. Если пользователь дал свой критерий — улучши формулировку, не выбрасывай смысл. "
     "Составь короткий план (3-6 шагов). Ответь СТРОГО одним JSON-объектом без markdown и без раздумий: "
-    '{"objective":"...","criteria":"1. ...\\n2. ...","plan":["шаг 1","шаг 2"]}'
+    '{"objective":"...","criteria":"1. ...\\n2. ...","checklist":["пункт 1","пункт 2"],"plan":["шаг 1","шаг 2"]}'
 )
 
 
@@ -299,9 +318,12 @@ def refine_goal(llm, goal, stop=None):
         if not objective:
             return None
         plan = [str(s).strip() for s in (blob.get("plan") or []) if str(s).strip()][:8]
+        checklist = [str(s).strip() for s in (blob.get("checklist") or []) if str(s).strip()][:8]
         out = {"objective": objective}
         if criteria:
             out["criteria"] = criteria
+        if checklist:
+            out["checklist"] = checklist
         if plan:
             out["plan"] = plan
         return out
@@ -325,6 +347,7 @@ class Agent:
         self.goal_rounds = int(cfg.get("goal_rounds", 6))
         self.goal = None
         self.goal_state = None
+        self.checklist = []
         self.rounds = 0
         self.speed = {}
         self.repeats = {}
@@ -413,6 +436,8 @@ class Agent:
                 "Пройди по критерию готовности: каждый невыполненный пункт проверь реальным инструментом "
                 "(команда, файл, screenshot для GUI). Доделай недостающее и закрой цель вызовом finish_goal "
                 "с evidence из вывода проверки." % _goal_brief(self.goal))
+        if self.checklist:
+            base += "\n" + _checklist_text(self.checklist)
         query = (self.goal.get("objective") or "").strip()
         quoted = (" по запросу «%s»" % query[:120]) if query else ""
         if turn.get("stalled"):
@@ -509,6 +534,35 @@ class Agent:
             if not text:
                 self._soft_fail = True
             return name, args, {"ok": bool(text), "answered": True, "answer": text or "(пользователь промолчал)"}
+        if name == "check_goal_point":
+            if not self.goal or not self.checklist:
+                return name, args, {"ok": False, "error": "чеклист цели не задан — отмечать нечего"}
+            try:
+                idx = int(args.get("index"))
+            except (TypeError, ValueError):
+                idx = 0
+            if idx < 1 or idx > len(self.checklist):
+                return name, args, {"ok": False, "error": "номер пункта вне чеклиста: 1..%d" % len(self.checklist)}
+            done = args.get("done", True)
+            done = True if done is None else bool(done)
+            evidence = str(args.get("evidence") or "").strip()
+            if done and not self._real_tools:
+                self._soft_fail = True
+                return name, args, {"ok": False, "error":
+                    "ПУНКТ НЕ ПРОВЕРЕН: сначала проверь этот пункт реальным инструментом (команда, файл или "
+                    "screenshot), затем отметь его с evidence из вывода проверки."}
+            if done and not evidence:
+                self._soft_fail = True
+                return name, args, {"ok": False, "error":
+                    "нет evidence: укажи, что именно показала проверка этого пункта."}
+            item = self.checklist[idx - 1]
+            item["done"] = done
+            item["evidence"] = evidence
+            remaining = sum(1 for p in self.checklist if not p["done"])
+            self.bridge.emit({"type": "goal", "state": "point", "round": self.rounds,
+                              "index": idx, "done": done, "evidence": _short(evidence, 300),
+                              "points": [dict(p) for p in self.checklist], "remaining": remaining})
+            return name, args, {"ok": True, "index": idx, "done": done, "remaining": remaining}
         if name == "finish_goal":
             achieved = bool(args.get("achieved"))
             if achieved and self.goal and not self._real_tools:
@@ -518,6 +572,10 @@ class Agent:
                     "(команда, файл или screenshot), потом вызови finish_goal с evidence из вывода проверки."}
             self.goal_state = {"achieved": achieved,
                                "summary": args.get("summary") or "", "evidence": args.get("evidence") or ""}
+            remaining = [i for i, p in enumerate(self.checklist, 1) if not p["done"]] if self.checklist else []
+            if achieved and remaining:
+                self.bridge.emit({"type": "notice", "text":
+                    "цель закрыта, но не отмечены пункты чеклиста: %s" % ", ".join(map(str, remaining))})
             self.bridge.emit({"type": "goal", "state": "closed", "round": self.rounds,
                               "objective": (self.goal or {}).get("objective", ""),
                               "achieved": self.goal_state["achieved"],
@@ -753,6 +811,7 @@ class Agent:
         messages += hist
         self.goal = goal or None
         self.goal_state = None
+        self.checklist = []
         self.rounds = 0
         self.repeats = {}
         self.repeats_ok = {}
@@ -770,12 +829,26 @@ class Agent:
                                   "plan": refined.get("plan") or []})
                 if refined.get("plan"):
                     self.bridge.emit({"type": "plan", "text": "План: " + " → ".join(refined["plan"])})
+            points = []
+            if refined and refined.get("checklist"):
+                points = list(refined["checklist"])
+            elif self.goal.get("criteria"):
+                points = _split_checklist(self.goal["criteria"])
+            if not points and (self.goal.get("objective") or "").strip():
+                points = [self.goal["objective"].strip()]
+            self.checklist = [{"text": p, "done": False, "evidence": ""} for p in points[:8]]
             messages.append({"role": "system", "content": schemas.GOAL_INSTRUCTION})
             user_text = _goal_brief(self.goal)
+            if self.checklist:
+                user_text += "\n" + _checklist_text(self.checklist)
             self.bridge.emit({"type": "goal", "state": "started", "round": 0,
                               "objective": self.goal.get("objective") or "",
                               "criteria": self.goal.get("criteria") or "",
                               "rounds": _goal_rounds_limit(self.goal, self.goal_rounds)})
+            if self.checklist:
+                self.bridge.emit({"type": "goal", "state": "checklist", "round": 0,
+                                  "objective": self.goal.get("objective") or "",
+                                  "points": [dict(p) for p in self.checklist]})
         user_content = user_text
         images_count = 0
         raw_images = [i for i in (list(images or []) + ([image] if image else [])) if i]

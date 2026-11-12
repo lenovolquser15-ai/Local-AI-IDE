@@ -9,6 +9,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from . import dnsfix
+from . import LOCALHARNESS
 from . import llm as llm_mod
 from . import lms as lms_mod
 from . import plugins
@@ -16,7 +17,7 @@ from . import schemas
 from . import session as session_mod
 from . import vision as vision_mod
 from .agent import Agent, Bridge
-from .config import DATA_DIR, ROOT, load, save
+from .config import DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save
 
 RUNS = {}
 RUNS_LOCK = threading.Lock()
@@ -262,7 +263,7 @@ class Handler(BaseHTTPRequestHandler):
             pl = plugins.status()
             tools_list = [spec["name"] for spec in schemas.entries(cfg.get("tool_profile", "core"))]
             _json_response(self, {
-                "version": "0.2.0",
+                "version": LOCALHARNESS,
                 "uptime": int(time.time() - STARTED),
                 "provider": cfg["provider"],
                 "providers": {k: v["label"] for k, v in cfg["providers"].items()},
@@ -277,6 +278,8 @@ class Handler(BaseHTTPRequestHandler):
                 "lms_ttl": cfg.get("lms_ttl"),
                 "workspace": cfg.get("workspace"),
                 "system_prompt": cfg.get("system_prompt", ""),
+                "search_searxng": cfg.get("search_searxng", False),
+                "search_searxng_url": cfg.get("search_searxng_url", "http://127.0.0.1:8080"),
                 "sessions": session_mod.list_sessions(),
                 "tools": tools_list,
                 "plugins": pl,
@@ -576,9 +579,10 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, {"ok": False, "error": str(exc)}, 400)
 
     def handle_config(self, body):
-        cfg = load()
-        cfg.update(body.get("config", {}))
-        save(cfg)
+        with CONFIG_LOCK:
+            cfg = load()
+            cfg.update(body.get("config", {}))
+            save(cfg)
         with _PROBE["lock"]:
             _PROBE["at"] = 0.0
         _json_response(self, {"ok": True, "config": cfg})

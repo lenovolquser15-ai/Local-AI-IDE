@@ -8,15 +8,18 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
-sys.path.insert(0, "C:/LocalHarness")
-os.environ["LH_DATA"] = "C:/LocalHarness/tests/.tmp"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
+# config.json is gitignored and absent on a fresh clone: load() must return defaults
+os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
 from harness import config as config_mod  # noqa: E402
 from harness import schemas  # noqa: E402
 from harness import tools as tools_mod  # noqa: E402
 from harness.agent import Agent, Bridge, refine_goal  # noqa: E402
 from harness import session as session_mod  # noqa: E402
 
-TMP = "C:/LocalHarness/tests/.tmp"
+TMP = os.path.join(ROOT, "tests", ".tmp").replace("\\", "/")
 FAILURES = []
 
 
@@ -156,7 +159,7 @@ def test_refine_unit():
 
 
 def test_finish_guard():
-    cfg = json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
+    cfg = config_mod.load()
     cfg["workspace"] = TMP
     sid = session_mod.create("guard")
     agent = Agent(cfg, Bridge(), sid)
@@ -223,7 +226,7 @@ def test_goal_flow():
     httpd = ThreadingHTTPServer(("127.0.0.1", 12993), Scripted)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     time.sleep(0.3)
-    cfg = json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
+    cfg = config_mod.load()
     cfg["providers"]["scripted"] = {"label": "Scripted", "base_url": "http://127.0.0.1:12993/v1", "api_key": "x"}
     cfg["provider"] = "scripted"
     cfg["model"] = "scripted/model"
@@ -268,7 +271,7 @@ def test_agent_blocks_reboot():
     """Агент не должен выполнить перезагрузку, даже если её попросила модель."""
     import json as _json
     from harness.agent import Agent, Bridge
-    cfg = _json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
+    cfg = config_mod.load()
     cfg["workspace"] = TMP
     cfg["permissions"] = {"mode": "unrestricted"}
     agent = Agent(cfg, Bridge(), "test-guard")
@@ -293,6 +296,73 @@ def test_browser_hint():
           "нельзя" in text.lower() and ("web_fetch" in text or "web_search" in text))
 
 
+def test_browser_ws_handshake():
+    """_connect обязан вернуть фрейм с сокетом и сохранить хвост после заголовков."""
+    from harness import browser as browser_mod
+
+    class FakeSock:
+        def __init__(self, data):
+            self.data = data
+            self.sent = []
+
+        def sendall(self, b):
+            self.sent.append(b)
+
+        def settimeout(self, t):
+            pass
+
+        def recv(self, n):
+            out, self.data = self.data[:n], self.data[n:]
+            return out
+
+        def close(self):
+            pass
+
+    frame_bytes = b"\x81\x05hello"
+    resp = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n" + frame_bytes
+    sock = FakeSock(resp)
+    with patch.object(browser_mod.socket, "create_connection", return_value=sock):
+        got_sock, frame = browser_mod._connect("ws://127.0.0.1:9222/devtools/page/x")
+    check("ws: фрейм получил сокет", got_sock is sock and frame.sock is sock)
+    check("ws: хвост handshake не потерян", frame.read_frame(1) == b"hello")
+    check("ws: upgrade-запрос отправлен", sock.sent and b"Upgrade: websocket" in sock.sent[0])
+
+
+def test_config_patch_race():
+    """Одновременные patch конфига не должны перетирать друг друга (load→update→save под lock)."""
+    import tempfile
+    from harness import config as c
+    old_path = c.CONFIG_PATH
+    fd, path = tempfile.mkstemp(suffix=".json")
+    os.close(fd)
+    c.CONFIG_PATH = path
+    try:
+        c.save({})
+        errors = []
+
+        def patch(k, v):
+            try:
+                with c.LOCK:
+                    cfg = c.load()
+                    cfg[k] = v
+                    c.save(cfg)
+            except Exception as exc:
+                errors.append(str(exc))
+
+        threads = [threading.Thread(target=patch, args=("key%d" % i, i), daemon=True) for i in range(12)]
+        for th in threads:
+            th.start()
+        for th in threads:
+            th.join(timeout=10)
+        cfg = c.load()
+        check("config race: все ключи на месте", all(cfg.get("key%d" % i) == i for i in range(12)),
+              str(sorted(k for k in cfg if k.startswith("key"))))
+        check("config race: без ошибок", not errors, str(errors))
+    finally:
+        c.CONFIG_PATH = old_path
+        os.remove(path)
+
+
 def main():
     os.makedirs(TMP, exist_ok=True)
     test_ssh()
@@ -304,6 +374,8 @@ def main():
     test_machine_guards()
     test_agent_blocks_reboot()
     test_browser_hint()
+    test_browser_ws_handshake()
+    test_config_patch_race()
     print("FAILURES:", len(FAILURES))
     return 1 if FAILURES else 0
 

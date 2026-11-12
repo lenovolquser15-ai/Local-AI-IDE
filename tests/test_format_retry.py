@@ -11,12 +11,16 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, "C:/LocalHarness")
-os.environ["LH_DATA"] = "C:/LocalHarness/tests/.tmp"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
+# config.json is gitignored and absent on a fresh clone: load() must return defaults
+os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
+from harness import config as config_mod  # noqa: E402
 from harness.agent import Agent, Bridge  # noqa: E402
 from harness import session as session_mod  # noqa: E402
 
-LOG = open("C:/LocalHarness/tests/format_retry.log", "w", encoding="utf-8", buffering=1)
+LOG = open(os.path.join(ROOT, "tests", "format_retry.log"), "w", encoding="utf-8", buffering=1)
 
 # what a confused local model produces: the observation transcript, not an answer
 ECHO = ("user: [web_search] -> results for LM Studio\n"
@@ -89,7 +93,7 @@ def run_case(protocol, script, port):
     httpd = ThreadingHTTPServer(("127.0.0.1", port), Scripted)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     time.sleep(0.3)
-    base = json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
+    base = config_mod.load()
     base["providers"]["scripted"] = {"label": "Scripted", "base_url": "http://127.0.0.1:%d/v1" % port, "api_key": "x"}
     base["provider"] = "scripted"
     base["model"] = "scripted/model"

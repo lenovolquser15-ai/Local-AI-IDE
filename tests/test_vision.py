@@ -8,8 +8,12 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, "C:/LocalHarness")
-os.environ["LH_DATA"] = "C:/LocalHarness/tests/.tmp"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
+# config.json is gitignored and absent on a fresh clone: load() must return defaults
+os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
+from harness import config as config_mod  # noqa: E402
 from harness import llm as llm_mod  # noqa: E402
 from harness import lms as lms_mod  # noqa: E402
 from harness import session as session_mod  # noqa: E402
@@ -184,7 +188,7 @@ def main():
     finally:
         lms_mod.disk_models = old_disk
 
-    tmp = "C:/LocalHarness/tests/.tmp"
+    tmp = os.path.join(ROOT, "tests", ".tmp")
     os.makedirs(tmp, exist_ok=True)
     shot = red_png(os.path.join(tmp, "vision_test_shot.png"))
     data_url = vision_mod.encode_path(shot)
@@ -214,7 +218,7 @@ def main():
     check("[THINK]" not in llm_mod.strip_reasoning("[THINK]секрет[/THINK]видно"), "strip_reasoning: [THINK] остался")
 
     # 5. JSON-протокол: скриншот приходит модели картинкой в блоке наблюдений
-    cfg = json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
+    cfg = config_mod.load()
     cfg["providers"]["visionmock"] = {"label": "VisionMock", "base_url": "http://127.0.0.1:%d/v1" % PORT,
                                       "api_key": "x", "autostart": False}
     cfg["provider"] = "visionmock"

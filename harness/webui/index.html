@@ -27,6 +27,7 @@
       <div class="chip" id="modelCount">моделей: …</div>
       <div class="chip" id="toolsChip">инструментов: …</div>
       <div class="chip" id="plugChip">плагины: …</div>
+      <button id="gearBtn" class="gear-btn" type="button" title="Настройки"><span class="gear-ico">⚙</span><span class="gear-label">Настройки</span></button>
     </div>
   </aside>
 
@@ -138,11 +139,7 @@
       <div class="band goal-band" id="goalBand" hidden>
         <span class="goal-state" id="goalState">цель: не активна</span>
         <span class="goal-text" id="goalText"></span>
-      </div>
-      <div class="quick-controls" aria-label="Быстрые настройки">
-        <label class="check-pill"><input type="checkbox" id="showReasoning" checked><span>⌁ Показывать раздумья</span></label>
-        <label class="check-pill"><input type="checkbox" id="expandReasoning"><span>Разворачивать раздумья</span></label>
-        <label class="check-pill"><input type="checkbox" id="autoCompress" checked><span>Сжимать контекст</span></label>
+        <div class="goal-checklist" id="goalChecklist" hidden></div>
       </div>
       <div class="input-shell">
         <div class="attach-strip" id="attachStrip" hidden></div>
@@ -185,6 +182,34 @@
     <div class="right-label">Действия</div>
     <div id="trace" class="trace"></div>
   </aside>
+
+  <div id="settingsDrawer" class="drawer" aria-hidden="true">
+    <div class="drawer-head">
+      <span class="plate-title">Настройки</span>
+      <span class="grow"></span>
+      <button id="drawerClose" class="icon" type="button" title="Закрыть">✕</button>
+    </div>
+    <div class="settings-block">
+      <div class="plate-title">Внешний вид</div>
+      <label class="check-pill"><input type="checkbox" id="showReasoning" checked><span>⌁ Показывать раздумья</span></label>
+      <label class="check-pill"><input type="checkbox" id="expandReasoning"><span>Разворачивать раздумья</span></label>
+      <label class="check-pill"><input type="checkbox" id="autoCompress" checked><span>Сжимать контекст</span></label>
+      <label class="check-pill"><input type="checkbox" id="goalChecklistToggle" checked><span>Показывать галочки в цели</span></label>
+    </div>
+    <div class="settings-block">
+      <div class="plate-title">Поиск</div>
+      <label class="autostart-label"><input id="searxngEnabled" type="checkbox"> SearXNG — свой инстанс, без общих лимитов</label>
+      <div class="urlrow">
+        <input type="text" id="searxngUrl" class="field grow" placeholder="http://127.0.0.1:8080">
+      </div>
+      <div class="page-sub">Нужен свой SearXNG (например, Docker searxng/searxng) с JSON-выдачей: в settings.yml — search.formats: [html, json]. Включённый инстанс опрашивается первым; DuckDuckGo, Bing и остальные остаются запасными.</div>
+    </div>
+    <div class="settings-block">
+      <div class="plate-title">Помощь</div>
+      <a id="bugReport" class="bug-link" href="https://github.com/lenovolquser15-ai/Local-AI-IDE/issues/new" target="_blank" rel="noopener">Нашли баг? Расскажите нам о нём →</a>
+      <div class="page-sub">Откроется GitHub Issues репозитория. Напиши, что делал и что увидел — так починим быстрее.</div>
+    </div>
+  </div>
 
 </div>
 <dialog id="deleteDialog" aria-labelledby="deleteQuestion">

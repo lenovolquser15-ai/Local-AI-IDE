@@ -43,10 +43,12 @@ DEFAULTS = {
     "temperature": 0.4,
     "max_tokens": 1500,
     "search_engine": "auto",
+    "search_searxng": False,
+    "search_searxng_url": "http://127.0.0.1:8080",
     "chrome_cdp": "http://127.0.0.1:9222",
 }
 
-LOCK = threading.Lock()
+LOCK = threading.RLock()
 
 def app_root():
     if getattr(sys, 'frozen', False):

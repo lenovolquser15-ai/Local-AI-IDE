@@ -1,20 +1,76 @@
 """Глобальный веб-поиск: несколько движков и вертикальные базы.
 
 Один поисковик перестал справляться: то отдаёт «anomaly», то пустую выдачу, то капчу.
-Здесь движки перебираются по очереди, результаты склеиваются и дедуплицируются,
-а вертикальные API (Wikipedia, StackOverflow, GitHub, arXiv, npm, PyPI, Hacker News)
-добирают выдачу, когда поисковик молчит. Каждый источник изолирован: его ошибка
-не роняет поиск, а попадает в отчёт об источниках.
+Здесь движки разных провайдеров опрашиваются параллельно (внутри одного провайдера —
+последовательно, чтобы не ловить капчу всем семейством сразу), результаты склеиваются
+через reciprocal rank fusion и дедуплицируются, а вертикальные API (Wikipedia,
+StackOverflow, GitHub, arXiv, npm, PyPI, Hacker News) добирают выдачу, когда поисковик
+молчит. Каждый источник изолирован: его ошибка не роняет поиск, а попадает в отчёт
+об источниках. Успешные ответы кэшируются на CACHE_TTL, отказавший движок отдыхает
+COOLDOWN_* секунд — повторные запросы агента не добивают rate-limit.
 """
 import base64
+import copy
 import json
 import re
+import threading
+import time
 import urllib.parse
+from concurrent.futures import ThreadPoolExecutor
 from html import unescape as html_unescape
 
 from . import netio
 
 DEFAULT_TIMEOUT = 20.0
+
+CACHE_TTL = 600.0
+CACHE_MAX = 128
+COOLDOWN_BLOCKED = 300.0
+COOLDOWN_ERROR = 60.0
+RRF_K = 60
+
+_state_lock = threading.Lock()
+_cache = {}
+_cooldown = {}
+
+
+def reset_state():
+    """Сброс кэша и кулдаунов (для тестов)."""
+    with _state_lock:
+        _cache.clear()
+        _cooldown.clear()
+
+
+def _cache_get(key):
+    now = time.monotonic()
+    with _state_lock:
+        hit = _cache.get(key)
+        if hit and hit[0] > now:
+            return copy.deepcopy(hit[1])
+        _cache.pop(key, None)
+    return None
+
+
+def _cache_put(key, result):
+    now = time.monotonic()
+    with _state_lock:
+        for stale in [k for k, v in _cache.items() if v[0] <= now]:
+            _cache.pop(stale, None)
+        while len(_cache) >= CACHE_MAX:
+            _cache.pop(next(iter(_cache)))
+        _cache[key] = (now + CACHE_TTL, copy.deepcopy(result))
+
+
+def _cooldown_left(name):
+    with _state_lock:
+        return max(0.0, _cooldown.get(name, 0.0) - time.monotonic())
+
+
+def _cooldown_set(name, exc):
+    text = str(exc).lower()
+    blocked = any(w in text for w in ("anomaly", "captcha", "капча", "заглушк", "unusual traffic"))
+    with _state_lock:
+        _cooldown[name] = time.monotonic() + (COOLDOWN_BLOCKED if blocked else COOLDOWN_ERROR)
 
 
 def _fetch(url, timeout=DEFAULT_TIMEOUT, headers=None, data=None):
@@ -270,6 +326,34 @@ def rightdao(query, count=8, timeout=DEFAULT_TIMEOUT):
     return results
 
 
+def searxng(query, count=8, timeout=DEFAULT_TIMEOUT, base_url="http://127.0.0.1:8080"):
+    """Свой инстанс SearXNG: агрегирует десятки движков с твоего IP, без общих лимитов.
+    Включается галочкой в настройках; инстанс должен отдавать JSON (search.formats)."""
+    url = (base_url or "").rstrip("/") + "/search?" + urllib.parse.urlencode({
+        "q": query, "format": "json", "pageno": 1})
+    text = _fetch(url, timeout)
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise RuntimeError("searxng вернул не JSON — включи search.formats: [html, json] в settings.yml инстанса")
+    results = []
+    for row in data.get("results") or []:
+        if row.get("url"):
+            results.append(_item(row.get("title") or "", row["url"], row.get("content") or "", "searxng"))
+        if len(results) >= count:
+            break
+    if not results:
+        raise RuntimeError("searxng не вернул результатов")
+    return results
+
+
+def _searxng_engine(base_url):
+    def fn(query, count=8, timeout=DEFAULT_TIMEOUT):
+        return searxng(query, count, timeout, base_url=base_url)
+    fn.__name__ = "searxng"
+    return fn
+
+
 # ---------- вертикальные базы ----------
 
 def ddg_ia(query, count=5, timeout=DEFAULT_TIMEOUT):
@@ -477,8 +561,79 @@ def _run(fn, query, count, timeout):
     return fn(query, count, timeout) or []
 
 
-def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT):
-    """Ищет по нескольким источникам. engine='auto' — перебор с откатом."""
+# Один провайдер — одна очередь: html и lite DuckDuckGo делят rate-limit,
+# одновременный запрос к обоим ловит капчу быстрее.
+PROVIDERS = {"duckduckgo": "ddg", "ddg_lite": "ddg", "ddg_ia": "ddg"}
+
+
+def _run_group(fns, query, count, timeout, errors, relevance, respect_cooldown=True):
+    got = []
+    for fn in fns:
+        name = fn.__name__
+        if respect_cooldown:
+            left = _cooldown_left(name)
+            if left:
+                errors[name] = "cooldown: пропущен, отдохнёт ещё %.0f с" % left
+                continue
+        try:
+            items = _run(fn, query, count, timeout)
+        except Exception as exc:
+            errors[name] = str(exc)[:200]
+            _cooldown_set(name, exc)
+            continue
+        if relevance:
+            items = _relevant(items, query)
+            if not items:
+                errors[name] = "выдача не относится к запросу"
+                continue
+        got.append((name, items))
+        if sum(len(part) for _, part in got) >= count:
+            break
+    return got
+
+
+def _run_parallel(groups, query, count, timeout, errors, relevance):
+    if len(groups) == 1:
+        return _run_group(groups[0][1], query, count, timeout, errors, relevance)
+    with ThreadPoolExecutor(max_workers=len(groups)) as pool:
+        futures = [pool.submit(_run_group, fns, query, count, timeout, errors, relevance)
+                   for _, fns in groups]
+        return [pair for fut in futures for pair in fut.result()]
+
+
+def _rrf(lists):
+    """Reciprocal rank fusion: результат, который несколько движков поставили высоко,
+    обгоняет одиночного фаворита. Дедуп по URL; при равенстве — порядок плана."""
+    fused = {}
+    for idx, (_, items) in enumerate(lists):
+        for rank, item in enumerate(items):
+            key = _norm_url(item.get("url") or "")
+            if not key:
+                continue
+            entry = fused.get(key)
+            if entry is None:
+                fused[key] = [1.0 / (RRF_K + rank + 1), idx, rank, item]
+            else:
+                entry[0] += 1.0 / (RRF_K + rank + 1)
+                if (idx, rank) < (entry[1], entry[2]):
+                    entry[1], entry[2], entry[3] = idx, rank, item
+    return [e[3] for e in sorted(fused.values(), key=lambda e: (-e[0], e[1], e[2]))]
+
+
+def _groups(plan):
+    groups = []
+    for fn in plan:
+        provider = PROVIDERS.get(fn.__name__, fn.__name__)
+        if groups and groups[-1][0] == provider:
+            groups[-1][1].append(fn)
+        else:
+            groups.append((provider, [fn]))
+    return groups
+
+
+def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=None):
+    """Ищет по нескольким источникам. engine='auto' — параллельно с RRF-слиянием.
+    searxng_url — включённый в настройках свой инстанс; опрашивается первым."""
     query = (query or "").strip()
     if not query:
         return {"query": "", "engine": engine, "results": [], "sources": [], "errors": {}}
@@ -488,49 +643,54 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT):
     if name != "auto":
         name = ALIASES_NORM.get(name, name)
 
-    if name != "auto" and name not in ENGINES_NORM:
+    general = list(GENERAL)
+    engines_norm = dict(ENGINES_NORM)
+    if searxng_url:
+        searxng_fn = _searxng_engine(searxng_url)
+        general.insert(0, searxng_fn)
+        engines_norm["searxng"] = searxng_fn
+
+    if name != "auto" and name not in engines_norm:
+        if name == "searxng":
+            err = "searxng не включён: отметь галочку в настройках и укажи URL своего инстанса"
+        else:
+            err = "неизвестный движок. Доступны: %s" % ", ".join(
+                engine_names() + (["searxng"] if searxng_url else []))
         return {"query": query, "engine": raw_name, "results": [], "sources": [],
-                "errors": {raw_name: "неизвестный движок. Доступны: %s" % ", ".join(engine_names())}}
+                "errors": {raw_name: err}}
 
-    plan = [ENGINES_NORM[name]] if name != "auto" else list(GENERAL)
-    results, sources, errors = [], [], {}
-    general_names = {fn.__name__ for fn in GENERAL}
+    key = (query.lower(), count, name, searxng_url or "")
+    cached = _cache_get(key)
+    if cached is not None:
+        cached["cached"] = True
+        return cached
 
-    def add(items):
-        for item in items:
-            key = _norm_url(item.get("url") or "")
-            if not key or any(_norm_url(r.get("url") or "") == key for r in results):
-                continue
-            results.append(item)
+    errors = {}
+    general_names = {fn.__name__ for fn in general}
+    if name != "auto":
+        fn = engines_norm[name]
+        lists = _run_group([fn], query, count, timeout, errors,
+                           relevance=fn.__name__ in general_names, respect_cooldown=False)
+        results = _rrf(lists)
+        sources = [n for n, items in lists if items]
+    else:
+        lists = _run_parallel(_groups(general), query, count, timeout, errors, relevance=True)
+        results = _rrf(lists)
+        sources = [n for n, items in lists if items]
+        if len(results) < count:
+            vlists = _run_parallel(_groups(VERTICALS), query, count, timeout, errors, relevance=False)
+            sources += [n for n, items in vlists if items]
+            seen = {_norm_url(r.get("url") or "") for r in results}
+            for item in _rrf(vlists):
+                if len(results) >= count:
+                    break
+                k = _norm_url(item.get("url") or "")
+                if k and k not in seen:
+                    seen.add(k)
+                    results.append(item)
 
-    # перебор с откатом: идём по движкам, пока не наберём достаточно
-    for fn in plan:
-        try:
-            got = _run(fn, query, count, timeout)
-        except Exception as exc:
-            errors[fn.__name__] = str(exc)[:200]
-            continue
-        if fn.__name__ in general_names:
-            got = _relevant(got, query)
-            if not got:
-                errors[fn.__name__] = "выдача не относится к запросу"
-                continue
-        sources.append(fn.__name__)
-        add(got)
-        if len(results) >= count:
-            break
-
-    if name == "auto" and len(results) < count:
-        for fn in VERTICALS:
-            if len(results) >= count:
-                break
-            try:
-                got = _run(fn, query, count, timeout)
-            except Exception as exc:
-                errors[fn.__name__] = str(exc)[:200]
-                continue
-            sources.append(fn.__name__)
-            add(got)
-
-    return {"query": query, "engine": name, "count": count, "results": results[:count],
-            "sources": sources, "errors": errors}
+    res = {"query": query, "engine": name, "count": count, "results": results[:count],
+           "sources": sources, "errors": errors}
+    if res["results"]:
+        _cache_put(key, res)
+    return res

@@ -22,6 +22,8 @@ let plugFilter = '';
 let lmJobTimer = null;
 let showReasoning = localStorage.getItem('lh.showReasoning') !== '0';
 let expandReasoning = localStorage.getItem('lh.expandReasoning') === '1';
+let showGoalChecklist = localStorage.getItem('lh.goalChecklist') !== '0';
+let lastGoalPoints = null;
 let attached = [];
 const ATTACH_MAX = 10 * 1024 * 1024;
 const ATTACH_TYPES = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
@@ -198,6 +200,7 @@ function syncQuickControls() {
   $('#showReasoning').checked = showReasoning;
   $('#expandReasoning').checked = expandReasoning;
   $('#autoCompress').checked = localStorage.getItem('lh.autoCompress') !== '0';
+  $('#goalChecklistToggle').checked = showGoalChecklist;
   app.classList.toggle('thinkoff', !showReasoning);
 }
 
@@ -382,12 +385,44 @@ async function respond(key, value) {
   catch (err) { pushNotice(err.message, 'bad'); }
 }
 
+function renderChecklist(points) {
+  const box = $('#goalChecklist');
+  if (points) lastGoalPoints = points;
+  if (!showGoalChecklist) { box.hidden = true; box.innerHTML = ''; return; }
+  if (!points || !points.length) { box.hidden = true; box.innerHTML = ''; return; }
+  const done = points.filter((p) => p.done).length;
+  box.hidden = false;
+  box.innerHTML = '<div class="goal-progress">пункты ' + done + '/' + points.length + '</div>' +
+    points.map((p) => (
+      '<label class="goal-point' + (p.done ? ' done' : '') + '">' +
+      '<input type="checkbox" disabled' + (p.done ? ' checked' : '') + '>' +
+      '<span>' + esc(p.text || '') + '</span>' +
+      (p.evidence ? '<em class="goal-evidence" title="' + esc(p.evidence) + '">проверено</em>' : '') +
+      '</label>'
+    )).join('');
+}
+
 function goalBand(ev) {
   const el = $('#goalBand');
   el.hidden = false;
   const state = $('#goalState');
   const text = $('#goalText');
   state.className = 'goal-state';
+  if (ev.state === 'checklist' || ev.state === 'point') {
+    renderChecklist(ev.points);
+    const pts = ev.points || [];
+    const done = pts.filter((p) => p.done).length;
+    state.textContent = ev.state === 'point'
+      ? (ev.done ? 'пункт ' + ev.index + ' отмечен' : 'пункт ' + ev.index + ' снят')
+      : 'цель: чеклист';
+    text.textContent = pts.length ? ('выполнено ' + done + '/' + pts.length) : '';
+    if (ev.state === 'point' && pts.length && done === pts.length) {
+      state.textContent = 'все пункты отмечены';
+      state.classList.add('done');
+    }
+    return;
+  }
+  if (ev.state === 'refined' || ev.state === 'started') renderChecklist(null);
   const map = {
     refined: ['цель уточнена', (ev.objective || '') + (ev.criteria ? ' · критерий: ' + ev.criteria : '')],
     started: ['цель запущена', 'подходов: ' + (ev.rounds > 0 ? ev.rounds : '∞') + ' · ' + (ev.objective || '') + (ev.criteria ? ' · критерий: ' + ev.criteria : '')],
@@ -492,6 +527,8 @@ async function send() {
   turn = null; resetStream(); dropDive(); closeBand();
   $('#trace').innerHTML = '';
   $('#goalBand').hidden = !$('#goalMode').checked;
+  $('#goalChecklist').hidden = true;
+  $('#goalChecklist').innerHTML = '';
   $('#stopBtn').disabled = false;
   $('#send').disabled = true;
   $('#stat').textContent = 'думаю…';
@@ -525,6 +562,8 @@ async function openSession(id) {
   thread.innerHTML = '';
   $('#trace').innerHTML = '';
   $('#goalBand').hidden = true;
+  $('#goalChecklist').hidden = true;
+  $('#goalChecklist').innerHTML = '';
   $('#ctxBar').hidden = true;
   $('#speed').textContent = '';
   $('#stat').textContent = '';
@@ -605,6 +644,8 @@ async function refreshState() {
   $('#lmContext').value = st.lms_context_length || st.context_tokens || 8192;
   $('#lmTtl').value = st.lms_ttl || 0;
   if (document.activeElement !== $('#systemPrompt')) $('#systemPrompt').value = st.system_prompt || '';
+  $('#searxngEnabled').checked = !!st.search_searxng;
+  if (document.activeElement !== $('#searxngUrl')) $('#searxngUrl').value = st.search_searxng_url || 'http://127.0.0.1:8080';
   $('#toolsChip').textContent = 'инструментов: ' + (st.tools || []).length + ' · профиль ' + (st.tool_profile || 'core');
   $('#toolsChip').title = (st.tools || []).join(', ');
   fillSelect($('#provider'), Object.keys(st.providers || {}).map((k) => [k, st.providers[k]]), st.provider);
@@ -1063,6 +1104,18 @@ $('#railBtn').onclick = () => {
   app.classList.toggle('rail');
   localStorage.setItem('lh.rail', app.classList.contains('rail') ? '1' : '0');
 };
+const settingsDrawer = () => $('#settingsDrawer');
+function setSettingsDrawer(open) {
+  const d = settingsDrawer();
+  if (!d) return;
+  if (!open && d.contains(document.activeElement)) $('#gearBtn').focus();
+  d.classList.toggle('open', open);
+  d.setAttribute('aria-hidden', open ? 'false' : 'true');
+  $('#gearBtn').classList.toggle('on', open);
+}
+$('#gearBtn').onclick = () => setSettingsDrawer(!settingsDrawer().classList.contains('open'));
+$('#drawerClose').onclick = () => setSettingsDrawer(false);
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setSettingsDrawer(false); });
 $('#showReasoning').onchange = (e) => {
   showReasoning = e.target.checked;
   localStorage.setItem('lh.showReasoning', showReasoning ? '1' : '0');
@@ -1076,6 +1129,12 @@ $('#expandReasoning').onchange = (e) => {
 $('#autoCompress').onchange = (e) => {
   localStorage.setItem('lh.autoCompress', e.target.checked ? '1' : '0');
   patchConfig('context_mode', e.target.checked ? 'auto' : 'off');
+};
+$('#goalChecklistToggle').onchange = (e) => {
+  showGoalChecklist = e.target.checked;
+  localStorage.setItem('lh.goalChecklist', showGoalChecklist ? '1' : '0');
+  if (showGoalChecklist) renderChecklist(lastGoalPoints);
+  else { const box = $('#goalChecklist'); box.hidden = true; box.innerHTML = ''; }
 };
 $('#thinkBtn').onclick = () => {
   const off = app.classList.toggle('thinkoff');
@@ -1112,6 +1171,8 @@ $('#plugInstallUrl').onclick = async () => {
 };
 $('#lmContext').onchange = (e) => patchConfig('lms_context_length', Number(e.target.value) || 8192);
 $('#lmTtl').onchange = (e) => patchConfig('lms_ttl', Number(e.target.value) || 0);
+$('#searxngEnabled').onchange = (e) => patchConfig('search_searxng', e.target.checked);
+$('#searxngUrl').onchange = (e) => patchConfig('search_searxng_url', e.target.value.trim() || 'http://127.0.0.1:8080');
 $('#lmsRefresh').onclick = refreshLM;
 $('#lmsWake').onclick = async () => {
   $('#lmBase').textContent = 'сервер: поднимаю…';

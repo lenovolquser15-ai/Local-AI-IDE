@@ -13,8 +13,12 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, "C:/LocalHarness")
-os.environ["LH_DATA"] = "C:/LocalHarness/tests/.tmp"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
+os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
+# config.json is gitignored and absent on a fresh clone: load() must return defaults
+os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
+from harness import config as config_mod  # noqa: E402
 from harness import llm as llm_mod  # noqa: E402
 from harness.agent import Agent, Bridge, fold, fold_hard, _goal_rounds_limit  # noqa: E402
 from harness import session as session_mod  # noqa: E402
@@ -269,11 +273,11 @@ def _server(script, port):
 
 
 def _cfg(port):
-    cfg = json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
+    cfg = config_mod.load()
     cfg["providers"]["scripted"] = {"label": "Scripted", "base_url": "http://127.0.0.1:%d/v1" % port, "api_key": "x"}
     cfg["provider"] = "scripted"
     cfg["model"] = "scripted/model"
-    cfg["workspace"] = "C:/LocalHarness/tests/.tmp"
+    cfg["workspace"] = os.path.join(ROOT, "tests", ".tmp")
     cfg["max_steps"] = 6
     cfg["permissions"] = {"mode": "unrestricted"}
     cfg["goal_rounds"] = 0
@@ -289,7 +293,7 @@ def _call_msg(name, args):
 def test_infinite_until_finish():
     # Many approaches (> old default 6): each approach = one real tool call, then a text answer
     # (no finish_goal) so the turn ends and run() nudges into the next approach. Finally finish_goal.
-    tmp = "C:/LocalHarness/tests/.tmp"
+    tmp = os.path.join(ROOT, "tests", ".tmp")
 
     def script(i):
         if i == 0:  # refine_goal
@@ -341,7 +345,7 @@ def test_infinite_user_stop():
     def script(i):
         if i == 0:
             return {"content": '{"objective":"долгая задача","criteria":"","plan":[]}'}
-        return _call_msg("list_dir", {"path": "C:/LocalHarness/tests/.tmp"})
+        return _call_msg("list_dir", {"path": os.path.join(ROOT, "tests", ".tmp")})
 
     httpd = _server(script, 12989)
     try:
@@ -366,7 +370,7 @@ def test_infinite_user_stop():
 
 
 def main():
-    os.makedirs("C:/LocalHarness/tests/.tmp", exist_ok=True)
+    os.makedirs(os.path.join(ROOT, "tests", ".tmp"), exist_ok=True)
     test_normalize_cases()
     test_normalize_fuzz()
     test_fold_then_normalize()

@@ -17,6 +17,7 @@ import time
 from .config import DATA_DIR
 
 IPS = {}
+EXPIRES = {}
 LOCK = threading.Lock()
 CACHE_FILE = os.path.join(DATA_DIR, "dns_cache.json")
 SERVERS = ("1.1.1.1", "8.8.8.8", "9.9.9.9")
@@ -34,8 +35,10 @@ def _load_cache():
             blob = json.load(fh)
         now = time.time()
         for host, item in blob.items():
-            if item.get("expires", 0) > now and item.get("ip"):
+            expires = item.get("expires", 0)
+            if expires > now and item.get("ip"):
                 IPS[host] = item["ip"]
+                EXPIRES[host] = expires
     except Exception:
         pass
 
@@ -44,7 +47,10 @@ def _save_cache():
     blob = {}
     now = time.time()
     for host, ip in list(IPS.items()):
-        blob[host] = {"ip": ip, "expires": now + TTL}
+        expires = EXPIRES.get(host, 0)
+        if expires <= now:
+            continue
+        blob[host] = {"ip": ip, "expires": expires}
     try:
         with open(CACHE_FILE, "w", encoding="utf-8") as fh:
             json.dump(blob, fh)
@@ -121,8 +127,11 @@ def resolve(host, timeout=4.0):
         return host
     with LOCK:
         hit = IPS.get(host)
-        if hit:
+        if hit and EXPIRES.get(host, 0) > time.time():
             return hit
+        if hit:
+            IPS.pop(host, None)
+            EXPIRES.pop(host, None)
     ips = None
     for step in (_via_dnspython, _via_powershell, _via_nslookup):
         ips = step(host, timeout)
@@ -133,6 +142,7 @@ def resolve(host, timeout=4.0):
     ip = ips[0]
     with LOCK:
         IPS[host] = ip
+        EXPIRES[host] = time.time() + TTL
         _save_cache()
     return ip
 
@@ -158,7 +168,6 @@ def connection_for(url, timeout=30.0):
     scheme = url.split("://", 1)[0]
     rest = url.split("://", 1)[1]
     host = rest.split("/", 1)[0]
-    path = "/" + rest.split("/", 1)[1] if "/" in rest else "/"
     if ":" in host:
         hostname, port = host.rsplit(":", 1)
     else:

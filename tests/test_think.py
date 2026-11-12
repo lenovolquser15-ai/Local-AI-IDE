@@ -6,9 +6,13 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-sys.path.insert(0, "C:/LocalHarness")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, ROOT)
 # sessions must not land in the app's real data/sessions
-os.environ["LH_DATA"] = "C:/LocalHarness/tests/.tmp"
+os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
+# config.json is gitignored and absent on a fresh clone: load() must return defaults
+os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
+from harness import config as config_mod  # noqa: E402
 from harness import llm as llm_mod  # noqa: E402
 from harness import session as session_mod  # noqa: E402
 from harness.agent import Agent, QueueBridge  # noqa: E402
@@ -96,7 +100,7 @@ def main():
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     time.sleep(0.3)
 
-    cfg = json.load(open("C:/LocalHarness/config.json", encoding="utf-8"))
+    cfg = config_mod.load()
     cfg["providers"]["thinkmock"] = {"label": "ThinkMock", "base_url": "http://127.0.0.1:%d/v1" % PORT,
                                      "api_key": "x", "autostart": False}
     cfg["provider"] = "thinkmock"

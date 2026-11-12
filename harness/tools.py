@@ -59,12 +59,12 @@ def kill_tree(pid):
         pass
 
 
-def run_capture(argv, timeout, cwd=None, flags=0):
+def run_capture(argv, timeout, cwd=None, flags=0, env=None):
     """Запуск без интерактива: stdin закрыт, поэтому ssh/curl не ждут пароль, а падают сразу.
     По таймауту убивается всё дерево процессов."""
     proc = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             stdin=subprocess.DEVNULL, cwd=cwd, creationflags=flags, shell=False,
-                            env=child_env())
+                            env=env or child_env())
     try:
         out, err = proc.communicate(timeout=float(timeout))
         return proc.returncode, out, err, False
@@ -514,7 +514,7 @@ class Toolkit:
             return {"ok": False, "error": "нужен pid"}
         meta = self.jobs.get(int(pid)) if str(pid).isdigit() else None
         if not meta:
-            for root, _, files in os.walk(os.path.join(DATA_DIR, "jobs")):
+            for root, _dirs, _files in os.walk(os.path.join(DATA_DIR, "jobs")):
                 if os.path.exists(os.path.join(root, "%s.log" % pid)):
                     meta = {"log": os.path.join(root, "%s.log" % pid)}
                     break
@@ -657,6 +657,162 @@ class Toolkit:
                     break
         return {"ok": True, "pattern": pattern, "scanned_files": len(files), "matches": hits}
 
+    # ---------- git ----------
+    GIT_ACTIONS = ("status", "diff", "log", "show", "add", "commit", "branch")
+
+    @staticmethod
+    def _git_bin():
+        found = shutil.which("git")
+        if found:
+            return found
+        for cand in (r"C:\Program Files\Git\cmd\git.exe", r"C:\Program Files (x86)\Git\cmd\git.exe"):
+            if os.path.isfile(cand):
+                return cand
+        return None
+
+    def _git_run(self, argv, cwd, timeout):
+        exe = self._git_bin()
+        if not exe:
+            return {"ok": False, "error": "git не найден — поставь Git for Windows и добавь его в PATH"}
+        env = child_env()
+        # без TTY: никаких редакторов/пейджеров и висящих запросов учётных данных
+        env.update({"GIT_TERMINAL_PROMPT": "0", "GIT_PAGER": "cat", "GIT_EDITOR": "true"})
+        full = [exe, "-c", "core.quotepath=false", "-c", "color.ui=false", "-c", "core.pager=cat"] + argv
+        try:
+            code, raw_out, raw_err, timed_out = run_capture(full, timeout, cwd=cwd, flags=NO_WINDOW, env=env)
+        except OSError as exc:
+            return {"ok": False, "error": "git не запустился: %s" % exc}
+        out = decode_bytes(raw_out)
+        err = decode_bytes(raw_err)
+        if timed_out:
+            return {"ok": False, "error": "git таймаут %s с" % timeout, "stdout": truncate(out, 4000)[0]}
+        return {"ok": code == 0, "exit": code, "stdout": truncate(out, 12000)[0], "stderr": truncate(err, 3000)[0]}
+
+    @staticmethod
+    def _git_friendly(res, root):
+        if res.get("ok"):
+            return res
+        raw = ((res.get("stderr") or "") + " " + (res.get("stdout") or "") + " "
+               + str(res.get("error") or "")).lower()
+        if "not a git repository" in raw:
+            res["error"] = "не git-репозиторий: %s" % root
+            res["hint"] = "перейди в папку с .git или создай репозиторий через shell: git init"
+        elif "nothing to commit" in raw:
+            res["error"] = "нечего коммитить — индекс пуст"
+            res["hint"] = "сначала git action=add (path=... или all=true), затем commit"
+        elif "please tell me who you are" in raw or "unable to auto-detect email" in raw:
+            res["error"] = "в git не настроены имя и почта автора"
+            res["hint"] = 'настрой один раз: git config --global user.name "Имя"; git config --global user.email "mail@example.com"'
+        elif not res.get("error"):
+            res["error"] = (res.get("stderr") or res.get("stdout") or "git завершился с ошибкой")[:1500].strip()
+        return res
+
+    def git(self, action="status", cwd=None, path=None, message=None, all=False,
+            staged=False, stat=False, rev=None, limit=15, name=None, timeout=30, **kw):
+        """Локальные git-операции: осмотр (status/diff/log/show), индекс (add), коммит, ветки.
+        Сеть (push/pull/fetch) сюда не входит: такие действия — только по явной просьбе через shell."""
+        action = str(action or "status").lower().strip()
+        if action not in self.GIT_ACTIONS:
+            return {"ok": False, "error": "action: %s" % "|".join(self.GIT_ACTIONS)}
+        root = resolve_path(cwd, self.workspace)
+        if os.path.isfile(root):
+            root = os.path.dirname(root)
+        if not os.path.isdir(root):
+            return {"ok": False, "error": "нет папки: %s" % root}
+        rel = None
+        if path:
+            rel = os.path.relpath(resolve_path(path, self.workspace), root)
+            if rel.startswith(".."):
+                return {"ok": False, "error": "путь вне репозитория: %s" % path}
+        timeout = max(5.0, min(float(timeout or 30), 120.0))
+
+        if action == "status":
+            res = self._git_run(["status", "--short", "--branch"], root, timeout)
+            if res.get("ok"):
+                lines = (res.get("stdout") or "").splitlines()
+                head = lines[0][3:] if lines and lines[0].startswith("## ") else ""
+                if head.startswith("No commits yet on "):
+                    branch = head[len("No commits yet on "):].strip()
+                else:
+                    branch = head.split("...")[0].split(" ")[0] if head else ""
+                res["branch"] = branch
+                res["clean"] = not any(l.strip() and not l.startswith("## ") for l in lines)
+                top = self._git_run(["rev-parse", "--show-toplevel"], root, timeout)
+                if top.get("ok"):
+                    res["repo"] = (top.get("stdout") or "").strip()
+        elif action == "diff":
+            argv = ["diff"]
+            if staged:
+                argv.append("--cached")
+            if stat:
+                argv.append("--stat")
+            if rev:
+                argv.append(str(rev))
+            if rel:
+                argv += ["--", rel]
+            res = self._git_run(argv, root, timeout)
+        elif action == "log":
+            argv = ["log", "--oneline", "--decorate", "-n", str(max(1, min(int(limit or 15), 200)))]
+            if rev:
+                argv.append(str(rev))
+            if rel:
+                argv += ["--", rel]
+            res = self._git_run(argv, root, timeout)
+            if res.get("ok"):
+                res["commits"] = len([l for l in (res.get("stdout") or "").splitlines() if l.strip()])
+        elif action == "show":
+            argv = ["show", "--stat", "--decorate", str(rev or "HEAD")]
+            if rel:
+                argv += ["--", rel]
+            res = self._git_run(argv, root, timeout)
+        elif action == "add":
+            if all:
+                # git add -A из подпапки цепляет весь репозиторий: разрешаем только из его корня
+                top = self._git_run(["rev-parse", "--show-toplevel"], root, timeout)
+                top_path = (top.get("stdout") or "").strip()
+                same = False
+                if top_path:
+                    try:
+                        same = os.path.samefile(top_path, root)
+                    except OSError:
+                        same = (os.path.normcase(os.path.normpath(top_path))
+                                == os.path.normcase(os.path.normpath(root)))
+                if top_path and not same:
+                    return {"ok": False,
+                            "error": "all=true только из корня репозитория: %s" % top_path,
+                            "hint": "укажи path=... или cwd=<корень репозитория>"}
+                argv = ["add", "-A"]
+            elif rel:
+                argv = ["add", "--", rel]
+            else:
+                return {"ok": False, "error": "укажи path или all=true"}
+            res = self._git_run(argv, root, timeout)
+            if res.get("ok"):
+                names = self._git_run(["diff", "--cached", "--name-only"], root, timeout)
+                staged_list = [l for l in (names.get("stdout") or "").splitlines() if l.strip()]
+                res["staged"] = staged_list[:50]
+                res["staged_count"] = len(staged_list)
+        elif action == "commit":
+            if not (message or "").strip():
+                return {"ok": False, "error": "нужен message"}
+            res = self._git_run(["commit", "-m", str(message)], root, timeout)
+            if res.get("ok"):
+                head = self._git_run(["show", "-s", "--oneline", "HEAD"], root, timeout)
+                res["commit"] = (head.get("stdout") or "").strip()
+        else:  # branch
+            if name:
+                name = str(name).strip()
+                exists = self._git_run(["rev-parse", "--verify", "--quiet", "refs/heads/%s" % name], root, timeout)
+                if exists.get("exit") == 0:
+                    res = self._git_run(["switch", name], root, timeout)
+                else:
+                    res = self._git_run(["switch", "-c", name], root, timeout)
+            else:
+                res = self._git_run(["branch", "--list", "--no-color"], root, timeout)
+        res = self._git_friendly(res, root)
+        res["root"] = root
+        return res
+
     # ---------- interpreter ----------
     def python(self, code=None, timeout=30, **kw):
         if not code:
@@ -665,11 +821,16 @@ class Toolkit:
 
     # ---------- web ----------
     def web_search(self, query=None, count=8, engine=None, **kw):
-        """Ищет сразу по нескольким источникам: поисковики (DuckDuckGo, Bing) и базы
-        (Wikipedia, StackOverflow, GitHub, arXiv, npm, PyPI, Hacker News)."""
+        """Ищет сразу по нескольким источникам: поисковики (DuckDuckGo, Bing, свой SearXNG
+        если включён в настройках) и базы (Wikipedia, StackOverflow, GitHub, arXiv, npm,
+        PyPI, Hacker News)."""
         try:
+            searxng_url = None
+            if self.cfg.get("search_searxng"):
+                searxng_url = (self.cfg.get("search_searxng_url") or "").strip() or "http://127.0.0.1:8080"
             res = search_mod.search(query or "", count=int(count),
-                                    engine=engine or self.cfg.get("search_engine", "auto"))
+                                    engine=engine or self.cfg.get("search_engine", "auto"),
+                                    searxng_url=searxng_url)
             if not res["results"]:
                 res["note"] = ("пусто; попробуй другой запрос, другой engine или web_fetch по прямому URL. "
                                "Ошибки источников: %s" % (res.get("errors") or "нет"))
@@ -793,7 +954,7 @@ class Toolkit:
                 "$g=[System.Drawing.Graphics]::FromImage($bmp);"
                 "$g.CopyFromScreen($b.X,$b.Y,0,0,$bmp.Size);"
                 "$bmp.Save('%s',[System.Drawing.Imaging.ImageFormat]::Png);"
-                "Write-Output ('%dx%d')" % (path.replace("'", ""), "$b.Width", "$b.Height")
+                "Write-Output ('{0}x{1}' -f $b.Width, $b.Height)" % (path.replace("'", ""),)
             )
         res = self.shell(cmd=code, timeout=45)
         if not res.get("ok"):

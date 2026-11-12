@@ -1,5 +1,4 @@
 """Guardrails for full-auto mode: nothing is refused outright, it is escalated."""
-import json
 import re
 
 # Команды, которые уносят машину: перезагрузка, выключение, сброс сетевого стека.
@@ -78,6 +77,10 @@ def decide(name, args, mode="auto"):
             return "deny", reason
     if mode == "unrestricted":
         return "allow", None
+    if mode == "ask" and name == "git":
+        action = str(args.get("action") or "status").lower()
+        if action in ("add", "commit") or (action == "branch" and str(args.get("name") or "").strip()):
+            return "confirm", "режим «спрашивать перед каждым шагом»: git %s" % action
     if mode == "ask" and name in CONFIRM_TOOLS:
         return "confirm", "режим «спрашивать перед каждым шагом»: %s" % name
     if name in PLUGIN_DANGEROUS:

@@ -1,12 +1,10 @@
 """Terminal front-end: python -m harness cli [запрос]"""
 import json
 import sys
-import threading
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
-from rich.syntax import Syntax
 
 from . import schemas
 from .agent import Agent, Bridge
