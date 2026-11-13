@@ -15,9 +15,10 @@ from . import lms as lms_mod
 from . import plugins
 from . import schemas
 from . import session as session_mod
+from . import sizing as sizing_mod
 from . import vision as vision_mod
 from .agent import Agent, Bridge
-from .config import DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save
+from .config import DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save, _merge
 
 RUNS = {}
 RUNS_LOCK = threading.Lock()
@@ -104,7 +105,7 @@ def lms_cli(cfg):
 
 
 def lms_state(cfg):
-    """Две плашки LM Studio: что в памяти (ps) и что на диске (ls --json)."""
+    """Две плашки LM Studio: что в памяти (ps) и что на диске (ls --json) + оценка совместимости."""
     base, alive, err = "", False, ""
     try:
         client = llm_mod.LLM(cfg)
@@ -114,8 +115,13 @@ def lms_state(cfg):
         err = str(exc)[:200]
     disk, disk_err = lms_mod.disk_models(cfg)
     loaded, ps_err = lms_mod.loaded_models(cfg)
-    return {"base": base, "alive": alive, "disk": disk, "loaded": loaded,
-            "error": err or disk_err or ps_err or "", "job": _lms_snapshot()}
+    hw = sizing_mod.get_hardware_profile()
+    ctx_len = int(cfg.get("lms_context_length") or cfg.get("context_tokens") or 8192)
+    enriched_disk = [sizing_mod.enrich_model_item(m, context_length=ctx_len, hw=hw) for m in (disk or [])]
+    enriched_loaded = [sizing_mod.enrich_model_item(m, context_length=m.get("contextLength") or ctx_len, hw=hw)
+                       for m in (loaded or [])]
+    return {"base": base, "alive": alive, "disk": enriched_disk, "loaded": enriched_loaded,
+            "hardware": hw, "error": err or disk_err or ps_err or "", "job": _lms_snapshot()}
 
 
 def start_lms_job(kind, args, timeout=3600):
@@ -409,6 +415,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/lms/unload": self.handle_lms_unload,
             "/api/lms/download": self.handle_lms_download,
             "/api/lms/import": self.handle_lms_import,
+            "/api/lms/estimate": self.handle_lms_estimate,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -581,7 +588,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_config(self, body):
         with CONFIG_LOCK:
             cfg = load()
-            cfg.update(body.get("config", {}))
+            cfg = _merge(cfg, body.get("config", {}))
             save(cfg)
         with _PROBE["lock"]:
             _PROBE["at"] = 0.0
@@ -639,6 +646,26 @@ class Handler(BaseHTTPRequestHandler):
         else:
             lms_mod.invalidate()
         _json_response(self, result)
+
+    def handle_lms_estimate(self, body):
+        cfg = load()
+        model_name = body.get("model")
+        ctx = int(body.get("context_length") or cfg.get("lms_context_length") or 8192)
+        disk, _ = lms_mod.disk_models(cfg)
+        loaded, _ = lms_mod.loaded_models(cfg)
+        target = None
+        for item in (loaded or []) + (disk or []):
+            if model_name in (item.get("modelKey"), item.get("path"), item.get("identifier"), item.get("displayName")):
+                target = item
+                break
+        if not target and isinstance(body.get("model_data"), dict):
+            target = body["model_data"]
+        if not target:
+            target = {"modelKey": model_name or "unknown", "paramsString": body.get("params", "8B"),
+                      "sizeBytes": body.get("size_bytes", 0)}
+        hw = sizing_mod.get_hardware_profile()
+        estimate = sizing_mod.estimate_model_fit(target, context_length=ctx, hw=hw)
+        _json_response(self, {"ok": True, "model": model_name, "estimate": estimate})
 
     def stream_events(self, sid, since):
         self.send_response(200)

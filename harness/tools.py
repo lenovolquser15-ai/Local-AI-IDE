@@ -232,6 +232,7 @@ class Toolkit:
         self.workspace = cfg.get("workspace") or DATA_DIR
         self.repl = Repl()
         self.jobs = {}
+        self.tunnels = {}
         os.makedirs(self.workspace, exist_ok=True)
         self.shot_dir = os.path.join(DATA_DIR, "shots")
         os.makedirs(self.shot_dir, exist_ok=True)
@@ -255,6 +256,63 @@ class Toolkit:
                     rows.append(path)
         return rows
 
+    @staticmethod
+    def _available_pubkeys():
+        """Реальные публичные ключи этой машины (.pub)."""
+        ssh_dir = os.path.join(os.path.expanduser("~"), ".ssh")
+        rows = {}
+        if os.path.isdir(ssh_dir):
+            for name in sorted(os.listdir(ssh_dir)):
+                if name.endswith(".pub"):
+                    path = os.path.join(ssh_dir, name)
+                    try:
+                        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                            content = fh.read().strip()
+                        if content and ("ssh-" in content or "ecdsa-" in content):
+                            rows[name] = content
+                    except Exception:
+                        pass
+        return rows
+
+    @staticmethod
+    def _parse_ssh_config():
+        """Читает хосты из системного ~/.ssh/config."""
+        ssh_dir = os.path.join(os.path.expanduser("~"), ".ssh")
+        cfg_file = os.path.join(ssh_dir, "config")
+        if not os.path.isfile(cfg_file):
+            return {}
+        hosts = {}
+        current_hosts = []
+        try:
+            with open(cfg_file, "r", encoding="utf-8", errors="replace") as fh:
+                for raw_line in fh:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split(None, 1)
+                    if len(parts) < 2:
+                        continue
+                    key, val = parts[0].lower(), parts[1].strip()
+                    if key == "host":
+                        current_hosts = [h for h in val.split() if "*" not in h and "?" not in h]
+                        for h in current_hosts:
+                            if h not in hosts:
+                                hosts[h] = {}
+                    elif current_hosts:
+                        for h in current_hosts:
+                            if key in ("hostname", "host"):
+                                hosts[h]["host"] = val
+                            elif key == "user":
+                                hosts[h]["user"] = val
+                            elif key == "port" and val.isdigit():
+                                hosts[h]["port"] = int(val)
+                            elif key == "identityfile":
+                                resolved_id = os.path.expanduser(val.strip('"').strip("'"))
+                                hosts[h]["key"] = resolved_id
+        except Exception:
+            pass
+        return hosts
+
     def _resolve_key(self, key):
         """Модель часто придумывает linux-путь к ключу (/home/.../.ssh/id_rsa). Проверяем файл
         и, если его нет, подставляем реальный ключ этой машины — иначе SSH всегда откажет."""
@@ -272,8 +330,14 @@ class Toolkit:
         return key, note + ("доступных ключей в %s нет" % os.path.join(os.path.expanduser("~"), ".ssh"))
 
     def _ssh_params(self, profile=None, host=None, user=None, port=None, key=None):
-        profiles = self.cfg.get("ssh_profiles") or {}
-        selected = profiles.get(profile or self.cfg.get("ssh_profile")) or {}
+        profiles = dict(self.cfg.get("ssh_profiles") or {})
+        sys_hosts = self._parse_ssh_config()
+        for h_name, h_info in sys_hosts.items():
+            if h_name not in profiles:
+                profiles[h_name] = h_info
+
+        prof_name = profile or self.cfg.get("ssh_profile") or (host if host in profiles else None)
+        selected = profiles.get(prof_name) or {}
         host = host or selected.get("host")
         user = user or selected.get("user")
         port = int(port if port is not None else (selected.get("port") or 22))
@@ -288,18 +352,53 @@ class Toolkit:
                 "-o", "ConnectTimeout=%d" % max(1, min(int(timeout), 300)),
                 "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3"]
 
-    def ssh_connect(self, profile=None, host=None, user=None, port=None, key=None, **kw):
-        result = self.ssh(command="printf LOCALHARNESS_SSH_OK; uname -sm 2>/dev/null || ver",
-                          profile=profile, host=host, user=user, port=port, key=key, timeout=20)
+    def ssh_connect(self, profile=None, host=None, user=None, port=None, key=None, sysinfo=True, **kw):
+        diag_cmd = (
+            "printf 'LOCALHARNESS_SSH_OK\n'; "
+            "uname -sm 2>/dev/null || ver; "
+            "echo '---LH_SYS---'; "
+            "cat /etc/os-release 2>/dev/null | grep -E '^(PRETTY_NAME|NAME)=' | head -1 | cut -d= -f2 | tr -d '\"'; "
+            "echo '---LH_UP---'; uptime -p 2>/dev/null || uptime 2>/dev/null; "
+            "echo '---LH_MEM---'; free -h 2>/dev/null | awk '/Mem:/ {print $2 \" total, \" $7 \" avail\"}' || free -m 2>/dev/null | awk '/Mem:/ {print $2 \"MB total, \" $7 \"MB avail\"}'; "
+            "echo '---LH_DISK---'; df -h / 2>/dev/null | awk 'NR==2 {print $2 \" total, \" $4 \" free (\" $5 \" used)\"}'; "
+            "echo '---LH_DOCKER---'; command -v docker >/dev/null 2>&1 && docker --version 2>/dev/null || echo 'none'"
+        ) if sysinfo else "printf LOCALHARNESS_SSH_OK; uname -sm 2>/dev/null || ver"
+        result = self.ssh(command=diag_cmd, profile=profile, host=host, user=user, port=port, key=key, timeout=25)
         if result.get("ok"):
             result["connected"] = True
-            result["remote_os"] = (result.get("stdout") or "").replace("LOCALHARNESS_SSH_OK", "").strip()
+            stdout = result.get("stdout") or ""
+            if "LOCALHARNESS_SSH_OK" in stdout:
+                rest = stdout.split("LOCALHARNESS_SSH_OK", 1)[1].strip()
+                lines = rest.splitlines()
+                first_line = lines[0].strip() if lines else ""
+                result["remote_os"] = first_line
+                if "---LH_SYS---" in rest:
+                    sys_info = {}
+                    parts = rest.split("---LH_")
+                    for p in parts[1:]:
+                        marker, _, val = p.partition("---")
+                        val = val.strip()
+                        if marker == "SYS":
+                            sys_info["distro"] = val
+                        elif marker == "UP":
+                            sys_info["uptime"] = val
+                        elif marker == "MEM":
+                            sys_info["memory"] = val
+                        elif marker == "DISK":
+                            sys_info["disk"] = val
+                        elif marker == "DOCKER":
+                            sys_info["docker"] = val if val != "none" else None
+                    result["system"] = sys_info
+            else:
+                result["remote_os"] = stdout.strip()[:100]
         return result
 
     def ssh_profile(self, action="list", name=None, host=None, user=None, port=None, key=None, **kw):
-        """List saved VPS profiles or save a new one into config.json (key = path, never a password)."""
+        """List saved VPS profiles, save/delete, or show public keys for server setup."""
         from .config import save
         profiles = dict(self.cfg.get("ssh_profiles") or {})
+        sys_hosts = self._parse_ssh_config()
+        pubkeys = self._available_pubkeys()
         if action == "save":
             if not name or not host:
                 return {"ok": False, "error": "для save нужны name и host"}
@@ -318,8 +417,36 @@ class Toolkit:
                 result["note"] = ("путь к ключу %s на этой машине не найден — SSH его не увидит. "
                                   "Реальные ключи: %s" % (entry["key"], ", ".join(self._available_keys()) or "нет"))
             return result
+        if action == "delete":
+            if not name:
+                return {"ok": False, "error": "для delete нужно указать name профиля"}
+            if str(name) in profiles:
+                deleted = profiles.pop(str(name))
+                self.cfg["ssh_profiles"] = profiles
+                save(self.cfg)
+                return {"ok": True, "deleted": str(name), "profile": deleted}
+            return {"ok": False, "error": "профиль %s не найден в config.json" % name}
+        if action == "pubkey":
+            if not pubkeys:
+                return {"ok": False, "error": "публичные ключи (.pub) в ~/.ssh не найдены"}
+            chosen_key = None
+            if name and str(name) in profiles:
+                k_path = profiles[str(name)].get("key")
+                if k_path and os.path.isfile(k_path + ".pub"):
+                    try:
+                        chosen_key = open(k_path + ".pub", "r", encoding="utf-8").read().strip()
+                    except Exception:
+                        pass
+            if not chosen_key:
+                ed = [v for k, v in pubkeys.items() if "ed25519" in k]
+                chosen_key = ed[0] if ed else next(iter(pubkeys.values()))
+            cmd_instruction = "echo '%s' >> ~/.ssh/authorized_keys" % chosen_key
+            return {"ok": True, "pubkey": chosen_key, "pubkeys": pubkeys,
+                    "install_command": cmd_instruction,
+                    "hint": "Выполните эту команду на удаленном сервере для настройки беспарольного доступа"}
         return {"ok": True, "profiles": profiles, "default": self.cfg.get("ssh_profile") or "",
-                "available_keys": self._available_keys()}
+                "available_keys": self._available_keys(), "system_hosts": sys_hosts,
+                "public_keys": list(pubkeys.keys())}
 
     def _scp(self, argv_tail, host, user, port, key, timeout):
         scp = shutil.which("scp") or shutil.which("scp.exe")
@@ -342,19 +469,26 @@ class Toolkit:
             return {"ok": False, "error": "SCP не запустился: %s" % exc}
 
     def ssh_upload(self, local_path=None, remote_path=None, profile=None, host=None, user=None,
-                   port=None, key=None, timeout=120, **kw):
+                   port=None, key=None, timeout=120, recursive=False, **kw):
         host, user, port, key, key_note = self._ssh_params(profile, host, user, port, key)
         if not host:
             return {"ok": False, "error": "не указан host"}
+        if not local_path:
+            return {"ok": False, "error": "не указан local_path"}
         local = resolve_path(local_path, self.workspace)
-        if not os.path.isfile(local):
-            return {"ok": False, "error": "нет локального файла: %s" % local}
+        if not os.path.exists(local):
+            return {"ok": False, "error": "нет локального пути: %s" % local}
         target = "%s@%s" % (user, host) if user else str(host)
-        result = self._scp([local, "%s:%s" % (target, remote_path)], host, user, port, key, timeout)
-        return dict(result, local_path=local, remote_path=remote_path)
+        is_dir = os.path.isdir(local)
+        argv_tail = []
+        if recursive or is_dir:
+            argv_tail.append("-r")
+        argv_tail += [local, "%s:%s" % (target, remote_path)]
+        result = self._scp(argv_tail, host, user, port, key, timeout)
+        return dict(result, local_path=local, remote_path=remote_path, is_dir=is_dir)
 
     def ssh_download(self, remote_path=None, local_path=None, profile=None, host=None, user=None,
-                     port=None, key=None, timeout=120, **kw):
+                     port=None, key=None, timeout=120, recursive=False, **kw):
         """Скачать файл с VPS через scp (remote -> local)."""
         host, user, port, key, key_note = self._ssh_params(profile, host, user, port, key)
         if not host:
@@ -365,13 +499,22 @@ class Toolkit:
                              self.workspace)
         os.makedirs(os.path.dirname(local) or ".", exist_ok=True)
         target = "%s@%s" % (user, host) if user else str(host)
-        result = self._scp(["%s:%s" % (target, remote_path), local], host, user, port, key, timeout)
+        argv_tail = []
+        if recursive:
+            argv_tail.append("-r")
+        argv_tail += ["%s:%s" % (target, remote_path), local]
+        result = self._scp(argv_tail, host, user, port, key, timeout)
         if result.get("ok"):
-            result["bytes"] = os.path.getsize(local) if os.path.isfile(local) else 0
+            if os.path.isfile(local):
+                result["bytes"] = os.path.getsize(local)
+            elif os.path.isdir(local):
+                total = sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(local) for f in fs)
+                result["bytes"] = total
+                result["is_dir"] = True
         return dict(result, local_path=local, remote_path=remote_path)
 
     def ssh(self, command=None, profile=None, host=None, user=None, port=None, key=None,
-            timeout=60, background=False, **kw):
+            timeout=60, background=False, mode="auto", **kw):
         """Run a command on a VPS through the installed OpenSSH client.
 
         Authentication is intentionally delegated to OpenSSH: use an ssh key,
@@ -390,7 +533,14 @@ class Toolkit:
         argv = [ssh_bin, "-p", str(port)] + self._ssh_opts(timeout)
         if key:
             argv += ["-i", os.path.expanduser(str(key))]
-        argv += [target, str(command)]
+
+        cmd_str = str(command)
+        use_stdin = (mode == "script" or (mode == "auto" and "\n" in cmd_str)) and not background
+        if use_stdin:
+            argv += [target, "bash -s 2>&1 || sh -s 2>&1"]
+        else:
+            argv += [target, cmd_str]
+
         try:
             if background:
                 log_path = os.path.join(DATA_DIR, "jobs", "%s.log" % uuid.uuid4().hex[:6])
@@ -402,7 +552,8 @@ class Toolkit:
                                        "cmd": "ssh %s" % target, "started": time.time(), "handle": handle}
                 return {"ok": True, "background": True, "pid": proc.pid, "log": log_path,
                         "host": target}
-            proc = subprocess.run(argv, capture_output=True, timeout=float(timeout), creationflags=NO_WINDOW,
+            proc = subprocess.run(argv, input=cmd_str.encode("utf-8") if use_stdin else None,
+                                  capture_output=True, timeout=float(timeout), creationflags=NO_WINDOW,
                                   env=child_env())
             out = truncate(decode_bytes(proc.stdout), MAX_OUT)[0]
             err = truncate(decode_bytes(proc.stderr), 3000)[0]
@@ -411,8 +562,8 @@ class Toolkit:
             if key_note:
                 result["note"] = key_note
             if not result["ok"] and "Permission denied" in (err or ""):
-                result["hint"] = ("сервер не принял ключ. Проверь, что нужный публичный клют добавлен на VPS "
-                                  "(~/.ssh/authorized_keys), или уточни доступ у хозяина сервера. "
+                result["hint"] = ("сервер не принял ключ. Проверь, что нужный публичный ключ добавлен на VPS "
+                                  "(~/.ssh/authorized_keys), или используй ssh_profile(action='pubkey'). "
                                   "Пароль харнес не спрашивает и не подставляет.")
             return result
         except subprocess.TimeoutExpired:
@@ -420,13 +571,142 @@ class Toolkit:
         except OSError as exc:
             return {"ok": False, "error": "SSH не запустился: %s" % exc}
 
+    def ssh_tunnel(self, action="open", local_port=None, remote_port=None, remote_host="127.0.0.1",
+                   profile=None, host=None, user=None, port=None, key=None, pid=None, **kw):
+        """SSH port forwarding tunnel:
+        open — пробросить local_port к remote_host:remote_port на VPS в фоне.
+        close — остановить туннель по local_port или pid.
+        list — показать активные туннели.
+        """
+        if not hasattr(self, "tunnels"):
+            self.tunnels = {}
+
+        if action == "list":
+            rows = []
+            for lp, meta in list(self.tunnels.items()):
+                proc = meta.get("proc")
+                alive = (proc.poll() is None) if proc else psutil_alive(meta.get("pid"))
+                if not alive:
+                    self.tunnels.pop(lp, None)
+                    continue
+                rows.append({"local_port": lp, "remote": meta["remote"],
+                             "target": meta["target"], "pid": meta["pid"],
+                             "uptime_sec": int(time.time() - meta["started"])})
+            return {"ok": True, "tunnels": rows}
+
+        if action == "close":
+            target_port = int(local_port) if local_port is not None else None
+            meta = None
+            if target_port and target_port in self.tunnels:
+                meta = self.tunnels.pop(target_port)
+            elif pid is not None:
+                p_id = int(pid)
+                for lp, m in list(self.tunnels.items()):
+                    if m.get("pid") == p_id:
+                        meta = self.tunnels.pop(lp)
+                        target_port = lp
+                        break
+            if not meta:
+                return {"ok": False, "error": "туннель для %s не найден" % (local_port or pid)}
+            proc = meta.get("proc")
+            if proc:
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+            return {"ok": True, "closed": target_port, "pid": meta.get("pid")}
+
+        if action == "open":
+            if not local_port or not remote_port:
+                return {"ok": False, "error": "для open нужны local_port и remote_port"}
+            l_port = int(local_port)
+            r_port = int(remote_port)
+            r_host = str(remote_host or "127.0.0.1").strip()
+
+            if l_port in self.tunnels:
+                meta = self.tunnels[l_port]
+                if (meta.get("proc") and meta["proc"].poll() is None) or psutil_alive(meta.get("pid")):
+                    return {"ok": True, "already_open": True, "local_port": l_port,
+                            "remote": meta["remote"], "pid": meta["pid"]}
+
+            host, user, port, key, key_note = self._ssh_params(profile, host, user, port, key)
+            if not host:
+                return {"ok": False, "error": "не указан host"}
+            ssh_bin = shutil.which("ssh") or shutil.which("ssh.exe")
+            if not ssh_bin:
+                return {"ok": False, "error": "OpenSSH client не найден в PATH"}
+            target = "%s@%s" % (user, host) if user else str(host)
+
+            argv = [ssh_bin, "-N", "-L", "%d:%s:%d" % (l_port, r_host, r_port),
+                    "-p", str(port)] + self._ssh_opts(60)
+            if key:
+                argv += ["-i", os.path.expanduser(str(key))]
+            argv += [target]
+
+            log_path = os.path.join(DATA_DIR, "jobs", "tunnel_%d.log" % l_port)
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            handle = open(log_path, "w", encoding="utf-8", errors="replace")
+            try:
+                proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT,
+                                        creationflags=NO_WINDOW)
+            except Exception as exc:
+                return {"ok": False, "error": "не удалось запустить ssh tunnel: %s" % exc}
+
+            time.sleep(1.0)
+            if proc.poll() is not None:
+                handle.close()
+                err = ""
+                try:
+                    with open(log_path, "r", encoding="utf-8", errors="replace") as fh:
+                        err = fh.read().strip()
+                except Exception:
+                    pass
+                return {"ok": False, "error": "SSH tunnel завершился сразу (код %s): %s" % (proc.returncode, err or "ошибка подключения")}
+
+            meta = {"pid": proc.pid, "proc": proc, "local_port": l_port,
+                    "remote": "%s:%d" % (r_host, r_port), "target": target,
+                    "log": log_path, "started": time.time()}
+            self.tunnels[l_port] = meta
+            self.jobs[proc.pid] = {"pid": proc.pid, "log": log_path,
+                                   "cmd": "ssh -L %d:%s:%d %s" % (l_port, r_host, r_port, target),
+                                   "started": time.time(), "handle": handle}
+            return {"ok": True, "local_port": l_port, "remote": "%s:%d" % (r_host, r_port),
+                    "target": target, "pid": proc.pid}
+
+        return {"ok": False, "error": "действие %s неизвестно (open|close|list)" % action}
+
     def model_info(self, **kw):
         try:
             from .llm import LLM
+            from . import sizing as sizing_mod
             client = LLM(self.cfg)
-            return {"ok": True, "provider": client.label, "models": client.models()}
+            hw = sizing_mod.get_hardware_profile()
+            return {"ok": True, "provider": client.label, "models": client.models(), "hardware": hw}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
+
+    def model_estimate(self, model=None, context_length=8192, **kw):
+        """Оценивает требования модели к памяти (RAM/VRAM), скорость tok/s и риск лагов UI."""
+        from . import sizing as sizing_mod
+        from . import lms as lms_mod
+        cfg = self.cfg
+        ctx = int(context_length or cfg.get("lms_context_length") or 8192)
+        disk, _ = lms_mod.disk_models(cfg)
+        loaded, _ = lms_mod.loaded_models(cfg)
+        target = None
+        m_name = str(model or cfg.get("model") or "").strip()
+        for item in (loaded or []) + (disk or []):
+            if m_name and m_name in (item.get("modelKey"), item.get("path"), item.get("identifier"), item.get("displayName")):
+                target = item
+                break
+        if not target and (disk or loaded):
+            target = (loaded or disk)[0]
+        if not target:
+            target = {"modelKey": m_name or "default-8b", "paramsString": "8B", "sizeBytes": 5000000000}
+        hw = sizing_mod.get_hardware_profile()
+        estimate = sizing_mod.estimate_model_fit(target, context_length=ctx, hw=hw)
+        return {"ok": True, "model": target.get("displayName") or target.get("modelKey") or m_name,
+                "estimate": estimate}
 
     def dataset_append(self, path=None, instruction=None, input="", output=None, **kw):
         target = resolve_path(path, self.workspace)
@@ -547,8 +827,9 @@ class Toolkit:
                 lines = fh.readlines()
         except IsADirectoryError:
             return self.list_dir(path=target)
-        start = max(1, int(offset))
-        chunk = lines[start - 1:start - 1 + int(limit)]
+        start = max(1, int(offset or 1))
+        lim = max(1, int(limit or 400))
+        chunk = lines[start - 1:start - 1 + lim]
         body = "".join("%5d | %s" % (i + start, ln.rstrip("\n")) for i, ln in enumerate(chunk))
         text, dropped = truncate(body, MAX_OUT)
         return {"ok": True, "path": target, "lines_total": len(lines), "shown": "%d-%d" % (start, start + len(chunk) - 1),
@@ -576,6 +857,20 @@ class Toolkit:
         with open(target, "r", encoding="utf-8", errors="replace") as fh:
             src = fh.read()
         count = src.count(find)
+        if count == 0 and ("\r\n" in src or "\r\n" in find):
+            # Пробуем нормализацию переносов строк CRLF <-> LF
+            if "\r\n" in src and "\r\n" not in find:
+                find_alt = find.replace("\n", "\r\n")
+                if src.count(find_alt) > 0:
+                    find = find_alt
+                    replace = replace.replace("\r\n", "\n").replace("\n", "\r\n")
+                    count = src.count(find)
+            elif "\r\n" not in src and "\r\n" in find:
+                find_alt = find.replace("\r\n", "\n")
+                if src.count(find_alt) > 0:
+                    find = find_alt
+                    replace = replace.replace("\r\n", "\n")
+                    count = src.count(find)
         if count == 0:
             sample = "\n".join(src.splitlines()[:12])
             return {"ok": False, "error": "фрагмент не найден буквально. Начало файла:\n%s" % sample}
@@ -592,8 +887,9 @@ class Toolkit:
         target = resolve_path(path, self.workspace)
         if not os.path.isdir(target):
             return {"ok": False, "error": "не папка: %s" % target}
+        lim = max(1, int(limit or 200))
         rows = []
-        for name in sorted(os.listdir(target))[:int(limit)]:
+        for name in sorted(os.listdir(target))[:lim]:
             full = os.path.join(target, name)
             try:
                 stat = os.stat(full)
@@ -601,25 +897,26 @@ class Toolkit:
                              "mtime": time.strftime("%Y-%m-%d %H:%M", time.localtime(stat.st_mtime))})
             except Exception:
                 rows.append({"name": name, "dir": None, "bytes": None})
-        return {"ok": True, "path": target, "entries": rows[:int(limit)], "total": len(os.listdir(target))}
+        return {"ok": True, "path": target, "entries": rows[:lim], "total": len(os.listdir(target))}
 
     def glob(self, pattern=None, path=None, limit=200, **kw):
         target = resolve_path(path, self.workspace)
         hits = []
+        lim = max(1, int(limit or 200))
         for root, dirs, files in os.walk(target):
             dirs[:] = [d for d in dirs if d not in SKIP_DIRS and not d.startswith(".")]
             for name in files:
                 if fnmatch.fnmatch(name, pattern or "*") or fnmatch.fnmatch(os.path.join(root, name).replace("\\", "/"), pattern or "*"):
                     hits.append(os.path.join(root, name))
-                    if len(hits) >= int(limit):
+                    if len(hits) >= lim:
                         return {"ok": True, "matches": hits, "capped": True}
         return {"ok": True, "matches": hits, "count": len(hits)}
 
-    def grep(self, pattern=None, path=None, glob="*.py", ignore_case=True, context=0, limit=60, **kw):
+    def grep(self, pattern=None, path=None, glob=None, ignore_case=True, context=0, limit=60, **kw):
         target = resolve_path(path, self.workspace)
         flags = re.I if ignore_case else 0
         try:
-            rx = re.compile(pattern, flags)
+            rx = re.compile(pattern or "", flags)
         except re.error as exc:
             return {"ok": False, "error": "кривой regex: %s" % exc}
         files = []
@@ -632,8 +929,10 @@ class Toolkit:
                     if not glob or any(fnmatch.fnmatch(name, g.strip()) for g in str(glob).split(",")):
                         files.append(os.path.join(root, name))
         hits = []
+        lim = max(1, int(limit or 60))
+        ctx = max(0, int(context or 0))
         for fpath in files:
-            if len(hits) >= int(limit):
+            if len(hits) >= lim:
                 break
             try:
                 if os.path.getsize(fpath) > 3_000_000:
@@ -647,13 +946,13 @@ class Toolkit:
                 if not rx.search(line):
                     continue
                 entry = {"file": fpath, "line": num + 1, "text": line.rstrip()[:300]}
-                if context:
-                    lo = max(0, num - int(context))
-                    hi = min(len(lines), num + int(context) + 1)
+                if ctx:
+                    lo = max(0, num - ctx)
+                    hi = min(len(lines), num + ctx + 1)
                     entry["around"] = "".join(lines[lo:hi])[:1200]
                 hits.append(entry)
                 per_file += 1
-                if per_file >= 5 or len(hits) >= int(limit):
+                if per_file >= 5 or len(hits) >= lim:
                     break
         return {"ok": True, "pattern": pattern, "scanned_files": len(files), "matches": hits}
 
@@ -828,7 +1127,7 @@ class Toolkit:
             searxng_url = None
             if self.cfg.get("search_searxng"):
                 searxng_url = (self.cfg.get("search_searxng_url") or "").strip() or "http://127.0.0.1:8080"
-            res = search_mod.search(query or "", count=int(count),
+            res = search_mod.search(query or "", count=int(count or 8),
                                     engine=engine or self.cfg.get("search_engine", "auto"),
                                     searxng_url=searxng_url)
             if not res["results"]:

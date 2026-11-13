@@ -1,4 +1,5 @@
 """Upgrades proof: SSH hardening/profiles/download, PowerShell UTF-8, screenshot regions, goal refinement."""
+import ctypes
 import json
 import os
 import subprocess
@@ -96,6 +97,81 @@ def test_ssh():
     check("profile save", res.get("ok") and saved["ssh_profiles"]["myvps"]["host"] == "5.6.7.8")
     check("profile list", listed["profiles"]["myvps"]["user"] == "admin")
 
+    with patch.object(config_mod, "CONFIG_PATH", cfg_path):
+        del_res = tk2.ssh_profile(action="delete", name="myvps")
+        check("profile delete", del_res.get("ok") and "myvps" not in tk2.cfg.get("ssh_profiles", {}))
+
+    pub_dir = os.path.join(TMP, "fakessh", ".ssh")
+    os.makedirs(pub_dir, exist_ok=True)
+    pub_key_path = os.path.join(pub_dir, "id_ed25519.pub")
+    open(pub_key_path, "w", encoding="utf-8").write("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestKey user@test")
+    orig_home = os.path.expanduser
+    with patch.object(tools_mod.os.path, "expanduser", lambda p: os.path.dirname(pub_dir) if p == "~" else orig_home(p)):
+        pub_res = tk.ssh_profile(action="pubkey")
+        check("profile pubkey returns key", pub_res.get("ok") and "ssh-ed25519" in pub_res.get("pubkey", ""))
+        check("profile pubkey command generated", "authorized_keys" in pub_res.get("install_command", ""))
+
+        ssh_cfg = os.path.join(pub_dir, "config")
+        open(ssh_cfg, "w", encoding="utf-8").write("Host vps-box\n    HostName 10.0.0.1\n    User dev\n    Port 2222\n")
+        sys_res = tk.ssh_profile(action="list")
+        check("system_hosts parsed from ~/.ssh/config", "vps-box" in sys_res.get("system_hosts", {}))
+
+    cap.clear()
+    upload_dir = os.path.join(TMP, "up_dir")
+    os.makedirs(upload_dir, exist_ok=True)
+    with patch.object(tools_mod.subprocess, "run", fake_run(cap)):
+        res_up = tk.ssh_upload(local_path=upload_dir, remote_path="/opt/app", host="h", user="u")
+    argv = cap[-1]
+    check("scp upload dir adds -r", "-r" in argv and res_up.get("is_dir") is True)
+
+    cap.clear()
+    with patch.object(tools_mod.subprocess, "run", fake_run(cap)):
+        res_dl = tk.ssh_download(remote_path="/var/log", local_path=os.path.join(TMP, "logs"),
+                                 host="h", user="u", recursive=True)
+    argv = cap[-1]
+    check("scp download recursive adds -r", "-r" in argv)
+
+    cap.clear()
+    script_text = "echo step 1\necho step 2\necho done"
+    with patch.object(tools_mod.subprocess, "run", fake_run(cap)):
+        res_script = tk.ssh(command=script_text, host="h", user="u")
+    argv = cap[-1]
+    check("ssh multiline runs bash -s via stdin", any("bash -s" in arg for arg in argv))
+
+    fake_diag_stdout = (
+        b"LOCALHARNESS_SSH_OK\nLinux 5.15.0-x86_64\n"
+        b"---LH_SYS---\nUbuntu 22.04.3 LTS\n"
+        b"---LH_UP---\nup 3 weeks, 2 days\n"
+        b"---LH_MEM---\n16G total, 10G avail\n"
+        b"---LH_DISK---\n80G total, 45G free (42% used)\n"
+        b"---LH_DOCKER---\nDocker version 24.0.7\n"
+    )
+    def fake_diag_run(argv, **kw):
+        return subprocess.CompletedProcess(argv, 0, stdout=fake_diag_stdout, stderr=b"")
+    with patch.object(tools_mod.subprocess, "run", fake_diag_run):
+        conn_res = tk.ssh_connect(host="h", user="u")
+    check("ssh_connect ok and connected", conn_res.get("ok") and conn_res.get("connected") is True)
+    check("ssh_connect remote_os", "Linux 5.15.0-x86_64" in conn_res.get("remote_os", ""))
+    check("ssh_connect system details", conn_res.get("system", {}).get("distro") == "Ubuntu 22.04.3 LTS")
+    check("ssh_connect docker detected", "Docker" in str(conn_res.get("system", {}).get("docker", "")))
+
+    class FakeTunnelProc:
+        def __init__(self, pid=9999):
+            self.pid = pid
+            self.returncode = None
+        def poll(self):
+            return None
+        def terminate(self):
+            self.returncode = 0
+    with patch.object(tools_mod.subprocess, "Popen", lambda *a, **k: FakeTunnelProc(9999)):
+        with patch.object(tools_mod.time, "sleep", lambda s: None):
+            tun_open = tk.ssh_tunnel(action="open", local_port=8080, remote_port=80, host="h", user="u")
+            check("ssh_tunnel open ok", tun_open.get("ok") and tun_open.get("local_port") == 8080)
+            tun_list = tk.ssh_tunnel(action="list")
+            check("ssh_tunnel list includes port", any(t["local_port"] == 8080 for t in tun_list.get("tunnels", [])))
+            tun_close = tk.ssh_tunnel(action="close", local_port=8080)
+            check("ssh_tunnel close ok", tun_close.get("ok") and tun_close.get("closed") == 8080)
+
 
 def fake_capture(captured):
     def capture(argv, timeout=None, cwd=None, flags=0):
@@ -124,8 +200,9 @@ def test_screenshot():
             ok = im.size == (120, 80)
     check("screenshot rect", ok, str(res.get("size") or res.get("error")))
     wins = tk.windows(action="list").get("windows", [])
-    if wins:
-        res = tk.screenshot(region="window", hwnd=wins[0]["hwnd"], focus=False)
+    hwnd = wins[0]["hwnd"] if wins else (ctypes.windll.user32.GetDesktopWindow() if hasattr(ctypes, "windll") else None)
+    if hwnd:
+        res = tk.screenshot(region="window", hwnd=hwnd, focus=False)
         check("screenshot window", res.get("ok") and os.path.isfile(res.get("path", "")),
               str(res.get("size") or res.get("error")))
     else:
@@ -363,6 +440,57 @@ def test_config_patch_race():
         os.remove(path)
 
 
+def test_tool_hardening_and_crlf():
+    tk = tools_mod.Toolkit({"workspace": TMP})
+    test_file = os.path.join(TMP, "test_crlf.txt")
+    with open(test_file, "wb") as fh:
+        fh.write(b"line 1\r\nline 2\r\nline 3\r\n")
+    res = tk.edit_file(path=test_file, find="line 1\nline 2", replace="line 1 modified\nline 2")
+    check("edit_file CRLF matching LF", res.get("ok"), str(res))
+    with open(test_file, "rb") as fh:
+        check("edit_file CRLF preserved in replace", b"line 1 modified\r\nline 2" in fh.read())
+
+    read_res = tk.read_file(path=test_file, offset=None, limit=None)
+    check("read_file handles None offset/limit", read_res.get("ok"), str(read_res))
+    list_res = tk.list_dir(path=TMP, limit=None)
+    check("list_dir handles None limit", list_res.get("ok"), str(list_res))
+    grep_res = tk.grep(path=TMP, pattern="modified", glob=None, limit=None, context=None)
+    check("grep handles None glob/limit/context", grep_res.get("ok"), str(grep_res))
+
+
+def test_sizing_and_estimation():
+    from harness import sizing as sizing_mod
+    hw = {
+        "ram_total_gb": 16.0,
+        "ram_free_gb": 8.0,
+        "has_gpu": True,
+        "gpu_name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+        "vram_total_gb": 8.0,
+        "vram_free_gb": 7.0,
+        "gpu_bandwidth_gbps": 320.0,
+        "cpu_bandwidth_gbps": 45.0,
+    }
+    m_small = {"displayName": "Ministral 8B Q4", "paramsString": "8B", "sizeBytes": 5_000_000_000}
+    fit_gpu = sizing_mod.estimate_model_fit(m_small, context_length=4096, hw=hw)
+    check("sizing: small model fits 100% GPU", fit_gpu["fit"] == "gpu_full")
+    check("sizing: zero UI lag for 100% GPU", fit_gpu["ui_lag_risk"] == "none")
+    check("sizing: tok_per_sec estimated", "т/с" in fit_gpu["tok_per_sec"])
+
+    m_mid = {"displayName": "Qwen 14B Q4", "paramsString": "14B", "sizeBytes": 9_000_000_000}
+    fit_hybrid = sizing_mod.estimate_model_fit(m_mid, context_length=16384, hw=hw)
+    check("sizing: 14B model goes to hybrid", fit_hybrid["fit"] == "hybrid")
+    check("sizing: hybrid offload percent", 0 < fit_hybrid["offload_pct"] < 100)
+
+    m_huge = {"displayName": "Llama 70B Q4", "paramsString": "70B", "sizeBytes": 40_000_000_000}
+    fit_oom = sizing_mod.estimate_model_fit(m_huge, context_length=8192, hw=hw)
+    check("sizing: 70B model triggers OOM", fit_oom["fit"] == "oom")
+    check("sizing: critical lag warning", fit_oom["ui_lag_risk"] == "critical")
+
+    tk = tools_mod.Toolkit({"workspace": TMP})
+    res_est = tk.model_estimate(model="Ministral", context_length=8192)
+    check("toolkit model_estimate works", res_est.get("ok") and "estimate" in res_est)
+
+
 def main():
     os.makedirs(TMP, exist_ok=True)
     test_ssh()
@@ -376,6 +504,8 @@ def main():
     test_browser_hint()
     test_browser_ws_handshake()
     test_config_patch_race()
+    test_tool_hardening_and_crlf()
+    test_sizing_and_estimation()
     print("FAILURES:", len(FAILURES))
     return 1 if FAILURES else 0
 

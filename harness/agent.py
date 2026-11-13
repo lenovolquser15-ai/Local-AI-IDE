@@ -207,19 +207,21 @@ def fold_hard(messages, budget):
     if first_user is not None and not any(m is first_user for m in tail):
         out.append(first_user)
     out.extend(tail)
-    # картинки в хвосте не режем: base64 нельзя резать пополам, убираем целиком при нужде
+    # 1. Убираем изображения только из СТАРЫХ сообщений, сохраняя активный скриншот в tail[-1]
     while _estimate_units(out) > budget:
-        with_images = [i for i, m in enumerate(out)
-                       if m.get("role") != "system" and m is not first_user
-                       and vision_mod.content_images(m.get("content"))]
-        if not with_images:
+        old_images = [i for i, m in enumerate(out[:-1])
+                      if m.get("role") != "system" and m is not first_user
+                      and vision_mod.content_images(m.get("content"))]
+        if not old_images:
             break
-        i = with_images[0]
+        i = old_images[0]
         out[i] = dict(out[i], content=vision_mod.text_only(out[i].get("content")))
-    # сначала урезаем самое объёмное содержимое — сообщения остаются на своих местах,
-    # поэтому последнее наблюдение никогда не теряется
+
+    # 2. Урезаем самое объёмное текстовое содержимое старых сообщений/дайджеста/логов утилит,
+    # не трогая исходную задачу пользователя и самое последнее наблюдение
     while _estimate_units(out) > budget:
-        candidates = [(_content_units(m.get("content")), i) for i, m in enumerate(out)]
+        candidates = [(_content_units(m.get("content")), i) for i, m in enumerate(out)
+                      if m is not first_user and i != len(out) - 1 and (m.get("role") != "system" or _is_digest(m))]
         if not candidates:
             break
         weight, i = max(candidates)
@@ -227,14 +229,15 @@ def fold_hard(messages, budget):
         if weight <= 0 or not content:
             break
         excess = _estimate_units(out) - budget
-        per_char = weight / len(content)
+        per_char = weight / max(1, len(content))
         keep = max(0, len(content) - int(excess / per_char) - 1)
         text = content[:keep] + ("…" if keep else "")
         if _content_units(text) >= weight:
             text = content[:keep]      # без многоточия вес гарантированно падает
         out[i] = dict(out[i], content=text)
-    # если вес остался в tool_calls или пустых сообщениях — убираем старые сообщения,
-    # но последнее (самое свежее наблюдение/напоминание) не трогаем никогда
+
+    # 3. Если вес остался в промежуточных сообщениях — убираем старые сообщения,
+    # но исходную задачу и самое свежее наблюдение не трогаем
     while _estimate_units(out) > budget:
         victim = None
         for i, msg in enumerate(out[:-1]):
@@ -244,6 +247,30 @@ def fold_hard(messages, budget):
         if victim is None:
             break
         del out[victim]
+
+    # 4. Крайняя мера для изображений: если даже после сжатия текста окно не вмещает активную картинку
+    while _estimate_units(out) > budget:
+        last_images = [i for i, m in enumerate(out)
+                       if m.get("role") != "system" and m is not first_user
+                       and vision_mod.content_images(m.get("content"))]
+        if not last_images:
+            break
+        i = last_images[0]
+        out[i] = dict(out[i], content=vision_mod.text_only(out[i].get("content")))
+
+    # 5. Финальный предохранитель: если одно оставшееся сообщение превышает бюджет
+    while _estimate_units(out) > budget:
+        candidates = [(_content_units(m.get("content")), i) for i, m in enumerate(out)]
+        if not candidates:
+            break
+        weight, i = max(candidates)
+        content = vision_mod.content_text(out[i].get("content"))
+        if weight <= 0 or not content:
+            break
+        excess = _estimate_units(out) - budget
+        per_char = weight / max(1, len(content))
+        keep = max(0, len(content) - int(excess / per_char) - 1)
+        out[i] = dict(out[i], content=content[:keep])
     return out, max(0, len(messages) - len(out))
 
 
@@ -798,7 +825,24 @@ class Agent:
         session_mod.message(self.sid, "user", hint)
         return True
 
+    def _sync_context_window(self):
+        """Автоопределение размера контекста из LM Studio и адаптация порогов сжатия на лету."""
+        try:
+            detected = self.llm.detect_context_length(self.llm.model)
+            if detected and detected >= 2048:
+                old_units = self.window_units
+                self.window_units = float(detected) * UNITS_PER_TOKEN
+                self._reserve_cache.clear()
+                if abs(self.window_units - old_units) > 100:
+                    self.bridge.emit({
+                        "type": "notice",
+                        "text": "контекст модели определён автоматически: %d токенов (окно адаптировано)" % detected
+                    })
+        except Exception:
+            pass
+
     def run(self, user_text, history=None, goal=None, image=None, images=None):
+        self._sync_context_window()
         protocol = self.cfg.get("tool_protocol", "auto")
         if protocol == "auto":
             protocol = self.llm.probe_protocol(schemas.native_tools(self.profile))

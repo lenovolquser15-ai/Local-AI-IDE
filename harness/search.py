@@ -141,11 +141,40 @@ EOL_PRODUCTS = {
 }
 
 
+CONVERSATIONAL_PREFIXES = (
+    r"^(?:пожалуйста|плиз|please)[,\s]+",
+    r"^(?:найди|поищи|поискать|глянь|посмотри|проверь|пробей)\s+(?:в|по)?\s*(?:гугл[еа]?|яндекс[еа]?|интернет[еа]?|сет[ие]|поиск[еа]?)?[,\s:]*",
+    r"^(?:погугли|загугли|прогугли)[,\s:]*",
+    r"^(?:найди|поищи)\s+(?:мне|нам|для меня)?[,\s:]*",
+    r"^(?:search\s+for|find\s+me|find|google\s+for|google)[,\s:]*",
+    r"^(?:подскажи|расскажи|скажи|объясни)[,\s:]+(?:как|что|где|почему)?\s*",
+    r"^(?:как\s+исправить\s+ошибку|как\s+исправить|как\s+починить|как\s+решить\s+проблему\s+с|как\s+решить)[,\s:]*",
+    r"^(?:ошибка|error)[,\s:]+",
+)
+
+
+def clean_query(q):
+    """Очищает поисковый запрос от разговорных фраз ('найди в гугле', 'пожалуйста', 'как исправить ошибку')."""
+    orig = (q or "").strip()
+    cur = orig
+    changed = True
+    while changed:
+        changed = False
+        for pat in CONVERSATIONAL_PREFIXES:
+            sub = re.sub(pat, "", cur, flags=re.I).strip()
+            if sub and sub != cur:
+                cur = sub
+                changed = True
+    cur = re.sub(r"[\?!.,:;]+$", "", cur).strip()
+    return cur if len(cur) >= 2 else orig
+
+
 def _tokens(query):
     """Значимые слова запроса: длинные или заглавные аббревиатуры, без служебных."""
     out = []
-    for word in re.findall(r"\w+", (query or "").lower()):
-        if len(word) < 3 and not (len(word) == 2 and word.isupper()):
+    for raw_word in re.findall(r"\w+", query or ""):
+        word = raw_word.lower()
+        if len(word) < 3 and not (len(raw_word) == 2 and raw_word.isupper()):
             continue
         if word in STOPWORDS:
             continue
@@ -158,38 +187,37 @@ def _words(text):
 
 
 def _hit(token, words):
-    """Совпадает ли значимое слово запроса со словом выдачи.
-
-    Сравнение по словам, а не по подстроке: иначе «mit» находится внутри
-    «Microsoft» и «submit», а кириллическое «лицензия» — внутри «лицензионный».
-    Для длинных слов берём общий префикс из 6 букв, чтобы переживать падежи
-    («лицензия» / «лицензионный»).
-    """
-    if len(token) >= 6:
-        head = token[:6]
-        return any(word[:6] == head for word in words if len(word) >= 4)
-    return any(word == token or (word.startswith(token) and len(word) - len(token) <= 2)
-               for word in words)
+    """Совпадает ли значимое слово запроса со словом выдачи."""
+    t_len = len(token)
+    for word in words:
+        if word == token:
+            return True
+        w_len = len(word)
+        min_len = min(t_len, w_len)
+        max_len = max(t_len, w_len)
+        if max_len - min_len <= 3 and min_len >= 4:
+            stem_len = max(4, min_len - (1 if min_len <= 5 else 2))
+            if token[:stem_len] == word[:stem_len]:
+                return True
+        elif t_len >= 6 and w_len >= 4:
+            if word[:5] == token[:5]:
+                return True
+    return False
 
 
 def _relevant(items, query):
-    """Отсекает выдачу, не относящуюся к запросу, и ставит точные совпадения выше.
-
-    Поисковики любят отдавать мусор: Bing с этого адреса присылает чужие страницы,
-    а DuckDuckGo — заглушку с фальшивыми ссылками. Результат, в котором нет ни
-    одного значимого слова запроса, — не ответ на запрос. Среди оставшихся
-    больше слов запроса — значит ближе к теме.
-
-    Совпадение в заголовке или в домене весит больше, чем в сниппете: иначе
-    «Активация Windows» проходит на слове «лицензия» из описания.
-    """
+    """Отсекает выдачу, не относящуюся к запросу, и ставит точные совпадения выше."""
     tokens = _tokens(query)
     if not tokens:
         return items
     scored = []
     for item in items:
         strong = _words(item.get("title"))
-        host = re.sub(r"^https?://", "", (item.get("url") or "").split("/")[0]).lower()
+        try:
+            parsed = urllib.parse.urlsplit(item.get("url") or "")
+            host = (parsed.netloc or "").lower().replace("www.", "")
+        except Exception:
+            host = ""
         strong += _words(host)
         weak = _words(item.get("snippet"))
         score = 0
@@ -414,6 +442,31 @@ def versions(query, count=5, timeout=DEFAULT_TIMEOUT):
     return results
 
 
+def habr(query, count=5, timeout=DEFAULT_TIMEOUT):
+    """Поиск по Хабру (habr.com) через официальную RSS-ленту поиска."""
+    url = "https://habr.com/ru/rss/search/?" + urllib.parse.urlencode({"q": query, "fl": "ru"})
+    xml = _fetch(url, timeout)
+    try:
+        import xml.etree.ElementTree as ET
+        root = ET.fromstring(xml)
+    except Exception as exc:
+        raise RuntimeError("ошибка разбора habr rss: %s" % exc)
+    results = []
+    for item in root.findall(".//item"):
+        title = item.find("title").text if item.find("title") is not None else ""
+        link = item.find("link").text if item.find("link") is not None else ""
+        desc = item.find("description").text if item.find("description") is not None else ""
+        if not title or not link:
+            continue
+        clean_url = link.split("?")[0]
+        results.append(_item(title, clean_url, desc, "habr"))
+        if len(results) >= count:
+            break
+    if not results:
+        raise RuntimeError("habr не нашёл ничего")
+    return results
+
+
 def wikipedia(query, count=5, timeout=DEFAULT_TIMEOUT):
     results = []
     for lang in ("ru", "en"):
@@ -505,7 +558,11 @@ def pypi(query, count=5, timeout=DEFAULT_TIMEOUT):
     name = re.sub(r"[^A-Za-z0-9._-]", "", (query or "").strip().split()[0] if query else "")
     if not name:
         raise RuntimeError("пустое имя пакета")
-    data = json.loads(_fetch("https://pypi.org/pypi/%s/json" % name, timeout))
+    try:
+        data = json.loads(_fetch("https://pypi.org/pypi/%s/json" % name, timeout))
+    except Exception:
+        return [_item(query, "https://pypi.org/search/?q=%s" % urllib.parse.quote(query),
+                      "Поиск пакетов на PyPI", "pypi")]
     info = data.get("info") or {}
     results = [_item(info.get("name") or name, info.get("package_url") or
                      "https://pypi.org/project/%s/" % name,
@@ -534,14 +591,14 @@ def hackernews(query, count=5, timeout=DEFAULT_TIMEOUT):
 
 
 GENERAL = [duckduckgo, ddg_lite, bing, rightdao]
-VERTICALS = [ddg_ia, versions, wikipedia, stackexchange, github, hackernews, arxiv, npm, pypi]
+VERTICALS = [ddg_ia, versions, habr, wikipedia, stackexchange, github, hackernews, arxiv, npm, pypi]
 ENGINES = {fn.__name__: fn for fn in GENERAL + VERTICALS}
 ALIASES = {"ddg": "duckduckgo", "duckduckgo_html": "duckduckgo", "lite": "ddg_lite",
            "so": "stackexchange", "stack": "stackexchange", "stackoverflow": "stackexchange",
            "wiki": "wikipedia", "hn": "hackernews", "pypi": "pypi", "npm": "npm",
            "github": "github", "arxiv": "arxiv", "bing": "bing", "rightdao": "rightdao",
            "ddg_ia": "ddg_ia", "ia": "ddg_ia", "versions": "versions", "eol": "versions",
-           "version": "versions"}
+           "version": "versions", "habr": "habr", "хабр": "habr", "habrahabr": "habr"}
 
 
 def engine_names():
@@ -549,8 +606,8 @@ def engine_names():
 
 
 def _norm_engine(name):
-    """«Right Dao», «right-dao», «DDG Lite» — одно и то же имя движка."""
-    return re.sub(r"[^a-z0-9]+", "", (name or "").lower())
+    """«Right Dao», «right-dao», «DDG Lite», «Хабр» — одно и то же имя движка."""
+    return re.sub(r"[^a-z0-9а-яё]+", "", (name or "").lower())
 
 
 ENGINES_NORM = {_norm_engine(key): fn for key, fn in ENGINES.items()}
@@ -634,9 +691,11 @@ def _groups(plan):
 def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=None):
     """Ищет по нескольким источникам. engine='auto' — параллельно с RRF-слиянием.
     searxng_url — включённый в настройках свой инстанс; опрашивается первым."""
-    query = (query or "").strip()
-    if not query:
+    orig_query = (query or "").strip()
+    if not orig_query:
         return {"query": "", "engine": engine, "results": [], "sources": [], "errors": {}}
+    cleaned = clean_query(orig_query)
+    query = cleaned if cleaned else orig_query
     count = max(1, min(int(count or 8), 25))
     raw_name = (engine or "auto").strip()
     name = _norm_engine(raw_name)
@@ -656,7 +715,7 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
         else:
             err = "неизвестный движок. Доступны: %s" % ", ".join(
                 engine_names() + (["searxng"] if searxng_url else []))
-        return {"query": query, "engine": raw_name, "results": [], "sources": [],
+        return {"query": orig_query, "engine": raw_name, "results": [], "sources": [],
                 "errors": {raw_name: err}}
 
     key = (query.lower(), count, name, searxng_url or "")
@@ -689,7 +748,17 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
                     seen.add(k)
                     results.append(item)
 
-    res = {"query": query, "engine": name, "count": count, "results": results[:count],
+    # Если выдача пустая, а в запросе были кавычки или спецсимволы — автоматически перезапускаем без них
+    if not results and any(ch in orig_query for ch in ('"', "'", '«', '»', '“', '”', '+')):
+        relaxed = re.sub(r'["\'«»“”\+]', ' ', orig_query).strip()
+        relaxed = re.sub(r'\s+', ' ', relaxed)
+        if relaxed and relaxed.lower() != orig_query.lower() and relaxed.lower() != query.lower():
+            retry_res = search(relaxed, count=count, engine=raw_name, timeout=timeout, searxng_url=searxng_url)
+            if retry_res.get("results"):
+                retry_res["query"] = orig_query
+                return retry_res
+
+    res = {"query": orig_query, "engine": name, "count": count, "results": results[:count],
            "sources": sources, "errors": errors}
     if res["results"]:
         _cache_put(key, res)

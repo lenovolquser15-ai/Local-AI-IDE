@@ -819,11 +819,17 @@ function plugCard(info, actions) {
   const head = node('div', 'pcard-head');
   head.append(node('div', 'pcard-name', esc(info.name || info.file || '?')));
   if (info.version) head.append(node('span', 'pcard-file', esc(info.version)));
+  if (info.badge) {
+    const b = node('span', 'pbadge fit-' + (info.badgeColor || 'green'), esc(info.badge));
+    if (info.badgeTitle) b.title = info.badgeTitle;
+    head.append(b);
+  }
   head.append(node('span', 'grow'));
   if (actions) head.append(...actions);
   card.append(head);
   if (info.desc) card.append(node('div', 'pcard-desc', esc(info.desc)));
   if (info.file) card.append(node('div', 'pcard-file', esc(info.file + (info.dir && !info.path ? '' : ''))));
+  if (info.recommendation) card.append(node('div', 'pcard-rec', esc(info.recommendation)));
   if (info.tools && info.tools.length) {
     const row = node('div', 'pcard-tools');
     info.tools.forEach((t) => row.append(node('span', 'ptool', esc(typeof t === 'string' ? t : t.name))));
@@ -927,8 +933,16 @@ function fmtSize(bytes) {
 }
 
 function renderLM(data) {
+  const hw = data.hardware || {};
+  let hwSummary = '';
+  if (hw.ram_total_gb) {
+    hwSummary += ' · RAM: ' + hw.ram_free_gb + '/' + hw.ram_total_gb + ' ГБ';
+  }
+  if (hw.has_gpu && hw.gpu_name) {
+    hwSummary += ' · ' + hw.gpu_name.replace('NVIDIA GeForce ', '') + ': ' + hw.vram_free_gb + '/' + hw.vram_total_gb + ' ГБ VRAM';
+  }
   $('#lmBase').textContent = 'сервер: ' + (data.base || '…') + ' · ' +
-    (data.alive ? 'живой' : 'молчит') + ' · моделей на диске: ' + (data.disk || []).length;
+    (data.alive ? 'живой' : 'молчит') + ' · моделей на диске: ' + (data.disk || []).length + hwSummary;
   const loaded = $('#lmLoaded');
   loaded.innerHTML = '';
   if (!(data.loaded || []).length) loaded.append(node('div', 'empty-note', 'в памяти пусто — загрузи модель с диска'));
@@ -939,11 +953,16 @@ function renderLM(data) {
       try { await api('/api/lms/unload', { model: m.modelKey || m.path || m.identifier }); refreshLM(); }
       catch (err) { alert(err.message); }
     };
+    const est = m.estimate || {};
     const card = plugCard({
       name: m.displayName || m.modelKey || m.path,
       desc: [m.status, m.contextLength ? 'контекст ' + m.contextLength : '', m.paramsString || '',
         m.quantization && m.quantization.name ? m.quantization.name : '', fmtSize(m.sizeBytes)]
         .filter(Boolean).join(' · '),
+      badge: est.fit_label ? (est.fit_label + ' · ' + (est.tok_per_sec || '')) : '',
+      badgeColor: est.fit_color || 'green',
+      badgeTitle: est.recommendation || '',
+      recommendation: est.recommendation ? ('⚡ ' + est.ui_comfort + ': ' + est.recommendation) : '',
       tools: [],
       file: m.modelKey || m.path || m.identifier,
     }, actions);
@@ -963,12 +982,17 @@ function renderLM(data) {
       catch (err) { alert(err.message); loadBtn.disabled = false; loadBtn.textContent = 'Загрузить'; }
     };
     actions.push(loadBtn);
+    const est = m.estimate || {};
     const card = plugCard({
       name: m.displayName || m.modelKey || m.path,
       desc: [m.type, m.paramsString || '', m.architecture || '', m.trainedForToolUse ? 'tools' : '',
         m.vision ? 'vision' : '', 'контекст до ' + (m.maxContextLength || '?'),
         m.quantization && m.quantization.name ? m.quantization.name : '', fmtSize(m.sizeBytes)]
         .filter(Boolean).join(' · '),
+      badge: est.fit_label ? (est.fit_label + ' · ' + (est.tok_per_sec || '')) : '',
+      badgeColor: est.fit_color || 'green',
+      badgeTitle: est.recommendation || '',
+      recommendation: est.recommendation ? ('⚡ ' + est.ui_comfort + ': ' + est.recommendation) : '',
       tools: [],
       file: m.modelKey || m.path,
     }, actions);

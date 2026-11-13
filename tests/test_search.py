@@ -96,6 +96,22 @@ SEARXNG_JSON = json.dumps({"results": [
     {"title": "Searx Result запрос", "url": "https://searx.example.org/x", "content": "Snippet запрос"},
     {"title": "Example A запрос", "url": "https://example.com/a", "content": "Snippet A запрос"}]})
 
+HABR_XML = """<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0">
+  <channel>
+    <title>Хабр / Поиск</title>
+    <link>https://habr.com/</link>
+    <description>Поиск на Хабре</description>
+    <item>
+      <title><![CDATA[Тестирование с pytest в Python]]></title>
+      <link>https://habr.com/ru/articles/700000/?utm_source=habrahabr&amp;utm_medium=rss&amp;utm_campaign=700000</link>
+      <description><![CDATA[Подробный разбор фикстур и параметризации.]]></description>
+      <pubDate>Thu, 12 Nov 2026 12:00:00 GMT</pubDate>
+    </item>
+  </channel>
+</rss>
+"""
+
 
 def main():
     # 1. разбор выдачи DuckDuckGo
@@ -470,6 +486,45 @@ def main():
         res = tk.call("web_search", {"query": "запрос инструмент"})
         check(res.get("ok") and "searxng" in res.get("sources", []),
               "searxng: галочка в конфиге не дошла до инструмента (%s)" % res.get("sources"))
+    finally:
+        search_mod._fetch = old_fetch
+    search_mod.reset_state()
+
+    # 17. нормализация запроса clean_query
+    q1 = search_mod.clean_query("найди в гугле docker compose для linux")
+    check(q1 == "docker compose для linux", "clean_query: 'найди в гугле' не удалено (%r)" % q1)
+    q2 = search_mod.clean_query("пожалуйста, как исправить ошибку connection refused?")
+    check(q2 == "connection refused", "clean_query: 'пожалуйста, как исправить ошибку' не удалено (%r)" % q2)
+    q3 = search_mod.clean_query("погугли fast api")
+    check(q3 == "fast api", "clean_query: 'погугли' не удалено (%r)" % q3)
+
+    # 18. habr rss и алиас хабр
+    search_mod.reset_state()
+    try:
+        search_mod._fetch = fake_fetch({"habr.com": HABR_XML})
+        res_habr = search_mod.search("pytest", engine="habr")
+        check(len(res_habr["results"]) == 1, "habr: результат не найден (%s)" % res_habr)
+        check(res_habr["results"][0]["url"] == "https://habr.com/ru/articles/700000/",
+              "habr: utm-метки не отрезаны от url (%s)" % res_habr["results"][0]["url"])
+        check("pytest" in res_habr["results"][0]["title"], "habr: заголовок не распарсен")
+        res_alias = search_mod.search("pytest", engine="хабр")
+        check(res_alias["results"] and res_alias["results"][0]["source"] == "habr",
+              "хабр: кириллический алиас не сработал")
+    finally:
+        search_mod._fetch = old_fetch
+    search_mod.reset_state()
+
+    # 19. авто-перезапуск без кавычек и спецсимволов при нулевой выдаче
+    search_mod.reset_state()
+    try:
+        def dynamic_fetch(url, timeout=20.0, headers=None, data=None):
+            if "%22" in url or '"' in url:
+                return "<html><body>ничего не найдено</body></html>"
+            return DDG_HTML
+        search_mod._fetch = dynamic_fetch
+        res_quotes = search_mod.search('"запрос"', count=2, engine="duckduckgo")
+        check(res_quotes["results"], "авто-перезапуск: без кавычек поиск не дал результатов (%s)" % res_quotes)
+        check(res_quotes["query"] == '"запрос"', "авто-перезапуск: исходный запрос искажён (%s)" % res_quotes.get("query"))
     finally:
         search_mod._fetch = old_fetch
     search_mod.reset_state()

@@ -226,6 +226,31 @@ class LLM:
         except Exception:
             return False
 
+    def detect_context_length(self, model=None):
+        """Автоопределение размера контекста из LM Studio (GET /v1/models или CLI)."""
+        target = model or self.model
+        try:
+            resp = requests.get(self.base + "/models", headers=self.headers(), timeout=4)
+            if resp.ok:
+                items = resp.json().get("data", [])
+                for m in items:
+                    if target and m.get("id") != target:
+                        continue
+                    ctx = (m.get("context_length") or m.get("contextLength") or
+                           m.get("max_model_len") or m.get("context_window"))
+                    if isinstance(ctx, int) and ctx > 512:
+                        return ctx
+        except Exception:
+            pass
+        try:
+            from . import lms
+            readiness = lms.readiness(self.cfg)
+            if readiness.get("context_length"):
+                return readiness["context_length"]
+        except Exception:
+            pass
+        return None
+
     def _ensure_model(self):
         if not self.model:
             available = [m for m in self.models() if "embedding" not in m.lower()]
