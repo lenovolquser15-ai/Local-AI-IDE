@@ -4,7 +4,7 @@
 > tool use (shell, files, browser via CDP, multi-engine web search), goal mode with
 > automatic context compaction, session history with Markdown export, Windows build via PyInstaller.
 >
-> **Quick start (Windows):** download `LocalHarness-Setup-v1.0.1.exe` from
+> **Quick start (Windows):** download `LocalHarness-Setup-v1.0.2.exe` from
 > [Releases](https://github.com/lenovolquser15-ai/Local-AI-IDE/releases) (or use the portable zip),
 > install LM Studio and load a model. The UI opens at `http://127.0.0.1:7788`.
 > From source: Python 3.10+, deps from `requirements.txt`, `python -m harness serve`.
@@ -30,7 +30,7 @@
 
 | как | что делает |
 |---|---|
-| `LocalHarness-Setup-v1.0.1.exe` (из Releases) | установщик: без прав администратора, ярлык в меню Пуск, опциональный автозапуск; обновление и удаление не трогают `data` и `config.json` |
+| `LocalHarness-Setup-v1.0.2.exe` (из Releases) | установщик: без прав администратора, ярлык в меню Пуск, опциональный автозапуск; обновление и удаление не трогают `data` и `config.json` |
 | `LocalHarness.exe` (после сборки) или `lh.cmd` | поднимает сервер на `127.0.0.1:7788` и открывает окно Chrome в режиме приложения |
 | `python -m harness serve` | то же из исходников |
 | `python -m harness cli "сделай X"` | разовый запрос в терминале |
