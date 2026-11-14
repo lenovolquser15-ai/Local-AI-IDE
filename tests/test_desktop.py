@@ -297,7 +297,7 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(image.mode, "RGBA")
         self.assertEqual(image.getpixel((15, 20)), (255, 255, 255, 255))
 
-    def _run_tray(self, action, *, open_browser=False, fail_run=False, fail_setup=False):
+    def _run_tray(self, action, *, open_browser=False, fail_run=False, fail_setup=False, cfg=None):
         test = self
         icons = []
         class Icon:
@@ -345,7 +345,7 @@ class DesktopTests(unittest.TestCase):
         with patch.dict(sys.modules, {"pystray": fake_tray}), \
                 patch.object(desktop, "_hide_owned_console", return_value=123) as hide, \
                 patch.object(desktop, "_restore_console") as restore:
-            desktop.run({"host": "127.0.0.1", "port": 0}, open_browser=open_browser)
+            desktop.run(cfg or {"host": "127.0.0.1", "port": 0}, open_browser=open_browser)
         restore.assert_called_once_with(123)
         hide.assert_called_once_with()
         self.assertIsNone(desktop._runtime)
@@ -481,6 +481,32 @@ class DesktopTests(unittest.TestCase):
             self._run_tray(lambda icon: None, fail_setup=True)
         self.assertIsInstance(raised.exception.__cause__, OSError)
         self.assertIsNone(desktop._runtime)
+
+    def test_tray_binds_all_interfaces_when_lan_enabled(self):
+        captured = []
+
+        def action(icon):
+            runtime = desktop._runtime
+            captured.append(runtime.httpd.server_address)
+            icon.menu[1].callback(icon, icon.menu[1])
+
+        with patch.object(server, "RUNS", {}):
+            self._run_tray(action, cfg={"host": "127.0.0.1", "port": 0, "lan_access": True})
+        self.assertEqual(captured[0][0], "0.0.0.0")
+
+    def test_tray_rebinds_http_after_lan_toggle(self):
+        def action(icon):
+            runtime = desktop._runtime
+            port = runtime.httpd.server_address[1]
+            new_cfg = {"host": "127.0.0.1", "port": port, "lan_access": True}
+            with patch.object(server, "load", return_value=new_cfg):
+                runtime._rebind()
+            self.assertEqual(runtime.httpd.server_address[0], "0.0.0.0")
+            self.assertTrue(runtime._http_thread.is_alive())
+            icon.menu[1].callback(icon, icon.menu[1])
+
+        with patch.object(server, "RUNS", {}):
+            self._run_tray(action)
 
     def test_tray_start_failure_closes_server_and_clears_state(self):
         captured = []

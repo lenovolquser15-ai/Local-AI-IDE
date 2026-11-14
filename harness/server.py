@@ -25,6 +25,12 @@ RUNS = {}
 RUNS_LOCK = threading.Lock()
 STARTED = time.time()
 
+# Смена lan_access меняет адрес привязки (127.0.0.1 ↔ 0.0.0.0), а живой сокет
+# перепривязать нельзя: сервер закрывается и открывается заново на том же порту.
+_RESTART = threading.Event()
+_RESTARTER = {"fn": None}
+_RESTARTER_LOCK = threading.Lock()
+
 # события, которые живут только в прямом эфире и не засоряют журнал сессии
 TRANSIENT = {"delta", "reason", "speed", "tool_start"}
 
@@ -348,6 +354,39 @@ def ensure_provider(cfg, wait=45.0):
             cli_tried = True
             threading.Thread(target=lms_mod.server_start, args=(cfg, 20), daemon=True).start()
     return provider_status(cfg)
+
+
+def bind_address(cfg=None):
+    cfg = load() if cfg is None else cfg
+    host = "0.0.0.0" if cfg.get("lan_access", False) else cfg.get("host", "127.0.0.1")
+    return host, int(cfg.get("port", 7788))
+
+
+def make_server(cfg=None, handler=None):
+    host, port = bind_address(cfg)
+    srv = ThreadingHTTPServer((host, port), handler or Handler)
+    srv.daemon_threads = True
+    return srv
+
+
+def register_restarter(fn):
+    with _RESTARTER_LOCK:
+        _RESTARTER["fn"] = fn
+
+
+def request_restart():
+    """Перезапустить приём соединений с новым адресом привязки.
+
+    Обработчик уже отправил ответ; остановка старого сервера идёт в отдельном
+    потоке с небольшой задержкой, чтобы ответ успел уйти клиенту.
+    """
+    _RESTART.set()
+    with _RESTARTER_LOCK:
+        fn = _RESTARTER["fn"]
+    if fn is None:
+        return False
+    threading.Thread(target=fn, name="LH-restart", daemon=True).start()
+    return True
 
 
 def _json_response(handler, data, status=200):
@@ -751,13 +790,16 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_config(self, body):
         with CONFIG_LOCK:
-            cfg = load()
-            cfg = _merge(cfg, body.get("config", {}))
+            old = load()
+            cfg = _merge(old, body.get("config", {}))
             save(cfg)
         lms_mod.invalidate()
         with _PROBE["lock"]:
             _PROBE["at"] = 0.0
-        _json_response(self, {"ok": True, "config": cfg})
+        payload = {"ok": True, "config": cfg}
+        if bind_address(old) != bind_address(cfg):
+            payload["restart"] = request_restart()
+        _json_response(self, payload)
 
     def handle_plugin_toggle(self, body):
         _json_response(self, plugins.set_enabled(body.get("file"), body.get("enabled", True)))
@@ -891,17 +933,33 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(cfg):
-    lan = bool(cfg.get("lan_access", False))
-    host = "0.0.0.0" if lan else cfg.get("host", "127.0.0.1")
-    port = int(cfg.get("port", 7788))
-    server = ThreadingHTTPServer((host, port), Handler)
-    lan_ip = get_lan_ip()
-    print("LocalHarness server on http://%s:%d" % ("127.0.0.1", port))
-    if lan:
-        print("  LAN access enabled: http://%s:%d" % (lan_ip, port))
+    """Слушать порт, перепривязываясь при смене lan_access из интерфейса."""
     try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        pass
+        while True:
+            current = load()
+            host, port = bind_address(current)
+            server = make_server(current)
+
+            def _stop(srv=server):
+                time.sleep(0.35)  # дать ответу /api/config уйти клиенту
+                try:
+                    srv.shutdown()
+                except OSError:
+                    pass
+
+            register_restarter(_stop)
+            _RESTART.clear()
+            print("LocalHarness server on http://%s:%d" % ("127.0.0.1", port))
+            if host == "0.0.0.0":
+                print("  LAN access enabled: http://%s:%d" % (get_lan_ip(), port))
+            try:
+                server.serve_forever()
+            except KeyboardInterrupt:
+                return
+            finally:
+                register_restarter(None)
+                server.server_close()
+            if not _RESTART.is_set():
+                return
     finally:
-        server.server_close()
+        register_restarter(None)

@@ -575,6 +575,7 @@ async function send() {
 }
 
 async function openSession(id) {
+  setSideDrawer(false);
   if (streamAbort) streamAbort.abort();
   running = false;
   sessionId = id;
@@ -619,6 +620,7 @@ async function openSession(id) {
 
 /* ---------- view tabs ---------- */
 function setView(name) {
+  setSideDrawer(false);
   currentView = name;
   document.querySelectorAll('.view-tab').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   const chat = name === 'chat';
@@ -888,8 +890,25 @@ async function refreshDesktop() {
   } catch (err) { $('#desktopStatus').textContent = err.message; }
 }
 
+async function waitServerRestart() {
+  pushNotice('Сервер перезапускается…', 'warn');
+  for (let i = 0; i < 50; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    try {
+      const st = await api('/api/state');
+      pushNotice(st.lan_access
+        ? 'Сервер перезапущен. Доступ по Wi-Fi: ' + (st.lan_url || '—')
+        : 'Сервер перезапущен. Доступ по Wi-Fi выключен.', 'ok');
+      return st;
+    } catch (err) { /* сервер ещё поднимается */ }
+  }
+  pushNotice('Сервер не ответил после перезапуска — проверь трей или консоль.', 'bad');
+  return null;
+}
+
 async function patchConfig(key, value) {
-  await api('/api/config', { config: { [key]: value } });
+  const res = await api('/api/config', { config: { [key]: value } });
+  if (res && res.restart) await waitServerRestart();
   await refreshState();
 }
 
@@ -1232,18 +1251,63 @@ $('#railBtn').onclick = () => {
   app.classList.toggle('rail');
   localStorage.setItem('lh.rail', app.classList.contains('rail') ? '1' : '0');
 };
+const mobileLayout = () => window.matchMedia('(max-width: 768px)').matches;
+function syncBackdrop() {
+  const backdrop = $('#sideBackdrop');
+  if (!backdrop) return;
+  const open = mobileLayout() && (
+    ($('#side') && $('#side').classList.contains('open')) ||
+    (settingsDrawer() && settingsDrawer().classList.contains('open'))
+  );
+  backdrop.hidden = !open;
+  backdrop.classList.toggle('active', open);
+}
+function setSideDrawer(open) {
+  const side = $('#side');
+  if (!side) return;
+  side.classList.toggle('open', open);
+  syncBackdrop();
+}
+if ($('#mobileMenuBtn')) $('#mobileMenuBtn').onclick = () => setSideDrawer(true);
+if ($('#sideCloseBtn')) $('#sideCloseBtn').onclick = () => setSideDrawer(false);
+
 const settingsDrawer = () => $('#settingsDrawer');
 function setSettingsDrawer(open) {
   const d = settingsDrawer();
   if (!d) return;
-  if (!open && d.contains(document.activeElement)) $('#gearBtn').focus();
+  if (!open && d.contains(document.activeElement)) $('#gearBtn')?.focus();
   d.classList.toggle('open', open);
   d.setAttribute('aria-hidden', open ? 'false' : 'true');
-  $('#gearBtn').classList.toggle('on', open);
+  if ($('#gearBtn')) $('#gearBtn').classList.toggle('on', open);
+  if ($('#mobileGearBtn')) $('#mobileGearBtn').classList.toggle('on', open);
+  syncBackdrop();
 }
-$('#gearBtn').onclick = () => setSettingsDrawer(!settingsDrawer().classList.contains('open'));
-$('#drawerClose').onclick = () => setSettingsDrawer(false);
-document.addEventListener('keydown', (e) => { if (e.key === 'Escape') setSettingsDrawer(false); });
+if ($('#gearBtn')) $('#gearBtn').onclick = () => setSettingsDrawer(!settingsDrawer().classList.contains('open'));
+if ($('#mobileGearBtn')) $('#mobileGearBtn').onclick = () => setSettingsDrawer(!settingsDrawer().classList.contains('open'));
+if ($('#drawerClose')) $('#drawerClose').onclick = () => setSettingsDrawer(false);
+if ($('#sideBackdrop')) {
+  $('#sideBackdrop').onclick = () => {
+    setSideDrawer(false);
+    setSettingsDrawer(false);
+  };
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    setSettingsDrawer(false);
+    setSideDrawer(false);
+  }
+});
+window.addEventListener('resize', syncBackdrop);
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', () => {
+    if (currentView === 'chat' && log) log.scrollTop = log.scrollHeight;
+  });
+}
+$('#input').addEventListener('focus', () => {
+  if (window.innerWidth <= 768 && log) {
+    setTimeout(() => { log.scrollTop = log.scrollHeight; }, 300);
+  }
+});
 $('#showReasoning').onchange = (e) => {
   showReasoning = e.target.checked;
   localStorage.setItem('lh.showReasoning', showReasoning ? '1' : '0');
@@ -1371,11 +1435,8 @@ $('#comfyuiTestBtn').onclick = async () => {
   }
 };
 $('#lanAccessEnabled').onchange = (e) => {
-  patchConfig('lan_access', e.target.checked);
   $('#lanSection').hidden = !e.target.checked;
-  if (e.target.checked) {
-    pushNotice('Доступ по локальной сети включён. Перезапустите сервер, чтобы открыть порт для других устройств.', 'warn');
-  }
+  patchConfig('lan_access', e.target.checked);
 };
 $('#lanCopyBtn').onclick = () => {
   const url = $('#lanUrlText').textContent;

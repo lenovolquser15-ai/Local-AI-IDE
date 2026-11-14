@@ -60,6 +60,73 @@ def test_comfyui_disabled():
     assert "отключена" in res.get("error", "").lower()
 
 
+def test_bind_address_follows_lan_flag():
+    assert server_mod.bind_address({"lan_access": False, "host": "127.0.0.1", "port": 7788}) == ("127.0.0.1", 7788)
+    assert server_mod.bind_address({"lan_access": True, "host": "127.0.0.1", "port": 7788}) == ("0.0.0.0", 7788)
+
+
+def test_lan_toggle_rebinds_server_without_restart():
+    """Флажок LAN обязан сам переоткрыть сокет: 127.0.0.1 ↔ 0.0.0.0."""
+    import socket
+    import threading
+    import time
+
+    import requests
+
+    cfg_path = os.environ["LH_CONFIG"]
+    holder = socket.socket()
+    holder.bind(("127.0.0.1", 0))
+    port = holder.getsockname()[1]
+    holder.close()
+
+    cfg = server_mod.load()
+    cfg.update({"provider": "ollama", "host": "127.0.0.1", "port": port, "lan_access": False})
+    server_mod.save(cfg)
+
+    thread = threading.Thread(target=server_mod.serve, args=(server_mod.load(),), daemon=True)
+    thread.start()
+    base = "http://127.0.0.1:%d" % port
+
+    def wait_state(predicate, timeout=12):
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                state = requests.get(base + "/api/state", timeout=1).json()
+            except Exception:
+                time.sleep(0.1)
+                continue
+            if predicate(state):
+                return state
+            time.sleep(0.1)
+        raise AssertionError("server did not come back after restart")
+
+    try:
+        wait_state(lambda st: bool(st.get("version")))
+        headers = {"Content-Type": "application/json"}
+
+        on = requests.post(base + "/api/config", json={"config": {"lan_access": True}},
+                           headers=headers, timeout=5).json()
+        assert on.get("restart") is True
+        assert wait_state(lambda st: st.get("lan_access") is True)["lan_access"] is True
+        assert server_mod.bind_address(server_mod.load())[0] == "0.0.0.0"
+
+        off = requests.post(base + "/api/config", json={"config": {"lan_access": False}},
+                            headers=headers, timeout=5).json()
+        assert off.get("restart") is True
+        wait_state(lambda st: st.get("lan_access") is False)
+        assert server_mod.bind_address(server_mod.load())[0] == "127.0.0.1"
+    finally:
+        fn = server_mod._RESTARTER["fn"]
+        if fn is not None:
+            fn()
+        thread.join(timeout=5)
+        try:
+            os.remove(cfg_path)
+        except OSError:
+            pass
+    assert not thread.is_alive()
+
+
 def test_qr_code_generation():
     ip = get_lan_ip()
     assert ip

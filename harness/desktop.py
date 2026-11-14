@@ -4,6 +4,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 
 _RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 _RUN_NAME = "LocalHarness"
@@ -156,16 +157,46 @@ class _Runtime:
                         return
                     super().handle_chat(body)
 
+        self._handler_cls = Handler
         self.icon = pystray.Icon("LocalHarness", _icon_image(), "LocalHarness", menu=pystray.Menu(
             pystray.MenuItem("Open", self._open, default=True),
             pystray.MenuItem("Exit", self.request_exit)))
-        self.httpd = server.ThreadingHTTPServer(
-            (cfg.get("host", "127.0.0.1"), int(cfg.get("port", 7788))), Handler)
+        self.httpd = server.make_server(cfg, Handler)
 
     def _open(self, icon=None, item=None):
         if not self.stopping.is_set():
             from .__main__ import open_ui
             open_ui(self.cfg)
+
+    def _rebind(self):
+        """Пересоздать HTTP-сервер после смены lan_access (трей не перезапускается)."""
+        time.sleep(0.35)
+        if self.stopping.is_set():
+            return
+        try:
+            self.httpd.shutdown()
+        except OSError:
+            pass
+        if self._http_thread is not None:
+            self._http_thread.join(timeout=5)
+        try:
+            self.httpd.server_close()
+        except OSError:
+            pass
+        if self.stopping.is_set():
+            return
+        self.cfg = self.server_module.load()
+        try:
+            self.httpd = self.server_module.make_server(self.cfg, self._handler_cls)
+        except OSError as exc:
+            logging.exception("Could not rebind the HTTP server")
+            self._startup_error = exc
+            self.request_exit()
+            return
+        thread = threading.Thread(target=self.httpd.serve_forever,
+                                  kwargs={"poll_interval": 0.2}, name="LH-http", daemon=True)
+        thread.start()
+        self._http_thread = thread
 
     def _setup(self, icon):
         try:
@@ -209,6 +240,7 @@ class _Runtime:
                 except Exception:
                     logging.exception("Could not signal an active bridge")
         finally:
+            self.server_module.register_restarter(None)
             try:
                 if self._http_thread is not None:
                     if self._http_thread.is_alive():
@@ -226,6 +258,7 @@ class _Runtime:
 
     def run(self):
         try:
+            self.server_module.register_restarter(self._rebind)
             thread = threading.Thread(target=self.httpd.serve_forever,
                                       kwargs={"poll_interval": 0.2}, name="LH-http", daemon=True)
             thread.start()

@@ -2,11 +2,15 @@
 <html lang="ru" data-theme="dark">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#121316">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>LocalHarness</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
+<div id="sideBackdrop" class="side-backdrop" hidden></div>
 <div id="app" class="app">
 
   <aside id="side" class="side">
@@ -15,6 +19,7 @@
       <div class="brand">Local<i>Harness</i></div>
       <span class="grow"></span>
       <span class="dot idle" id="provDot" title="локальный сервер моделей"></span>
+      <button id="sideCloseBtn" class="icon mobile-only" type="button" title="Закрыть меню">✕</button>
     </div>
     <button id="newChat" class="new-session"><span class="plus">+</span><span class="text">Новая сессия</span></button>
     <div class="side-label">Сессии</div>
@@ -33,12 +38,14 @@
 
   <main class="center">
     <header class="head">
+      <button id="mobileMenuBtn" class="icon mobile-only" type="button" title="Сессии и меню">☰</button>
       <span class="head-title" id="sessionTitle">новая сессия</span>
       <span class="grow"></span>
-      <button id="headUnloadBtn" class="ghost small-btn" title="Выгрузить модель из памяти LM Studio" hidden>⏏ Выгрузить модель</button>
+      <button id="headUnloadBtn" class="ghost small-btn" title="Выгрузить модель из памяти LM Studio" hidden>⏏ Выгрузить</button>
       <span class="stat" id="speed" title="скорость генерации"></span>
       <span class="stat" id="stat"></span>
-      <button id="stopBtn" class="danger" disabled>Остановить</button>
+      <button id="stopBtn" class="danger" disabled>Стоп</button>
+      <button id="mobileGearBtn" class="icon mobile-only" type="button" title="Настройки">⚙</button>
     </header>
 
     <div class="ctxbar" id="ctxBar" hidden>
@@ -150,32 +157,36 @@
         <div class="attach-strip" id="attachStrip" hidden></div>
         <textarea id="input" rows="2" placeholder="Что сделать на компе? Enter — отправить, Shift+Enter — перенос"></textarea>
         <div class="composer-row">
-          <select id="provider" class="compact" title="Провайдер"></select>
-          <select id="model" class="compact wide" title="Модель"></select>
-          <select id="protocol" class="compact" title="Как модель вызывает инструменты">
-            <option value="auto">tools: auto</option>
-            <option value="native">native</option>
-            <option value="json">json</option>
-          </select>
-          <select id="profile" class="compact" title="Набор инструментов">
-            <option value="core">core</option>
-            <option value="full">full</option>
-          </select>
-          <select id="perms" class="compact" title="Сколько прав дать модели">
-            <option value="auto">права: авто</option>
-            <option value="unrestricted">права: всё</option>
-            <option value="ask">права: спрашивать</option>
-          </select>
-          <button id="thinkBtn" class="icon" title="Показывать размышления модели">⌁</button>
-          <label class="goal-toggle" title="Модель работает, пока сама не подтвердит достижение цели">
-            <input type="checkbox" id="goalMode"><span>цель</span>
-          </label>
-          <input type="text" id="goalCriteria" placeholder="критерий готовности" hidden>
-          <span class="grow"></span>
-          <span class="hint" id="modeHint"></span>
-          <button id="attachBtn" class="icon" title="Прикрепить картинки (или Ctrl+V / перетащи в поле)">🖼</button>
-          <input type="file" id="attachFile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-          <button id="send" class="primary">Отправить</button>
+          <div class="composer-selectors">
+            <select id="provider" class="compact" title="Провайдер"></select>
+            <select id="model" class="compact wide" title="Модель"></select>
+            <select id="protocol" class="compact" title="Как модель вызывает инструменты">
+              <option value="auto">tools: auto</option>
+              <option value="native">native</option>
+              <option value="json">json</option>
+            </select>
+            <select id="profile" class="compact" title="Набор инструментов">
+              <option value="core">core</option>
+              <option value="full">full</option>
+            </select>
+            <select id="perms" class="compact" title="Сколько прав дать модели">
+              <option value="auto">права: авто</option>
+              <option value="unrestricted">права: всё</option>
+              <option value="ask">права: спрашивать</option>
+            </select>
+            <button id="thinkBtn" class="icon" title="Показывать размышления модели">⌁</button>
+            <label class="goal-toggle" title="Модель работает, пока сама не подтвердит достижение цели">
+              <input type="checkbox" id="goalMode"><span>цель</span>
+            </label>
+            <input type="text" id="goalCriteria" placeholder="критерий готовности" hidden>
+          </div>
+          <span class="grow desktop-only"></span>
+          <div class="composer-actions">
+            <span class="hint" id="modeHint"></span>
+            <button id="attachBtn" class="icon" title="Прикрепить картинки (или Ctrl+V / перетащи в поле)">🖼</button>
+            <input type="file" id="attachFile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
+            <button id="send" class="primary">Отправить</button>
+          </div>
         </div>
       </div>
     </footer>
@@ -247,7 +258,7 @@
     <div class="settings-block">
       <div class="plate-title">Мобильный доступ по Wi-Fi</div>
       <label class="autostart-label"><input id="lanAccessEnabled" type="checkbox"> Доступ с других устройств в локальной сети</label>
-      <div class="page-sub">Открывает доступ к LocalHarness с вашего смартфона или планшета по домашнему Wi-Fi. Изменение вступит в силу после перезапуска сервера. Принимаются только приватные адреса (192.168.x, 10.x, VPN), публичный интернет закрыт. Пароля нет — не включай в общественных сетях.</div>
+      <div class="page-sub">Открывает доступ к LocalHarness с вашего смартфона или планшета по домашнему Wi-Fi. Сервер перезапустится автоматически и сразу покажет адрес и QR-код. Принимаются только приватные адреса (192.168.x, 10.x, VPN), публичный интернет закрыт. Пароля нет — не включай в общественных сетях.</div>
       <div id="lanSection" hidden>
         <div class="urlrow">
           <span id="lanUrlText" class="field grow monospace" style="overflow:hidden;text-overflow:ellipsis;"></span>
