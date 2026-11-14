@@ -238,6 +238,8 @@ textarea:focus { outline: none; }
   padding: 14px; display: flex; flex-direction: column; gap: 10px; min-height: 120px;
 }
 .plate-title { font-size: 12px; letter-spacing: .4px; text-transform: uppercase; color: var(--text-cap); font-weight: 500; }
+.plate-title-row { display: flex; align-items: center; justify-content: space-between; }
+.memory-info-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; }
 .cardlist { display: flex; flex-direction: column; gap: 8px; }
 .pcard {
   background: var(--layer-2); border: .5px solid var(--l1); border-radius: var(--r-md);

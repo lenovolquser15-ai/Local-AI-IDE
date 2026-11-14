@@ -35,6 +35,7 @@
     <header class="head">
       <span class="head-title" id="sessionTitle">новая сессия</span>
       <span class="grow"></span>
+      <button id="headUnloadBtn" class="ghost small-btn" title="Выгрузить модель из памяти LM Studio" hidden>⏏ Выгрузить модель</button>
       <span class="stat" id="speed" title="скорость генерации"></span>
       <span class="stat" id="stat"></span>
       <button id="stopBtn" class="danger" disabled>Остановить</button>
@@ -100,12 +101,16 @@
             <div class="page-sub" id="lmBase">сервер: …</div>
           </div>
           <span class="grow"></span>
+          <button id="lmsUnloadAll" class="ghost" title="Выгрузить все модели из памяти LM Studio">выгрузить всё</button>
           <button id="lmsWake" class="ghost">разбудить сервер</button>
           <button id="lmsRefresh" class="ghost">обновить</button>
         </div>
         <div class="plug-grid two">
           <section class="plate">
-            <div class="plate-title">В памяти</div>
+            <div class="plate-title-row">
+              <div class="plate-title">В памяти</div>
+              <button id="lmsUnloadPlateBtn" class="ghost small-btn" title="Выгрузить все модели из памяти">выгрузить всё</button>
+            </div>
             <div id="lmLoaded" class="cardlist"></div>
           </section>
           <section class="plate">
@@ -195,6 +200,13 @@
       <label class="check-pill"><input type="checkbox" id="expandReasoning"><span>Разворачивать раздумья</span></label>
       <label class="check-pill"><input type="checkbox" id="autoCompress" checked><span>Сжимать контекст</span></label>
       <label class="check-pill"><input type="checkbox" id="goalChecklistToggle" checked><span>Показывать галочки в цели</span></label>
+    </div>
+    <div class="settings-block" id="loadedModelBlock">
+      <div class="plate-title">Модель в памяти</div>
+      <div class="memory-info-row">
+        <span id="currentLoadedModelName" class="page-sub">не загружена</span>
+        <button id="drawerUnloadBtn" class="ghost" type="button" disabled>Выгрузить из памяти</button>
+      </div>
     </div>
     <div class="settings-block">
       <div class="plate-title">Поиск</div>

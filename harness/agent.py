@@ -6,6 +6,7 @@ import threading
 import time
 
 from . import llm as llm_mod
+from . import lms as lms_mod
 from . import permissions
 from . import schemas
 from . import session as session_mod
@@ -986,6 +987,11 @@ class Agent:
         if self.goal:
             done["goal"] = {"achieved": bool(self.goal_state and self.goal_state["achieved"]),
                             "summary": (self.goal_state or {}).get("summary", "")}
+        try:
+            if self.cfg.get("provider") == "lmstudio":
+                lms_mod.invalidate()
+        except Exception:
+            pass
         self.bridge.emit(done)
         return {"answer": answer, "steps": total_steps, "messages": messages[1:], "protocol": protocol,
                 "speed": self.speed, "goal": self.goal_state}

@@ -122,9 +122,111 @@ def loaded_models(cfg=None, force=False, timeout=20):
     items, err = json_cli(["ps", "--json"], cfg, timeout)
     if not isinstance(items, list):
         items, err = [], err or "неожиданный ответ lms ps"
+    if not items and not err:
+        http_items = _http_models(cfg)
+        if http_items:
+            items = http_items
     with _CACHE["lock"]:
-        _CACHE.update(ps=items, ps_at=time.time(), ps_err=err)
+        cache_ttl = OK_TTL if items else 4.0
+        _CACHE.update(ps=items, ps_at=time.time() - (OK_TTL - cache_ttl), ps_err=err)
     return items, err
+
+
+def _http_models(cfg=None):
+    """Query LM Studio REST API for active models when lms ps is empty."""
+    prov = ((cfg or {}).get("providers") or {}).get((cfg or {}).get("provider", "lmstudio")) or {}
+    base_url = prov.get("base_url") or "http://127.0.0.1:1234/v1"
+    root_url = base_url.rstrip("/")
+    if root_url.endswith("/v1"):
+        root_url = root_url[:-3].rstrip("/")
+
+    import urllib.request
+    try:
+        req = urllib.request.Request(root_url + "/api/v0/models", headers={"User-Agent": "LocalHarness"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            raw = data.get("data") or []
+            loaded_items = []
+            all_served = []
+            try:
+                disk, _ = disk_models(cfg)
+                disk_map = {}
+                for d in (disk or []):
+                    for k in ("modelKey", "path", "identifier", "indexedModelIdentifier"):
+                        if d.get(k):
+                            disk_map[str(d[k])] = d
+            except Exception:
+                disk_map = {}
+
+            for m in raw:
+                mid = m.get("id")
+                if not mid or m.get("type") == "embeddings" or "embedding" in mid.lower():
+                    continue
+                is_loaded = m.get("state") == "loaded"
+                d_meta = disk_map.get(mid) or {}
+                item = {
+                    "type": "llm",
+                    "identifier": mid,
+                    "modelKey": d_meta.get("modelKey") or mid,
+                    "path": d_meta.get("path") or mid,
+                    "displayName": d_meta.get("displayName") or m.get("name") or mid,
+                    "architecture": m.get("arch") or d_meta.get("architecture") or "",
+                    "quantization": d_meta.get("quantization") or {"name": m.get("quantization") or ""},
+                    "sizeBytes": d_meta.get("sizeBytes") or 0,
+                    "paramsString": d_meta.get("paramsString") or "",
+                    "contextLength": m.get("loaded_context_length") or d_meta.get("maxContextLength") or m.get("max_context_length"),
+                    "maxContextLength": d_meta.get("maxContextLength") or m.get("max_context_length"),
+                    "status": "loaded" if is_loaded else "ready",
+                    "vision": m.get("type") == "vlm" or d_meta.get("vision") or "vision" in mid.lower(),
+                    "trainedForToolUse": "tool_use" in (m.get("capabilities") or []) or d_meta.get("trainedForToolUse"),
+                }
+                if is_loaded:
+                    loaded_items.append(item)
+                all_served.append(item)
+            if loaded_items:
+                return loaded_items
+            sel = (cfg or {}).get("model")
+            if sel:
+                matched = [it for it in all_served if it["identifier"] == sel]
+                if matched:
+                    return matched
+            return all_served
+    except Exception:
+        pass
+
+    try:
+        req = urllib.request.Request(base_url.rstrip("/") + "/models", headers={"User-Agent": "LocalHarness"})
+        with urllib.request.urlopen(req, timeout=1.5) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+            raw = data.get("data") or []
+            models = []
+            for m in raw:
+                mid = m.get("id")
+                if not mid or "embedding" in mid.lower():
+                    continue
+                models.append({
+                    "type": "llm",
+                    "identifier": mid,
+                    "modelKey": mid,
+                    "path": mid,
+                    "displayName": mid,
+                    "contextLength": 8192,
+                    "status": "loaded",
+                })
+            if models:
+                return models
+    except Exception:
+        pass
+
+    return []
+
+
+def _match_alias(val, selected):
+    if not val or not selected:
+        return False
+    if val == selected:
+        return True
+    return str(val).replace("\\", "/") == str(selected).replace("\\", "/")
 
 
 def _positive_int(value):
@@ -140,10 +242,10 @@ def _positive_int(value):
 def _chat_model(item):
     kind = str(item.get("type") or "").lower()
     if kind:
-        return kind in ("llm", "chat")
+        return kind in ("llm", "chat", "vlm", "vision")
     # Older CLI versions may omit type; reject embedding names in any alias.
     return not any("embedding" in str(item.get(key) or "").lower()
-                   for key in ("identifier", "modelKey", "path"))
+                   for key in ("identifier", "modelKey", "path", "id"))
 
 
 def readiness(cfg):
@@ -165,9 +267,10 @@ def readiness(cfg):
 
     selected = cfg.get("model")
     if selected:
-        # Prefer an API identifier, but accept either exact disk-model alias.
-        model = next((item for key in ("identifier", "modelKey", "path")
-                      for item in items if item.get(key) == selected), None)
+        # Prefer an API identifier, but accept either exact disk-model alias or normalized path.
+        keys = ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")
+        model = next((item for key in keys
+                      for item in items if _match_alias(item.get(key), selected)), None)
     else:
         model = next((item for item in items if _chat_model(item)), None)
     result["loaded"] = model is not None

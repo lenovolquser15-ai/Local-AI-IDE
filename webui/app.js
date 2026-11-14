@@ -670,6 +670,48 @@ async function refreshState() {
   renderSessions();
   const current = (st.sessions || []).find((row) => row.id === sessionId);
   if (current) $('#sessionTitle').textContent = current.title;
+
+  const hasLoaded = !!(st.model_loaded || (st.lms_loaded && st.lms_loaded.length));
+  const headUnload = $('#headUnloadBtn');
+  if (headUnload) {
+    headUnload.hidden = !hasLoaded;
+    if (hasLoaded) {
+      headUnload.onclick = async () => {
+        headUnload.disabled = true;
+        headUnload.textContent = 'выгружается…';
+        try {
+          await api('/api/lms/unload', { model: '' });
+          pushNotice('Модель выгружена из памяти', 'ok');
+          await refreshState();
+          if (currentView === 'lm') refreshLM();
+        } catch (err) { alert(err.message); }
+        finally { headUnload.disabled = false; headUnload.textContent = '⏏ Выгрузить модель'; }
+      };
+    }
+  }
+  const drawerUnload = $('#drawerUnloadBtn');
+  const drawerModel = $('#currentLoadedModelName');
+  if (drawerUnload && drawerModel) {
+    if (hasLoaded) {
+      const activeName = (st.lms_loaded && st.lms_loaded[0]) || st.model || 'модель';
+      drawerModel.textContent = shortModel(activeName);
+      drawerUnload.disabled = false;
+      drawerUnload.onclick = async () => {
+        drawerUnload.disabled = true;
+        try {
+          await api('/api/lms/unload', { model: '' });
+          pushNotice('Модель выгружена из памяти', 'ok');
+          await refreshState();
+          if (currentView === 'lm') refreshLM();
+        } catch (err) { alert(err.message); }
+        finally { drawerUnload.disabled = false; }
+      };
+    } else {
+      drawerModel.textContent = 'не загружена';
+      drawerUnload.disabled = true;
+    }
+  }
+
   refreshReadiness();
 }
 
@@ -950,8 +992,14 @@ function renderLM(data) {
     const actions = [node('button', 'ghost', 'выгрузить')];
     actions[0].onclick = async () => {
       actions[0].disabled = true;
-      try { await api('/api/lms/unload', { model: m.modelKey || m.path || m.identifier }); refreshLM(); }
-      catch (err) { alert(err.message); }
+      actions[0].textContent = 'выгружается…';
+      try {
+        await api('/api/lms/unload', { model: m.modelKey || m.path || m.identifier });
+        pushNotice('Модель выгружена из памяти', 'ok');
+        await refreshLM();
+        await refreshState();
+      } catch (err) { alert(err.message); }
+      finally { actions[0].disabled = false; actions[0].textContent = 'выгрузить'; }
     };
     const est = m.estimate || {};
     const card = plugCard({
@@ -971,15 +1019,33 @@ function renderLM(data) {
   const disk = $('#lmDisk');
   disk.innerHTML = '';
   if (!(data.disk || []).length) disk.append(node('div', 'empty-note', 'на диске моделей нет — скачай из каталога ниже'));
+  const loadedKeys = new Set(
+    (data.loaded || []).flatMap((m) => [m.modelKey, m.path, m.identifier, m.displayName].filter(Boolean))
+  );
   (data.disk || []).forEach((m) => {
     const isLlm = m.type !== 'embedding';
+    const isLoaded = loadedKeys.has(m.modelKey) || loadedKeys.has(m.path) || loadedKeys.has(m.identifier);
     const actions = [];
-    const loadBtn = node('button', 'primary', 'Загрузить');
+    if (isLoaded) {
+      const unloadBtn = node('button', 'ghost', 'Выгрузить');
+      unloadBtn.onclick = async () => {
+        unloadBtn.disabled = true;
+        unloadBtn.textContent = 'выгружается…';
+        try {
+          await api('/api/lms/unload', { model: m.modelKey || m.path || m.identifier });
+          pushNotice('Модель выгружена из памяти', 'ok');
+          await refreshLM();
+          await refreshState();
+        } catch (err) { alert(err.message); }
+      };
+      actions.push(unloadBtn);
+    }
+    const loadBtn = node('button', isLoaded ? 'ghost' : 'primary', isLoaded ? 'Перезагрузить' : 'Загрузить');
     loadBtn.onclick = async () => {
       loadBtn.disabled = true;
       loadBtn.textContent = 'грузится…';
       try { await api('/api/lms/load', { model: m.modelKey || m.path, context_length: Number($('#lmContext').value) || 8192, ttl: Number($('#lmTtl').value) || 0 }); refreshLM(); }
-      catch (err) { alert(err.message); loadBtn.disabled = false; loadBtn.textContent = 'Загрузить'; }
+      catch (err) { alert(err.message); loadBtn.disabled = false; loadBtn.textContent = isLoaded ? 'Перезагрузить' : 'Загрузить'; }
     };
     actions.push(loadBtn);
     const est = m.estimate || {};
@@ -989,8 +1055,8 @@ function renderLM(data) {
         m.vision ? 'vision' : '', 'контекст до ' + (m.maxContextLength || '?'),
         m.quantization && m.quantization.name ? m.quantization.name : '', fmtSize(m.sizeBytes)]
         .filter(Boolean).join(' · '),
-      badge: est.fit_label ? (est.fit_label + ' · ' + (est.tok_per_sec || '')) : '',
-      badgeColor: est.fit_color || 'green',
+      badge: isLoaded ? '● в памяти' : (est.fit_label ? (est.fit_label + ' · ' + (est.tok_per_sec || '')) : ''),
+      badgeColor: isLoaded ? 'green' : (est.fit_color || 'green'),
       badgeTitle: est.recommendation || '',
       recommendation: est.recommendation ? ('⚡ ' + est.ui_comfort + ': ' + est.recommendation) : '',
       tools: [],
@@ -1198,6 +1264,16 @@ $('#lmTtl').onchange = (e) => patchConfig('lms_ttl', Number(e.target.value) || 0
 $('#searxngEnabled').onchange = (e) => patchConfig('search_searxng', e.target.checked);
 $('#searxngUrl').onchange = (e) => patchConfig('search_searxng_url', e.target.value.trim() || 'http://127.0.0.1:8080');
 $('#lmsRefresh').onclick = refreshLM;
+const unloadAllFn = async () => {
+  try {
+    await api('/api/lms/unload', { model: '' });
+    pushNotice('Все модели выгружены из памяти', 'ok');
+    await refreshLM();
+    await refreshState();
+  } catch (err) { alert(err.message); }
+};
+if ($('#lmsUnloadAll')) $('#lmsUnloadAll').onclick = unloadAllFn;
+if ($('#lmsUnloadPlateBtn')) $('#lmsUnloadPlateBtn').onclick = unloadAllFn;
 $('#lmsWake').onclick = async () => {
   $('#lmBase').textContent = 'сервер: поднимаю…';
   try {

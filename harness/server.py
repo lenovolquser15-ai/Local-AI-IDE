@@ -268,6 +268,8 @@ class Handler(BaseHTTPRequestHandler):
                 dns_probe = {"ok": False, "error": str(exc)}
             pl = plugins.status()
             tools_list = [spec["name"] for spec in schemas.entries(cfg.get("tool_profile", "core"))]
+            loaded_items, _ = lms_mod.loaded_models(cfg) if cfg.get("provider") == "lmstudio" else ([], "")
+            lms_loaded = [lms_mod.model_key(m) for m in (loaded_items or []) if lms_mod.model_key(m)]
             _json_response(self, {
                 "version": LOCALHARNESS,
                 "uptime": int(time.time() - STARTED),
@@ -290,6 +292,8 @@ class Handler(BaseHTTPRequestHandler):
                 "tools": tools_list,
                 "plugins": pl,
                 "provider_status": ps,
+                "lms_loaded": lms_loaded,
+                "model_loaded": bool(lms_loaded),
                 "dns_probe": dns_probe,
             })
             return
@@ -590,6 +594,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg = load()
             cfg = _merge(cfg, body.get("config", {}))
             save(cfg)
+        lms_mod.invalidate()
         with _PROBE["lock"]:
             _PROBE["at"] = 0.0
         _json_response(self, {"ok": True, "config": cfg})
@@ -628,7 +633,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_lms_unload(self, body):
         model = body.get("model")
-        args = ["unload", model] if model else ["unload", "--all"]
+        args = ["unload", model] if (model and model != "all") else ["unload", "--all"]
+        lms_mod.invalidate()
         _json_response(self, start_lms_job("unload", args))
 
     def handle_lms_download(self, body):
