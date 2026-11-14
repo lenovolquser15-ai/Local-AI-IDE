@@ -37,6 +37,9 @@ SPECS = [
      {"profile":"full","name":"dataset_append","desc":"Добавить пример instruction/input/output в JSONL-датасет для SFT/LoRA.","params":{"path":("string","JSONL-файл"),"instruction":("string","инструкция"),"input":("string?","входные данные"),"output":("string","правильный ответ")},"required":["path","instruction","output"]},
      {"profile":"full","name":"dataset_validate","desc":"Проверить JSONL-датасет и посчитать корректные/битые строки.","params":{"path":("string","JSONL-файл")},"required":["path"]},
      {"profile":"full","name":"train_model","desc":"Запустить внешний LoRA/SFT-тренер командой в фоне.","params":{"command":("string","команда запуска обучения"),"cwd":("string?","рабочая папка"),"timeout":("number","секунды"),"background":("bool","в фоне")},"required":["command"]},
+     {"profile":"full","name":"game_control","desc":"Игровой режим и управление играми/GUI на Windows: нажатия клавиш (WASD, пробел, хоткеи с удержанием/скан-кодами для DirectX), движения и клики мыши, относительный поворот камеры в 3D/FPS играх (dx, dy), перетаскивание, фокусировка окна игры и мгновенные скриншоты. Поддерживает последовательность действий actions=[...] за один вызов.","params":{"action":("string?","press|hold|release|combo|click|double_click|down|up|move|look|drag|scroll|wait|sequence|focus|screenshot|check"),"window":("string?","заголовок окна, процесс (.exe) или hwnd"),"actions":("array?","список действий для выполнения подряд"),"key":("string?","клавиша (w, a, s, d, space, shift, ctrl, 1-9, enter, esc и др.)"),"combo":("string?","комбинация клавиш, например shift+w или ctrl+space"),"button":("string?","кнопка мыши: left|right|middle"),"x":("number?","координата X"),"y":("number?","координата Y"),"dx":("number?","смещение камеры X для 3D/FPS игр"),"dy":("number?","смещение камеры Y для 3D/FPS игр"),"x2":("number?","конечная X для drag"),"y2":("number?","конечная Y для drag"),"duration":("number?","длительность нажатия/удержания в секундах, по умолчанию 0.08"),"relative":("bool?","координаты x,y относительно окна игры"),"amount":("number?","прокрутка колеса, по умолчанию 120"),"seconds":("number?","пауза для action=wait"),"screenshot":("bool?","сделать скриншот окна после выполнения действий")},"required":[]},
+     {"profile":"full","name":"generate_image","desc":"Генерация изображений через локальный ComfyUI или Stable Diffusion WebUI. Включается в Настройках (image_gen_enabled).","params":{"prompt":("string","описание желаемого изображения на английском"),"negative_prompt":("string?","что исключить из генерации"),"width":("number?","ширина, по умолчанию 512"),"height":("number?","высота, по умолчанию 512"),"steps":("number?","шаги, по умолчанию 20"),"seed":("number?","сид")},"required":["prompt"]},
+     {"profile":"full","name":"recall","desc":"Поиск в долговременной памяти фактов о пользователе, среде и проектах.","params":{"query":("string?","поисковый запрос")},"required":[]},
 ]
 PROFILES=("core","full")
 
@@ -82,5 +85,13 @@ def build_system_prompt(cfg, profile="core", vision=False):
     notes=["Для локальной автоматизации используй PowerShell.","Для VPS используй SSH-ключ или ssh-agent; пароль не сохраняй. Сохранённые профили — ssh_profile action='list'."]
     style=["Отвечай по-русски и по делу.","Сначала действуй инструментом, потом сообщай результат.","Не говори «готово» без проверки.","Если запрос означает подключение к VPS, извлеки реквизиты и вызови ssh_connect.","Если вызов не сработал — не повторяй его: смени тактику или найди решение через web_search/web_fetch.","Состояние репозитория проверяй инструментом git (status/diff/log); сохраняй работу через git add и git commit. Push и pull — только по явной просьбе пользователя."]
     built = "Ты — LocalHarness, локальный агент.\n\nОКРУЖЕНИЕ:\n"+"\n".join("- %s: %s"%x for x in env.items())+"\n\n"+"\n".join("- "+n for n in notes)+"\n\nИНСТРУМЕНТЫ:\n"+text_protocol_doc(profile)+"\n\nСТИЛЬ:\n"+"\n".join("- "+s for s in style)+"\n"+("" if vision else "Скриншот виден пользователю, но текстовая модель его не видит.")
+    if cfg.get("memory_enabled", False):
+        try:
+            from . import memory as mem_mod
+            mem_text = mem_mod.system_prompt_block()
+            if mem_text:
+                built += "\n\n" + mem_text
+        except Exception:
+            pass
     custom = str(cfg.get("system_prompt") or "").strip()
     return built + ("\n\nДОПОЛНИТЕЛЬНАЯ ИНСТРУКЦИЯ ПОЛЬЗОВАТЕЛЯ:\n" + custom if custom else "")

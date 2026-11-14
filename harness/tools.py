@@ -1264,6 +1264,14 @@ class Toolkit:
     def windows(self, action="list", title=None, hwnd=None, combo=None, text=None, x=None, y=None, **kw):
         return _win(self, action=action, title=title, hwnd=hwnd, combo=combo, text=text, x=x, y=y)
 
+    def game_control(self, action="act", window=None, actions=None, key=None, combo=None,
+                     button="left", x=None, y=None, x2=None, y2=None, dx=None, dy=None,
+                     duration=0.08, relative=False, screenshot=False, amount=120, **kw):
+        return _game_control(self, action=action, window=window, actions=actions, key=key,
+                             combo=combo, button=button, x=x, y=y, x2=x2, y2=y2, dx=dx, dy=dy,
+                             duration=duration, relative=relative, screenshot=screenshot,
+                             amount=amount, **kw)
+
     def clipboard(self, action="get", text=None, **kw):
         if action == "set":
             if text is None:
@@ -1360,10 +1368,25 @@ class Toolkit:
         return self.shell(cmd=cmd, timeout=120, mode="raw")
 
     def remember(self, text=None, **kw):
-        notes = os.path.join(DATA_DIR, "notes.md")
-        with open(notes, "a", encoding="utf-8") as fh:
-            fh.write("\n- %s — %s" % (time.strftime("%Y-%m-%d %H:%M"), (text or "").strip()))
-        return {"ok": True, "saved": True, "file": notes}
+        from . import memory as mem_mod
+        res = mem_mod.add_fact(text)
+        try:
+            notes = os.path.join(DATA_DIR, "notes.md")
+            with open(notes, "a", encoding="utf-8") as fh:
+                fh.write("\n- %s — %s" % (time.strftime("%Y-%m-%d %H:%M"), (text or "").strip()))
+        except Exception:
+            pass
+        return res
+
+    def recall(self, query=None, **kw):
+        from . import memory as mem_mod
+        facts = mem_mod.search_facts(query)
+        return {"ok": True, "facts": facts, "count": len(facts)}
+
+    def generate_image(self, prompt, negative_prompt="", width=512, height=512, steps=20, seed=None, **kw):
+        from . import comfyui
+        return comfyui.generate_image(self.cfg, prompt=prompt, negative_prompt=negative_prompt,
+                                      width=width, height=height, steps=steps, seed=seed)
 
     def call(self, name, args):
         fn = getattr(self, name, None)
@@ -1407,6 +1430,9 @@ VK = {"enter": 0x0D, "return": 0x0D, "tab": 0x09, "esc": 0x1B, "escape": 0x1B, "
       "right": 0x27, "home": 0x24, "end": 0x23, "pgup": 0x21, "pgdn": 0x22, "win": 0x5B,
       "ctrl": 0x11, "control": 0x11, "alt": 0x12, "shift": 0x10, "f1": 0x70, "f2": 0x71, "f3": 0x72,
       "f4": 0x73, "f5": 0x74, "f6": 0x75, "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79}
+
+# Клавиши, которые игровой режим держит нажатыми между вызовами (hold).
+_HELD_KEYS = set()
 
 
 def _user32():
@@ -1489,3 +1515,263 @@ def _win(toolkit, action="list", title=None, hwnd=None, combo=None, text=None, x
             u.mouse_event(0x0004, 0, 0, 0, 0)
         return {"ok": True, "at": [int(x), int(y)]}
     return {"ok": False, "error": "действие %s неизвестно" % action}
+
+
+def _game_control(toolkit, action="act", window=None, actions=None, key=None, combo=None,
+                  button="left", x=None, y=None, x2=None, y2=None, dx=None, dy=None, duration=0.08,
+                  relative=False, screenshot=False, amount=120, **kw):
+    """Игровой контроллер: аппаратные скан-коды клавиш (DirectInput/DirectX),
+    клики, относительный поворот камеры (dx, dy для 3D/FPS), действия и захват кадра."""
+    if os.name != "nt":
+        return {"ok": False, "error": "game_control доступен только на Windows"}
+    u = _user32()
+
+    target_hwnd = None
+    win_rect = None
+    if window:
+        w_low = str(window).lower()
+        for item in _win(toolkit, "list").get("windows", []):
+            if (w_low in item["title"].lower() or
+                w_low in (item.get("process") or "").lower() or
+                str(item.get("hwnd")) == w_low):
+                target_hwnd = item["hwnd"]
+                break
+        if not target_hwnd:
+            return {"ok": False, "executed": [],
+                    "error": "окно не найдено: %s — проверь windows(action='list')" % window}
+        u.ShowWindow(target_hwnd, 9)
+        u.SetForegroundWindow(target_hwnd)
+        time.sleep(0.08)
+        r = RECT()
+        if u.GetWindowRect(target_hwnd, ctypes.byref(r)):
+            win_rect = (int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top))
+
+    EXTENDED_VK = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E}
+
+    def _failsafe_triggered():
+        if not toolkit.cfg.get("game_failsafe", True):
+            return False
+        # 0x1B = Escape, 0x13 = Pause
+        if (u.GetAsyncKeyState(0x1B) & 0x8000) or (u.GetAsyncKeyState(0x13) & 0x8000):
+            for code in set(VK.values()) | _HELD_KEYS | {0x57, 0x41, 0x53, 0x44, 0x20}:
+                sc = u.MapVirtualKeyW(code, 0)
+                u.keybd_event(ctypes.c_ubyte(code), ctypes.c_ubyte(sc), 2, 0)
+            _HELD_KEYS.clear()
+            u.mouse_event(0x0004, 0, 0, 0, 0)
+            u.mouse_event(0x0010, 0, 0, 0, 0)
+            u.mouse_event(0x0040, 0, 0, 0, 0)
+            return True
+        return False
+
+    def _num(value, default=0.0):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    def _get_vk(k):
+        if not k:
+            return None
+        k = str(k).strip().lower()
+        if k in VK:
+            return VK[k]
+        if len(k) == 1:
+            return ord(k.upper())
+        return None
+
+    def _key_event(code, is_up=False):
+        sc = u.MapVirtualKeyW(code, 0)
+        flags = (0x0002 if is_up else 0x0000) | (0x0001 if code in EXTENDED_VK else 0x0000)
+        u.keybd_event(ctypes.c_ubyte(code), ctypes.c_ubyte(sc), flags, 0)
+        if is_up:
+            _HELD_KEYS.discard(code)
+        else:
+            _HELD_KEYS.add(code)
+
+    def _coords(mx, my):
+        if mx is None or my is None:
+            return None, None
+        gx, gy = int(_num(mx)), int(_num(my))
+        if relative and win_rect:
+            gx += win_rect[0]
+            gy += win_rect[1]
+        return gx, gy
+
+    def _step(act_type, params):
+        act = (act_type or params.get("action") or "press").lower()
+        k = params.get("key") or key
+        cmb = params.get("combo") or combo
+        btn = (params.get("button") or button or "left").lower()
+        dur = _num(params.get("duration") if params.get("duration") is not None else duration, 0.08)
+        dur = dur if dur > 0 else 0.08
+        px, py = _coords(params.get("x") if params.get("x") is not None else x,
+                         params.get("y") if params.get("y") is not None else y)
+        px2, py2 = _coords(params.get("x2") if params.get("x2") is not None else x2,
+                           params.get("y2") if params.get("y2") is not None else y2)
+
+        # 3D/FPS camera rotation / relative mouse movement
+        if act in ("look", "turn", "mouse_rel") or (params.get("dx") is not None or params.get("dy") is not None):
+            rdx = int(_num(params.get("dx") if params.get("dx") is not None else dx))
+            rdy = int(_num(params.get("dy") if params.get("dy") is not None else dy))
+            u.mouse_event(0x0001, rdx, rdy, 0, 0)  # MOUSEEVENTF_MOVE (relative delta)
+            return {"action": "look", "dx": rdx, "dy": rdy, "ok": True}
+
+        if act == "focus":
+            if target_hwnd:
+                u.ShowWindow(target_hwnd, 9)
+                u.SetForegroundWindow(target_hwnd)
+                time.sleep(0.08)
+                return {"action": "focus", "ok": True, "hwnd": target_hwnd}
+            w = params.get("window") or window
+            if w:
+                w_find = str(w).lower()
+                for item in _win(toolkit, "list").get("windows", []):
+                    if (w_find in item["title"].lower() or
+                        w_find in (item.get("process") or "").lower() or
+                        str(item.get("hwnd")) == w_find):
+                        u.ShowWindow(item["hwnd"], 9)
+                        u.SetForegroundWindow(item["hwnd"])
+                        time.sleep(0.08)
+                        return {"action": "focus", "ok": True, "hwnd": item["hwnd"]}
+                return {"action": "focus", "ok": False, "error": "окно не найдено: %s" % w}
+            return {"action": "focus", "ok": False, "error": "нужно имя окна"}
+
+        if act in ("press", "key"):
+            code = _get_vk(k)
+            if not code:
+                return {"action": act, "ok": False, "error": "неизвестная клавиша: %s" % k}
+            _key_event(code, is_up=False)
+            time.sleep(max(0.02, min(dur, 10.0)))
+            _key_event(code, is_up=True)
+            return {"action": "press", "key": k, "duration": dur, "ok": True}
+
+        if act in ("hold", "key_down"):
+            code = _get_vk(k)
+            if not code:
+                return {"action": act, "ok": False, "error": "неизвестная клавиша: %s" % k}
+            _key_event(code, is_up=False)
+            return {"action": "key_down", "key": k, "ok": True}
+
+        if act in ("release", "key_up"):
+            code = _get_vk(k)
+            if not code:
+                return {"action": act, "ok": False, "error": "неизвестная клавиша: %s" % k}
+            _key_event(code, is_up=True)
+            return {"action": "key_up", "key": k, "ok": True}
+
+        if act == "combo":
+            if not cmb:
+                return {"action": act, "ok": False, "error": "нужен combo (например shift+w)"}
+            parts = [p.strip().lower() for p in str(cmb).split("+")]
+            codes = [_get_vk(p) for p in parts if _get_vk(p)]
+            for c in codes:
+                _key_event(c, is_up=False)
+                time.sleep(0.02)
+            time.sleep(max(0.03, min(dur, 5.0)))
+            for c in reversed(codes):
+                _key_event(c, is_up=True)
+            return {"action": "combo", "combo": cmb, "ok": True}
+
+        if act in ("move", "mouse_move"):
+            if px is not None and py is not None:
+                u.SetCursorPos(px, py)
+            return {"action": "move", "x": px, "y": py, "ok": True}
+
+        if act in ("click", "mouse_click"):
+            if px is not None and py is not None:
+                u.SetCursorPos(px, py)
+                time.sleep(0.02)
+            down_flag = 0x0008 if btn == "right" else (0x0020 if btn == "middle" else 0x0002)
+            up_flag = 0x0010 if btn == "right" else (0x0040 if btn == "middle" else 0x0004)
+            u.mouse_event(down_flag, 0, 0, 0, 0)
+            time.sleep(max(0.03, min(dur, 5.0)))
+            u.mouse_event(up_flag, 0, 0, 0, 0)
+            return {"action": "click", "button": btn, "x": px, "y": py, "ok": True}
+
+        if act in ("double_click", "dblclick"):
+            if px is not None and py is not None:
+                u.SetCursorPos(px, py)
+                time.sleep(0.02)
+            down_flag = 0x0008 if btn == "right" else 0x0002
+            up_flag = 0x0010 if btn == "right" else 0x0004
+            u.mouse_event(down_flag, 0, 0, 0, 0)
+            u.mouse_event(up_flag, 0, 0, 0, 0)
+            time.sleep(0.05)
+            u.mouse_event(down_flag, 0, 0, 0, 0)
+            u.mouse_event(up_flag, 0, 0, 0, 0)
+            return {"action": "double_click", "button": btn, "x": px, "y": py, "ok": True}
+
+        if act in ("down", "mouse_down"):
+            down_flag = 0x0008 if btn == "right" else (0x0020 if btn == "middle" else 0x0002)
+            u.mouse_event(down_flag, 0, 0, 0, 0)
+            return {"action": "mouse_down", "button": btn, "ok": True}
+
+        if act in ("up", "mouse_up"):
+            up_flag = 0x0010 if btn == "right" else (0x0040 if btn == "middle" else 0x0004)
+            u.mouse_event(up_flag, 0, 0, 0, 0)
+            return {"action": "mouse_up", "button": btn, "ok": True}
+
+        if act == "drag":
+            if None in (px, py, px2, py2):
+                return {"action": "drag", "ok": False, "error": "нужны x, y, x2, y2"}
+            u.SetCursorPos(px, py)
+            time.sleep(0.03)
+            u.mouse_event(0x0002, 0, 0, 0, 0)
+            steps = 10
+            for s in range(1, steps + 1):
+                cx = int(px + (px2 - px) * (s / steps))
+                cy = int(py + (py2 - py) * (s / steps))
+                u.SetCursorPos(cx, cy)
+                time.sleep(max(0.01, dur / steps))
+            u.mouse_event(0x0004, 0, 0, 0, 0)
+            return {"action": "drag", "from": [px, py], "to": [px2, py2], "ok": True}
+
+        if act in ("scroll", "wheel"):
+            amt = int(_num(params.get("amount") if params.get("amount") is not None else amount, 120))
+            u.mouse_event(0x0800, 0, 0, amt, 0)
+            return {"action": "scroll", "amount": amt, "ok": True}
+
+        if act in ("wait", "sleep"):
+            secs = max(0.01, min(_num(params.get("seconds") if params.get("seconds") is not None else dur,
+                                     0.1), 10.0))
+            time.sleep(secs)
+            return {"action": "wait", "seconds": secs, "ok": True}
+
+        if act == "screenshot":
+            return {"action": "screenshot", "ok": True}
+
+        return {"action": act, "ok": False, "error": "неизвестное действие: %s" % act}
+
+    executed = []
+    if _failsafe_triggered():
+        return {"ok": False, "error": "Экстренная остановка (нажат Escape/Pause) — управление перехвачено пользователем", "executed": []}
+    if isinstance(actions, list) and actions:
+        for item in actions:
+            if _failsafe_triggered():
+                executed.append({"action": "failsafe", "ok": False, "error": "Экстренная остановка (нажат Escape/Pause)"})
+                break
+            if isinstance(item, dict):
+                executed.append(_step(item.get("action"), item))
+    elif action != "act":
+        executed.append(_step(action, kw))
+    elif key or combo or (x is not None and y is not None):
+        default_act = "combo" if combo else ("press" if key else "click")
+        executed.append(_step(default_act, kw))
+    else:
+        executed.append({"action": "check", "window": window, "ok": bool(target_hwnd or not window)})
+
+    shot_res = None
+    need_shot = screenshot or action == "screenshot" or any(r.get("action") == "screenshot" for r in executed)
+    if need_shot:
+        if target_hwnd:
+            shot_res = toolkit.screenshot(region="window", hwnd=target_hwnd)
+        else:
+            shot_res = toolkit.screenshot(region="screen")
+
+    out = {"ok": True, "executed": executed, "window": window, "rect": win_rect}
+    if shot_res and shot_res.get("ok"):
+        out["path"] = shot_res.get("path")
+        out["screenshot"] = shot_res.get("path")
+        out["image"] = shot_res.get("path")
+        out["note"] = "действия выполнены; скриншот прикреплен для vision-модели"
+    return out

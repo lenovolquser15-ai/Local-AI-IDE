@@ -12,6 +12,7 @@ from . import dnsfix
 from . import LOCALHARNESS
 from . import llm as llm_mod
 from . import lms as lms_mod
+from . import memory as mem_mod
 from . import plugins
 from . import schemas
 from . import session as session_mod
@@ -98,6 +99,113 @@ def _lms_line(job, text):
         if chunk:
             job["lines"].append(chunk[:400])
     del job["lines"][:-80]
+
+
+_LAN_IP = {"value": "", "at": 0.0, "lock": threading.Lock()}
+_LAN_IP_TTL = 15.0
+
+# виртуальные адаптеры: их адрес не откроется с телефона в той же Wi-Fi
+_VIRTUAL_IFACES = ("vethernet", "wsl", "hyper-v", "virtualbox", "vmware", "loopback", "bluetooth",
+                   "throne", "zero", "zerotier", "radmin", "tailscale", "hamachi", "vpn", "tun", "tap",
+                   "docker", "br-", "utun", "wg", "wireguard", "npcap", "teredo", "isatap")
+
+
+def _lan_candidates():
+    """Приватные IPv4 с метрикой «насколько похоже на домашнюю сеть»."""
+    import ipaddress
+    import socket
+    try:
+        import psutil
+    except Exception:
+        return []
+    stats = {}
+    try:
+        stats = psutil.net_if_stats()
+    except Exception:
+        pass
+    found = []
+    for name, addrs in psutil.net_if_addrs().items():
+        low = name.lower()
+        st = stats.get(name)
+        if st is not None and not st.isup:
+            continue
+        if any(bad in low for bad in _VIRTUAL_IFACES):
+            continue
+        for a in addrs:
+            if a.family != socket.AF_INET or not a.address:
+                continue
+            try:
+                ip = ipaddress.ip_address(a.address)
+            except ValueError:
+                continue
+            if not ip.is_private or ip.is_loopback or ip.is_link_local:
+                continue
+            text = str(ip)
+            score = 100
+            if text.startswith("192.168."):
+                score = 0
+            elif text.startswith("10."):
+                score = 10
+            elif text.startswith("172."):
+                score = 20
+            if any(word in low for word in ("wi-fi", "wifi", "wlan", "ethernet", "eth")):
+                score -= 5
+            found.append((score, text))
+    found.sort()
+    return [ip for _, ip in found]
+
+
+def get_lan_ip():
+    with _LAN_IP["lock"]:
+        if _LAN_IP["value"] and time.time() - _LAN_IP["at"] < _LAN_IP_TTL:
+            return _LAN_IP["value"]
+        candidates = _lan_candidates()
+        ip = candidates[0] if candidates else ""
+        if not ip:
+            # UDP-трюк знает только маршрут наружу: VPN-адаптер может оказаться первым
+            try:
+                import socket
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect(("8.8.8.8", 80))
+                ip = s.getsockname()[0]
+                s.close()
+            except Exception:
+                ip = "127.0.0.1"
+        _LAN_IP["value"] = ip
+        _LAN_IP["at"] = time.time()
+        return ip
+
+
+def is_allowed_client(addr, cfg):
+    """Loopback всегда; при lan_access — только приватные адреса (LAN/VPN), не интернет."""
+    addr = str(addr or "")
+    if addr.startswith("::ffff:"):
+        addr = addr[7:]
+    if addr in ("127.0.0.1", "::1", "localhost"):
+        return True
+    if not cfg.get("lan_access", False):
+        return False
+    try:
+        import ipaddress
+        ip = ipaddress.ip_address(addr)
+    except ValueError:
+        return False
+    # LAN, VPN и link-local: всё, что не является публичным адресом интернета
+    return not ip.is_global
+
+
+def make_qr_svg(url):
+    try:
+        import io
+        import qrcode
+        import qrcode.image.svg
+        factory = qrcode.image.svg.SvgPathImage
+        img = qrcode.make(url, image_factory=factory, box_size=6)
+        buf = io.BytesIO()
+        img.save(buf)
+        return buf.getvalue().decode("utf-8")
+    except Exception:
+        return ""
 
 
 def lms_cli(cfg):
@@ -258,6 +366,9 @@ class Handler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         path = parsed.path
         query = parse_qs(parsed.query)
+        if not is_allowed_client(self.client_address[0], load()):
+            _json_response(self, {"ok": False, "error": "доступ с этого адреса запрещён"}, 403)
+            return
 
         if path == "/api/state":
             cfg = load()
@@ -270,6 +381,8 @@ class Handler(BaseHTTPRequestHandler):
             tools_list = [spec["name"] for spec in schemas.entries(cfg.get("tool_profile", "core"))]
             loaded_items, _ = lms_mod.loaded_models(cfg) if cfg.get("provider") == "lmstudio" else ([], "")
             lms_loaded = [lms_mod.model_key(m) for m in (loaded_items or []) if lms_mod.model_key(m)]
+            lan_ip = get_lan_ip()
+            port = int(cfg.get("port", 7788))
             _json_response(self, {
                 "version": LOCALHARNESS,
                 "uptime": int(time.time() - STARTED),
@@ -288,6 +401,14 @@ class Handler(BaseHTTPRequestHandler):
                 "system_prompt": cfg.get("system_prompt", ""),
                 "search_searxng": cfg.get("search_searxng", False),
                 "search_searxng_url": cfg.get("search_searxng_url", "http://127.0.0.1:8080"),
+                "memory_enabled": cfg.get("memory_enabled", False),
+                "memory_facts_count": len(mem_mod.list_facts()),
+                "image_gen_enabled": cfg.get("image_gen_enabled", False),
+                "comfyui_url": cfg.get("comfyui_url", "http://127.0.0.1:8188"),
+                "lan_access": cfg.get("lan_access", False),
+                "lan_ip": lan_ip,
+                "lan_url": "http://%s:%d" % (lan_ip, port),
+                "game_failsafe": cfg.get("game_failsafe", True),
                 "sessions": session_mod.list_sessions(),
                 "tools": tools_list,
                 "plugins": pl,
@@ -356,6 +477,33 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, plugins.catalog())
             return
 
+        if path == "/api/memory":
+            _json_response(self, {"ok": True, "facts": mem_mod.list_facts()})
+            return
+
+        if path == "/api/comfyui/status":
+            from . import comfyui
+            _json_response(self, comfyui.status(load()))
+            return
+
+        if path == "/api/qrcode":
+            cfg = load()
+            lan_ip = get_lan_ip()
+            port = int(cfg.get("port", 7788))
+            url_to_encode = query.get("url", [""])[0] or ("http://%s:%d" % (lan_ip, port))
+            svg_data = make_qr_svg(url_to_encode)
+            if not svg_data:
+                self.send_response(500)
+                self.end_headers()
+                return
+            payload = svg_data.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
         if path == "/api/lms/state":
             _json_response(self, lms_state(load()))
             return
@@ -392,6 +540,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         path = parsed.path
+        if not is_allowed_client(self.client_address[0], load()):
+            _json_response(self, {"ok": False, "error": "доступ с этого адреса запрещён"}, 403)
+            return
         try:
             length = int(self.headers.get("Content-Length", 0))
         except ValueError:
@@ -423,6 +574,15 @@ class Handler(BaseHTTPRequestHandler):
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
+            return
+        if path == "/api/memory/add":
+            _json_response(self, mem_mod.add_fact(body.get("text")))
+            return
+        if path == "/api/memory/delete":
+            _json_response(self, mem_mod.delete_fact(body.get("id")))
+            return
+        if path == "/api/memory/clear":
+            _json_response(self, mem_mod.clear_facts())
             return
         if path == "/api/plugins/reload":
             plugins.scan(force=True)
@@ -695,6 +855,9 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         idx = max(0, since)
+        if run is not None and idx > len(run.events):
+            # If since is beyond current events of this run (e.g. stale since from previous run), reset to 0
+            idx = 0
         try:
             while True:
                 with run.cond:
@@ -728,10 +891,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def serve(cfg):
-    host = cfg.get("host", "127.0.0.1")
+    lan = bool(cfg.get("lan_access", False))
+    host = "0.0.0.0" if lan else cfg.get("host", "127.0.0.1")
     port = int(cfg.get("port", 7788))
     server = ThreadingHTTPServer((host, port), Handler)
-    print("LocalHarness server on http://%s:%d" % (host, port))
+    lan_ip = get_lan_ip()
+    print("LocalHarness server on http://%s:%d" % ("127.0.0.1", port))
+    if lan:
+        print("  LAN access enabled: http://%s:%d" % (lan_ip, port))
     try:
         server.serve_forever()
     except KeyboardInterrupt:

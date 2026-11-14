@@ -4,3 +4,4 @@ psutil>=5.9.0
 rich>=13.0.0
 pillow>=9.0.0
 pystray>=0.19
+qrcode>=7.4

@@ -498,11 +498,12 @@ class Agent:
 
     def _shot_for(self, name, result):
         """Скриншот для vision-модели: не больше SHOTS_PER_TURN за ход, чтобы не забить контекст."""
-        if not self.vision or name != "screenshot" or self._shots_left <= 0:
+        if not self.vision or name not in ("screenshot", "game_control", "generate_image") or self._shots_left <= 0:
             return None
-        if not isinstance(result, dict) or not result.get("ok") or not result.get("path"):
+        shot_path = (result.get("path") or result.get("screenshot") or result.get("image")) if isinstance(result, dict) else None
+        if not isinstance(result, dict) or not result.get("ok") or not shot_path:
             return None
-        data_url = vision_mod.encode_path(result["path"])
+        data_url = vision_mod.encode_path(shot_path)
         if data_url:
             self._shots_left -= 1
         return data_url
@@ -633,7 +634,8 @@ class Agent:
         return name, args, result
 
     def _observe(self, name, args, result):
-        image = result.get("path") if isinstance(result, dict) and name == "screenshot" else None
+        image = ((result.get("path") or result.get("screenshot") or result.get("image"))
+                 if isinstance(result, dict) and name in ("screenshot", "game_control", "generate_image") else None)
         self.bridge.emit({"type": "tool", "tool": name, "args": _short(args, ARGS_LIMIT),
                           "result": _short(result, RESULT_LIMIT),
                           "ok": bool(result.get("ok")) if isinstance(result, dict) else False,

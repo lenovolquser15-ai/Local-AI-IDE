@@ -25,6 +25,12 @@ DEFAULTS = {
             "api_key": "ollama",
             "autostart": False,
         },
+        "strata": {
+            "label": "Strata (MoE Engine)",
+            "base_url": "http://127.0.0.1:8080/v1",
+            "api_key": "strata",
+            "autostart": False,
+        },
     },
     "workspace": "",
     "permissions": {"mode": "auto"},
@@ -46,6 +52,11 @@ DEFAULTS = {
     "search_searxng": False,
     "search_searxng_url": "http://127.0.0.1:8080",
     "chrome_cdp": "http://127.0.0.1:9222",
+    "memory_enabled": False,
+    "image_gen_enabled": False,
+    "comfyui_url": "http://127.0.0.1:8188",
+    "lan_access": False,
+    "game_failsafe": True,
 }
 
 LOCK = threading.RLock()

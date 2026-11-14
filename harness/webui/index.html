@@ -217,6 +217,51 @@
       <div class="page-sub">Нужен свой SearXNG (например, Docker searxng/searxng) с JSON-выдачей: в settings.yml — search.formats: [html, json]. Включённый инстанс опрашивается первым; DuckDuckGo, Bing и остальные остаются запасными.</div>
     </div>
     <div class="settings-block">
+      <div class="plate-title">Долговременная память</div>
+      <label class="autostart-label"><input id="memoryEnabled" type="checkbox"> Включить память сквозь сессии</label>
+      <div class="page-sub">Агент автоматически сохраняет важные факты о вас и проектах в <code>data/memory.json</code> и учитывает их в каждом новом диалоге.</div>
+      <div id="memorySection" class="memory-box" hidden>
+        <div class="memory-actions-row">
+          <span id="memoryCount" class="page-sub">Фактов: 0</span>
+          <button id="memoryClearBtn" class="ghost" type="button">Очистить всё</button>
+        </div>
+        <div id="memoryList" class="memory-list"></div>
+        <div class="urlrow">
+          <input type="text" id="memoryNewInput" class="field grow" placeholder="Запомнить новый факт вручную…">
+          <button id="memoryAddBtn" class="ghost" type="button">Добавить</button>
+        </div>
+      </div>
+    </div>
+    <div class="settings-block">
+      <div class="plate-title">Генерация картинок (ComfyUI / SD)</div>
+      <label class="autostart-label"><input id="imageGenEnabled" type="checkbox"> Разрешить генерацию изображений</label>
+      <div class="page-sub">Позволяет модели вызывать инструмент <code>generate_image</code> для создания картинок через ваш локальный ComfyUI или Stable Diffusion WebUI.</div>
+      <div id="imageGenSection" hidden>
+        <div class="urlrow">
+          <input type="text" id="comfyuiUrl" class="field grow" placeholder="http://127.0.0.1:8188">
+          <button id="comfyuiTestBtn" class="ghost" type="button">Проверить</button>
+        </div>
+        <div id="comfyuiStatus" class="page-sub"></div>
+      </div>
+    </div>
+    <div class="settings-block">
+      <div class="plate-title">Мобильный доступ по Wi-Fi</div>
+      <label class="autostart-label"><input id="lanAccessEnabled" type="checkbox"> Доступ с других устройств в локальной сети</label>
+      <div class="page-sub">Открывает доступ к LocalHarness с вашего смартфона или планшета по домашнему Wi-Fi. Изменение вступит в силу после перезапуска сервера. Принимаются только приватные адреса (192.168.x, 10.x, VPN), публичный интернет закрыт. Пароля нет — не включай в общественных сетях.</div>
+      <div id="lanSection" hidden>
+        <div class="urlrow">
+          <span id="lanUrlText" class="field grow monospace" style="overflow:hidden;text-overflow:ellipsis;"></span>
+          <button id="lanCopyBtn" class="ghost" type="button">Копировать</button>
+        </div>
+        <div id="qrCodeContainer" class="qr-container"></div>
+      </div>
+    </div>
+    <div class="settings-block">
+      <div class="plate-title">Игровой режим и безопасность</div>
+      <label class="autostart-label"><input id="gameFailsafeEnabled" type="checkbox" checked> Экстренный предохранитель Failsafe</label>
+      <div class="page-sub">При нажатии клавиши Escape или Pause во время выполнения игровых действий модель мгновенно отпустит все клавиши и передаст управление пользователю.</div>
+    </div>
+    <div class="settings-block">
       <div class="plate-title">Помощь</div>
       <a id="bugReport" class="bug-link" href="https://github.com/lenovolquser15-ai/Local-AI-IDE/issues/new" target="_blank" rel="noopener">Нашли баг? Расскажите нам о нём →</a>
       <div class="page-sub">Откроется GitHub Issues репозитория. Напиши, что делал и что увидел — так починим быстрее.</div>

@@ -3,7 +3,7 @@
 ; Runtime data (data/, work/, config.json) is never touched on upgrade or uninstall.
 
 #define MyAppName "LocalHarness"
-#define MyAppVersion "1.0.3"
+#define MyAppVersion "1.0.4"
 #define MyAppPublisher "LocalHarness contributors"
 #define MyAppURL "https://github.com/lenovolquser15-ai/Local-AI-IDE"
 #define MyAppExeName "LocalHarness.exe"
@@ -33,11 +33,11 @@ CloseApplications=no
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; Flags: unchecked
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"
 Name: "startup"; Description: "Start LocalHarness with Windows (tray, no browser)"; Flags: unchecked
 
 [Files]
-Source: "dist\release\LocalHarness\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs
+Source: "dist\release\LocalHarness\*"; DestDir: "{app}"; Excludes: "__pycache__\*,*.pyc"; Flags: ignoreversion recursesubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

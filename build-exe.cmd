@@ -19,7 +19,7 @@ if exist "%STAGE%" exit /b 1
 if exist "%PREVIOUS%" exit /b 1
 
 rem Build separately; the installed copy is untouched until every step succeeds.
-"%PYTHON%" %PYARGS% -m PyInstaller --noconfirm --clean --onedir --name LocalHarness --console --distpath "%STAGE%" --specpath build --hidden-import dns.resolver --hidden-import dns.query --hidden-import dns.rdatatype --hidden-import psutil --hidden-import requests --hidden-import rich --hidden-import pystray._win32 lh_entry.py
+"%PYTHON%" %PYARGS% -m PyInstaller --noconfirm --clean --onedir --name LocalHarness --console --distpath "%STAGE%" --specpath build --hidden-import dns.resolver --hidden-import dns.query --hidden-import dns.rdatatype --hidden-import psutil --hidden-import requests --hidden-import rich --hidden-import pystray._win32 --hidden-import qrcode --hidden-import qrcode.image.svg lh_entry.py
 if errorlevel 1 goto :fail
 xcopy /e /i /y harness\webui "%STAGE%\LocalHarness\webui" >nul
 if errorlevel 1 goto :fail

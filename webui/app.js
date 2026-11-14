@@ -461,7 +461,10 @@ function render(ev, replayed) {
     case 'context': paintContext(ev); break;
     case 'compact': pushNotice('контекст сжат: свёрнуто ходов — ' + ev.folded_turns, 'warn compact'); break;
     case 'error': resetStream(); dropDive(); pushNotice('сбой: ' + ev.text, 'bad'); break;
-    case 'stopped': resetStream(); dropDive(); pushNotice('остановлено', 'warn'); break;
+    case 'stopped':
+      resetStream(); dropDive(); pushNotice('остановлено', 'warn');
+      finishRun(ev || {});
+      break;
     case 'done':
       dropDive();
       finishAnswer(md(ev.text), 'модель · ' + (ev.protocol === 'json' ? 'json-инструменты' : 'native'));
@@ -475,15 +478,15 @@ function finishRun(ev) {
   running = false;
   $('#stopBtn').disabled = true;
   $('#send').disabled = false;
-  const sp = ev.speed || {};
-  lastSpeed = sp;
-  lastSteps = ev.steps;
-  lastRounds = ev.rounds || null;
-  const parts = ['шагов: ' + ev.steps];
-  if (ev.rounds) parts.push('подходов: ' + ev.rounds);
-  if (sp.tps) parts.push(sp.tps + ' ток/с');
+  const sp = (ev && ev.speed) || null;
+  if (sp) lastSpeed = sp;
+  lastSteps = (ev && ev.steps) != null ? ev.steps : lastSteps;
+  lastRounds = (ev && ev.rounds) || null;
+  const parts = ['шагов: ' + (lastSteps != null ? lastSteps : 0)];
+  if (lastRounds) parts.push('подходов: ' + lastRounds);
+  if (sp && sp.tps) parts.push(sp.tps + ' ток/с');
   $('#stat').textContent = parts.join(' · ');
-  paintUsage(sp, ev.steps, ev.rounds);
+  paintUsage(sp, lastSteps, lastRounds);
   if (streamAbort) { streamAbort.abort(); streamAbort = null; }
   refreshState();
 }
@@ -516,6 +519,23 @@ async function stream(id) {
     }
   } catch (err) {
     if (err.name !== 'AbortError') console.warn(err);
+  } finally {
+    if (running && (!streamAbort || !streamAbort.signal.aborted)) {
+      try {
+        const data = await api('/api/history?session=' + encodeURIComponent(id));
+        if (!data.running) {
+          const events = data.events || [];
+          const lastEv = events[events.length - 1];
+          if (lastEv && lastEv.type === 'done') {
+            render(lastEv);
+          } else {
+            finishRun({});
+          }
+        }
+      } catch (e) {
+        finishRun({});
+      }
+    }
   }
 }
 
@@ -543,7 +563,8 @@ async function send() {
       body.criteria = $('#goalCriteria').value.trim();
     }
     const res = await api('/api/chat', body);
-    if (res.session !== sessionId) { sessionId = res.session; since = 0; }
+    if (res.session !== sessionId) { sessionId = res.session; }
+    since = 0;
     stream(sessionId);
   } catch (err) {
     pushNotice(err.message, 'bad');
@@ -646,6 +667,23 @@ async function refreshState() {
   if (document.activeElement !== $('#systemPrompt')) $('#systemPrompt').value = st.system_prompt || '';
   $('#searxngEnabled').checked = !!st.search_searxng;
   if (document.activeElement !== $('#searxngUrl')) $('#searxngUrl').value = st.search_searxng_url || 'http://127.0.0.1:8080';
+  $('#memoryEnabled').checked = !!st.memory_enabled;
+  $('#memorySection').hidden = !st.memory_enabled;
+  if (st.memory_enabled) refreshMemory();
+  $('#imageGenEnabled').checked = !!st.image_gen_enabled;
+  $('#imageGenSection').hidden = !st.image_gen_enabled;
+  if (document.activeElement !== $('#comfyuiUrl')) $('#comfyuiUrl').value = st.comfyui_url || 'http://127.0.0.1:8188';
+  $('#lanAccessEnabled').checked = !!st.lan_access;
+  $('#lanSection').hidden = !st.lan_access;
+  if (st.lan_access) {
+    $('#lanUrlText').textContent = st.lan_url || '';
+    const qr = $('#qrCodeContainer');
+    if (qr.dataset.url !== (st.lan_url || '')) {
+      qr.dataset.url = st.lan_url || '';
+      qr.innerHTML = '<img src="/api/qrcode?url=' + encodeURIComponent(st.lan_url || '') + '" width="150" height="150" alt="QR Code">';
+    }
+  }
+  $('#gameFailsafeEnabled').checked = st.game_failsafe !== false;
   $('#toolsChip').textContent = 'инструментов: ' + (st.tools || []).length + ' · профиль ' + (st.tool_profile || 'core');
   $('#toolsChip').title = (st.tools || []).join(', ');
   fillSelect($('#provider'), Object.keys(st.providers || {}).map((k) => [k, st.providers[k]]), st.provider);
@@ -1263,6 +1301,103 @@ $('#lmContext').onchange = (e) => patchConfig('lms_context_length', Number(e.tar
 $('#lmTtl').onchange = (e) => patchConfig('lms_ttl', Number(e.target.value) || 0);
 $('#searxngEnabled').onchange = (e) => patchConfig('search_searxng', e.target.checked);
 $('#searxngUrl').onchange = (e) => patchConfig('search_searxng_url', e.target.value.trim() || 'http://127.0.0.1:8080');
+
+async function refreshMemory() {
+  try {
+    const res = await api('/api/memory');
+    const facts = res.facts || [];
+    $('#memoryCount').textContent = 'Фактов: ' + facts.length;
+    const list = $('#memoryList');
+    list.innerHTML = '';
+    if (!facts.length) {
+      list.innerHTML = '<div class="page-sub" style="padding: 4px;">Пока нет сохранённых фактов</div>';
+      return;
+    }
+    facts.forEach((f) => {
+      const item = node('div', 'memory-item');
+      item.appendChild(node('span', null, esc(f.text)));
+      const del = node('button', 'memory-del', '×');
+      del.title = 'Удалить факт';
+      del.onclick = async () => {
+        await api('/api/memory/delete', { id: f.id });
+        refreshMemory();
+      };
+      item.appendChild(del);
+      list.appendChild(item);
+    });
+  } catch (err) { console.warn(err); }
+}
+
+$('#memoryEnabled').onchange = (e) => {
+  patchConfig('memory_enabled', e.target.checked);
+  $('#memorySection').hidden = !e.target.checked;
+  if (e.target.checked) refreshMemory();
+};
+$('#memoryAddBtn').onclick = async () => {
+  const val = $('#memoryNewInput').value.trim();
+  if (!val) return;
+  $('#memoryNewInput').value = '';
+  await api('/api/memory/add', { text: val });
+  refreshMemory();
+};
+$('#memoryNewInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') $('#memoryAddBtn').click();
+});
+$('#memoryClearBtn').onclick = async () => {
+  if (confirm('Очистить все сохранённые факты памяти?')) {
+    await api('/api/memory/clear');
+    refreshMemory();
+  }
+};
+$('#imageGenEnabled').onchange = (e) => {
+  patchConfig('image_gen_enabled', e.target.checked);
+  $('#imageGenSection').hidden = !e.target.checked;
+};
+$('#comfyuiUrl').onchange = (e) => patchConfig('comfyui_url', e.target.value.trim() || 'http://127.0.0.1:8188');
+$('#comfyuiTestBtn').onclick = async () => {
+  $('#comfyuiStatus').textContent = 'проверяю…';
+  try {
+    const res = await api('/api/comfyui/status');
+    if (res.ok) {
+      $('#comfyuiStatus').textContent = '✓ подключено к ' + (res.type === 'comfyui' ? 'ComfyUI' : 'SD WebUI');
+      $('#comfyuiStatus').style.color = 'var(--ok-soft)';
+    } else {
+      $('#comfyuiStatus').textContent = '✗ ' + (res.error || 'не отвечает');
+      $('#comfyuiStatus').style.color = 'var(--fail)';
+    }
+  } catch (err) {
+    $('#comfyuiStatus').textContent = '✗ ' + err.message;
+    $('#comfyuiStatus').style.color = 'var(--fail)';
+  }
+};
+$('#lanAccessEnabled').onchange = (e) => {
+  patchConfig('lan_access', e.target.checked);
+  $('#lanSection').hidden = !e.target.checked;
+  if (e.target.checked) {
+    pushNotice('Доступ по локальной сети включён. Перезапустите сервер, чтобы открыть порт для других устройств.', 'warn');
+  }
+};
+$('#lanCopyBtn').onclick = () => {
+  const url = $('#lanUrlText').textContent;
+  if (!url) return;
+  const done = () => pushNotice('Ссылка скопирована: ' + url, 'ok');
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = url;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch (err) { pushNotice('Не удалось скопировать', 'bad'); }
+    document.body.removeChild(ta);
+  };
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(url).then(done).catch(fallback);
+  } else {
+    fallback();
+  }
+};
+$('#gameFailsafeEnabled').onchange = (e) => patchConfig('game_failsafe', e.target.checked);
 $('#lmsRefresh').onclick = refreshLM;
 const unloadAllFn = async () => {
   try {

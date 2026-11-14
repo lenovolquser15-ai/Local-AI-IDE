@@ -60,7 +60,7 @@ def _scan(text, rules):
     return None
 
 
-CONFIRM_TOOLS = ("shell", "powershell", "ssh", "ssh_upload", "ssh_download", "write_file", "edit_file", "python", "kill_process", "download", "lmstudio", "train_model")
+CONFIRM_TOOLS = ("shell", "powershell", "ssh", "ssh_upload", "ssh_download", "write_file", "edit_file", "python", "kill_process", "download", "lmstudio", "train_model", "game_control", "generate_image")
 
 PLUGIN_DANGEROUS = set()
 

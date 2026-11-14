@@ -328,6 +328,7 @@ textarea:focus { outline: none; }
 .drawer .check-pill { align-self: flex-start; }
 .bug-link { align-self: flex-start; color: var(--accent-soft); font-size: 13px; font-weight: 500; text-decoration: none; border-bottom: 1px dashed transparent; }
 .bug-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
+.composer { display: flex; flex-direction: column; gap: 8px; }
 .composer > * { width: var(--content); margin: 0 auto; }
 .input-shell {
   background: var(--layer-2);
@@ -498,3 +499,15 @@ textarea:focus { outline: none; }
 ::-webkit-scrollbar { width: 5px; height: 5px; }
 ::-webkit-scrollbar-thumb { background: var(--layer-3); border-radius: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* Memory, ComfyUI, LAN QR */
+.memory-box { display: flex; flex-direction: column; gap: 6px; margin-top: 4px; }
+.memory-actions-row { display: flex; justify-content: space-between; align-items: center; }
+.memory-list { max-height: 140px; overflow-y: auto; border: 1px solid var(--border); border-radius: 4px; padding: 4px; display: flex; flex-direction: column; gap: 4px; background: var(--bg-plate); }
+.memory-item { display: flex; justify-content: space-between; align-items: center; font-size: 11px; padding: 4px 6px; border-radius: 3px; background: var(--bg); gap: 6px; }
+.memory-item span { flex: 1; word-break: break-word; }
+.memory-del { cursor: pointer; color: var(--text-3); font-weight: bold; padding: 0 4px; border: none; background: transparent; }
+.memory-del:hover { color: #f43f5e; }
+.qr-container { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 8px; background: #fff; border-radius: 6px; margin: 8px auto 0; width: fit-content; }
+.qr-container svg { display: block; }
+
