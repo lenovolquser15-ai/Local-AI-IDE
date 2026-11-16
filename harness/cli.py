@@ -35,7 +35,9 @@ class ConsoleBridge(Bridge):
         elif kind == "notice":
             console.print("[yellow]· %s[/yellow]" % one_line(event.get("text")))
         elif kind == "compact":
-            console.print("[yellow]· контекст сжат: свернуто %d ходов[/yellow]" % event.get("folded_turns", 0))
+            console.print("[yellow]· контекст сжат: свернуто %d ходов%s[/yellow]" % (
+                event.get("folded_turns", 0),
+                " (%s → %s ток)" % (event["before"], event["after"]) if event.get("before") else ""))
         elif kind == "speed":
             if event.get("tps"):
                 console.print("[dim]  ⚡ %s ток/с · %s ток · старт %s с[/dim]" % (
@@ -94,7 +96,7 @@ def main(argv=None):
         return 0 if preflight(cfg) else 1
     if argv and argv[0] == "tools":
         profile = argv[1] if len(argv) > 1 else cfg.get("tool_profile", "core")
-        for spec in schemas.entries(profile):
+        for spec in schemas.entries(profile, cfg):
             console.print("[bold cyan]%s[/bold cyan] — %s" % (spec["name"], spec["desc"]))
         return 0
     bridge = ConsoleBridge()
@@ -146,7 +148,7 @@ def main(argv=None):
             agent = Agent(cfg, bridge, sid)
             continue
         if prompt == "/tools":
-            for spec in schemas.entries(cfg.get("tool_profile", "core")):
+            for spec in schemas.entries(cfg.get("tool_profile", "core"), cfg):
                 console.print("[bold cyan]%s[/bold cyan] — %s" % (spec["name"], spec["desc"]))
             continue
         result = agent.run(prompt, history=history)

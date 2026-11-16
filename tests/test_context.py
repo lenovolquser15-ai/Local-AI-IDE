@@ -20,7 +20,8 @@ os.environ["LH_DATA"] = os.path.join(ROOT, "tests", ".tmp")
 os.environ["LH_CONFIG"] = os.path.join(ROOT, "tests", ".tmp", "no-such-config.json")
 from harness import config as config_mod  # noqa: E402
 from harness import llm as llm_mod  # noqa: E402
-from harness.agent import Agent, Bridge, fold, fold_hard, _goal_rounds_limit  # noqa: E402
+from harness import schemas  # noqa: E402
+from harness.agent import Agent, Bridge, fold, fold_hard, _goal_rounds_limit, _estimate_units, _text_units  # noqa: E402
 from harness import session as session_mod  # noqa: E402
 
 FAILURES = []
@@ -369,6 +370,56 @@ def test_infinite_user_stop():
         httpd.shutdown()
 
 
+def test_context_event_threshold_matches_budget():
+    """Шкала должна отмечать реальный порог сжатия, а не окно минус один ответ."""
+    cfg = config_mod.load()
+    cfg["tool_profile"] = "full"
+    cfg["context_tokens"] = 8192
+    cfg["max_tokens"] = 900
+    agent = Agent(cfg, Bridge(), session_mod.create("ctx-event"))
+    agent.window_units = 8242 * 3.0
+    msgs = [{"role": "system", "content": "s"}]
+    ev = agent._context_event(msgs, "native")
+    check("context threshold is the fold budget", ev["threshold"] == int(agent._budget_units("native") // 3.0),
+          str(ev))
+    check("context threshold below window", ev["threshold"] < ev["window"], str(ev))
+    check("context tools weight reported", ev["tools"] > 0, str(ev))
+    check("context separates history from schema", abs(ev["tokens"] - (ev["history"] + ev["tools"])) <= 1, str(ev))
+    check("context history matches message weight", abs(ev["history"] - _estimate_units(msgs) / 3.0) <= 1, str(ev))
+
+
+def test_full_profile_falls_back_on_small_window():
+    """Схема full (~6k токенов) не должна съедать 8k-окно: на этот прогон включается core."""
+    cfg = config_mod.load()
+    cfg["tool_profile"] = "full"
+    small = Agent(cfg, Bridge(), session_mod.create("fit-small"))
+    small.window_units = 8242 * 3.0
+    check("small window downgrades to core", small._fit_profile() and small.profile == "core", small.profile)
+    mid = Agent(cfg, Bridge(), session_mod.create("fit-mid"))
+    mid.window_units = 16384 * 3.0
+    check("16k window keeps full", not mid._fit_profile() and mid.profile == "full", mid.profile)
+    big = Agent(cfg, Bridge(), session_mod.create("fit-big"))
+    big.window_units = 262144 * 3.0
+    check("big window keeps full", not big._fit_profile() and big.profile == "full", big.profile)
+
+
+def test_tool_schema_is_compact():
+    """Схема уходит в каждый запрос: она должна занимать малую долю окна, а не треть."""
+    cfg = {"memory_enabled": True}
+    for profile, limit in (("core", 2100), ("full", 4600)):
+        tokens = _text_units(json.dumps(schemas.native_tools(profile, cfg), ensure_ascii=False)) / 3.0
+        check("%s schema fits budget" % profile, tokens < limit, "%d токенов" % tokens)
+
+
+def test_native_prompt_does_not_duplicate_tool_docs():
+    """В native-режиме схема инструментов уже уходит в запрос — текстовый список дублирует её."""
+    cfg = config_mod.load()
+    full = schemas.build_system_prompt(cfg, "full", tools_doc=True)
+    native = schemas.build_system_prompt(cfg, "full", tools_doc=False)
+    check("native prompt shorter", len(native) < len(full), "%d vs %d" % (len(native), len(full)))
+    check("native prompt has no tool list", "ИНСТРУМЕНТЫ:" not in native, native[:80])
+
+
 def main():
     os.makedirs(os.path.join(ROOT, "tests", ".tmp"), exist_ok=True)
     test_normalize_cases()
@@ -376,6 +427,10 @@ def main():
     test_fold_then_normalize()
     test_fold_hard_repeated_goal_rounds()
     test_rounds_limit_helper()
+    test_context_event_threshold_matches_budget()
+    test_full_profile_falls_back_on_small_window()
+    test_tool_schema_is_compact()
+    test_native_prompt_does_not_duplicate_tool_docs()
     test_infinite_until_finish()
     test_infinite_idle_guard()
     test_infinite_user_stop()

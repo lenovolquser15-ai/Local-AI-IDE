@@ -93,8 +93,8 @@ def _ips_from_text(out, host):
 def _via_nslookup(host, timeout):
     try:
         proc = subprocess.run(
-            ["nslookup", host], capture_output=True, text=True, timeout=timeout,
-            creationflags=NO_WINDOW, encoding="utf-8", errors="replace",
+            ["nslookup", host], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            timeout=timeout, creationflags=NO_WINDOW, encoding="utf-8", errors="replace",
         )
         ips = _ips_from_text((proc.stdout or "") + (proc.stderr or ""), host)
         return ips or None
@@ -111,7 +111,8 @@ def _via_powershell(host, timeout):
     try:
         proc = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=timeout, creationflags=NO_WINDOW,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout,
+            creationflags=NO_WINDOW,
         )
         ips = re.findall(r"\b(\d{1,3}(?:\.\d{1,3}){3})\b", proc.stdout or "")
         return ips or None

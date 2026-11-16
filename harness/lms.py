@@ -65,8 +65,10 @@ def run_cli(args, cfg=None, timeout=30):
     if not cli:
         return None, "lms.exe не найден (config providers.lmstudio.lms_cli)"
     try:
-        proc = subprocess.run([cli] + list(args), capture_output=True, timeout=timeout,
-                              creationflags=NO_WINDOW)
+        # Без явного DEVNULL консольное приложение без валидной консоли (трей, автозапуск)
+        # падает на наследованном stdin с WinError 6.
+        proc = subprocess.run([cli] + list(args), stdin=subprocess.DEVNULL,
+                              capture_output=True, timeout=timeout, creationflags=NO_WINDOW)
         out = (proc.stdout or b"").decode("utf-8", "replace")
         if proc.returncode != 0:
             err = (proc.stderr or b"").decode("utf-8", "replace")

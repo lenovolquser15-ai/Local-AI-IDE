@@ -130,7 +130,43 @@ function ensureTurn() {
   return turn;
 }
 
+function dropWelcome() {
+  const welcome = thread.querySelector('.welcome');
+  if (welcome) welcome.remove();
+}
+
+const WELCOME_PROMPTS = [
+  ['🖥', 'что у меня сейчас на экране?'],
+  ['📂', 'посмотри папку проекта и предложи, что улучшить'],
+  ['🌐', 'найди в интернете последнюю версию Python'],
+  ['⚡', 'проверь, почему тормозит ноутбук'],
+];
+
+function renderWelcome() {
+  if (thread.querySelector('.welcome')) return;
+  const wrap = node('div', 'welcome');
+  wrap.appendChild(node('div', 'welcome-mark', 'LH'));
+  wrap.appendChild(node('div', 'welcome-title', 'LocalHarness'));
+  wrap.appendChild(node('div', 'welcome-sub',
+    'Локальный агент на этом компьютере. Напиши задачу — он сам найдёт файлы, откроет инструменты и проверит результат.'));
+  const chips = node('div', 'welcome-chips');
+  WELCOME_PROMPTS.forEach(([ico, text]) => {
+    const chip = node('button', 'welcome-chip', '<span class="ico">' + ico + '</span>' + esc(text));
+    chip.type = 'button';
+    chip.onclick = () => {
+      const input = $('#input');
+      input.value = text;
+      input.focus();
+      input.dispatchEvent(new Event('input'));
+    };
+    chips.appendChild(chip);
+  });
+  wrap.appendChild(chips);
+  thread.appendChild(wrap);
+}
+
 function pushUser(text, images) {
+  dropWelcome();
   ensureTurn();
   const box = node('div', 'msg user');
   box.appendChild(node('div', 'body', md(text)));
@@ -139,6 +175,7 @@ function pushUser(text, images) {
 }
 
 function pushAssistant(html, label) {
+  dropWelcome();
   ensureTurn();
   const box = node('div', 'msg assistant');
   if (label) box.appendChild(node('div', 'who', label));
@@ -156,6 +193,7 @@ function pushNotice(text, cls) {
 /* ---------- reasoning: inline "глубокие раздумья" line ---------- */
 function diveStart() {
   if (diveEl) return diveEl;
+  dropWelcome();
   ensureTurn();
   const wrap = node('div', 'dive');
   const head = node('div', 'dive-head live');
@@ -228,6 +266,7 @@ function resetStream() { answerEl = null; }
 
 /* ---------- tool calls ---------- */
 function toolLine(ev, open) {
+  dropWelcome();
   ensureTurn();
   const wrap = node('div', 'call');
   const line = node('div', 'call-line ' + (ev.ok ? 'good' : 'bad'));
@@ -314,19 +353,31 @@ function paintContext(ev) {
   lastContext = ev;
   const win = Number(ev.window) || 0;
   const used = Number(ev.tokens) || 0;
+  const tools = Number(ev.tools) || 0;
+  const answer = Number(ev.answer) || 0;
+  const history = ev.history != null ? Number(ev.history) : Math.max(0, used - tools);
   const threshold = Number(ev.threshold) || 0;
   const pct = Math.max(0, Math.min(100, Number(ev.pct) || 0));
-  const markPct = win ? Math.max(0, Math.min(100, threshold * 100 / win)) : 0;
+  const share = n => win ? Math.max(0, Math.min(100, n * 100 / win)) : 0;
+  const toolsPct = share(tools);
+  const histPct = Math.min(100 - toolsPct, share(history));
+  const markPct = share(tools + threshold);
   bar.hidden = false;
+  const toolsEl = $('#ctxTools');
+  toolsEl.style.width = toolsPct + '%';
+  toolsEl.title = 'схема инструментов: ' + fmtTok(tools) + ' ток';
   const fill = $('#ctxFill');
-  fill.style.width = pct + '%';
-  fill.className = 'ctxbar-fill' + (pct >= markPct ? ' over' : (pct >= markPct * 0.8 ? ' warn' : ''));
+  fill.style.left = toolsPct + '%';
+  fill.style.width = histPct + '%';
+  fill.className = 'ctxbar-fill' + (pct >= markPct ? ' over' : (pct >= markPct * 0.85 ? ' warn' : ''));
+  const ansEl = $('#ctxAnswer');
+  ansEl.style.width = share(answer) + '%';
+  ansEl.title = 'резерв под ответ: ' + fmtTok(answer) + ' ток';
   const mark = $('#ctxMark');
   mark.style.left = markPct + '%';
-  mark.title = 'сжатие при ~' + fmtTok(threshold) + ' токенов';
-  $('#ctxLabel').textContent = 'контекст ' + pct + '% · ' + fmtTok(used) + '/' + fmtTok(win);
-  $('#ctxLimit').textContent = 'сжатие при ' + fmtTok(threshold) + ' ток'
-    + (ev.answer ? ' · резерв ' + fmtTok(ev.answer) : '');
+  mark.title = 'сжатие, когда диалог дойдёт до ~' + fmtTok(threshold) + ' ток';
+  $('#ctxLabel').textContent = 'контекст ' + pct + '% · диалог ' + fmtTok(history) + '/' + fmtTok(threshold) + ' ток';
+  $('#ctxLimit').textContent = 'схема ' + fmtTok(tools) + ' · ответ ' + fmtTok(answer) + ' · окно ' + fmtTok(win);
   paintUsage(lastSpeed, null, null);
 }
 
@@ -459,7 +510,8 @@ function render(ev, replayed) {
     case 'question': case 'approve': resetStream(); dropDive(); askBand(ev); break;
     case 'notice': pushNotice(ev.text, 'warn'); break;
     case 'context': paintContext(ev); break;
-    case 'compact': pushNotice('контекст сжат: свёрнуто ходов — ' + ev.folded_turns, 'warn compact'); break;
+    case 'compact': pushNotice('контекст сжат: свёрнуто ходов — ' + ev.folded_turns
+      + (ev.before ? ' · ' + fmtTok(ev.before) + '→' + fmtTok(ev.after) + ' ток' : ''), 'warn compact'); break;
     case 'error': resetStream(); dropDive(); pushNotice('сбой: ' + ev.text, 'bad'); break;
     case 'stopped':
       resetStream(); dropDive(); pushNotice('остановлено', 'warn');
@@ -595,7 +647,7 @@ async function openSession(id) {
   $('#send').disabled = false;
   document.querySelectorAll('.session').forEach((el) => el.classList.toggle('active', el.dataset.id === id));
   const data = await api('/api/history?session=' + encodeURIComponent(id));
-  const title = (data.meta && data.meta.title) || id;
+  const title = (data.meta && data.meta.title) || 'новая сессия';
   $('#sessionTitle').textContent = title;
   if (data.running) {
     running = true;
@@ -616,6 +668,7 @@ async function openSession(id) {
       pushUser(text);
     }
   }
+  if (!thread.children.length) renderWelcome();
 }
 
 /* ---------- view tabs ---------- */
@@ -654,6 +707,65 @@ function fillSelect(sel, pairs, current) {
     sel.appendChild(opt);
   });
   if (open) sel.focus();
+}
+
+function renderModelMenu(st) {
+  const ps = st.provider_status || {};
+  const models = ps.models || [];
+  const currentModel = st.model || models[0] || '';
+  const provTitle = $('#mmProviderTitle');
+  if (provTitle) provTitle.textContent = ps.label || st.provider || 'провайдер';
+  const chipProv = $('#modelChipProv');
+  if (chipProv) chipProv.textContent = ps.label || st.provider || '';
+  const chipName = $('#modelChipName');
+  if (chipName) chipName.textContent = currentModel ? shortModel(currentModel) : 'модель не выбрана';
+  const dot = $('#modelChipDot');
+  if (dot) dot.classList.toggle('bad', !ps.alive);
+
+  const provBox = $('#mmProviders');
+  if (provBox) {
+    provBox.innerHTML = '';
+    Object.entries(st.providers || {}).forEach(([key, label]) => {
+      const b = node('button', 'mm-prov' + (key === st.provider ? ' on' : ''), esc(label));
+      b.type = 'button';
+      b.setAttribute('role', 'tab');
+      b.setAttribute('aria-selected', key === st.provider ? 'true' : 'false');
+      b.onclick = async () => {
+        const sel = $('#provider');
+        sel.value = key;
+        await patchConfig('provider', key);
+      };
+      provBox.appendChild(b);
+    });
+  }
+
+  const list = $('#mmModels');
+  if (list) {
+    const keepScroll = list.scrollTop;
+    list.innerHTML = '';
+    if (!models.length) {
+      list.appendChild(node('div', 'mm-empty', 'Моделей нет — проверь LM Studio или провайдера.'));
+    }
+    const vision = new Set(ps.vision_models || []);
+    models.forEach((m) => {
+      const on = m === currentModel;
+      const b = node('button', 'mm-model' + (on ? ' on' : ''),
+        '<span class="mm-model-name">' + esc(shortModel(m)) + '</span>'
+        + (vision.has(m) ? '<span class="mm-vision">vision</span>' : '')
+        + '<span class="mm-check">✓</span>');
+      b.type = 'button';
+      b.title = m;
+      b.setAttribute('aria-pressed', on ? 'true' : 'false');
+      b.onclick = async () => {
+        const sel = $('#model');
+        sel.value = m;
+        setModelMenu(false);
+        await patchConfig('model', m);
+      };
+      list.appendChild(b);
+    });
+    list.scrollTop = keepScroll;
+  }
 }
 
 async function refreshState() {
@@ -696,6 +808,7 @@ async function refreshState() {
   fillSelect($('#protocol'), [['auto', 'tools auto'], ['native', 'tools native'], ['json', 'tools json']], st.tool_protocol);
   fillSelect($('#perms'), [['auto', 'права: авто'], ['unrestricted', 'права: всё'], ['ask', 'права: спрос']],
     (st.permissions && st.permissions.mode) || 'auto');
+  renderModelMenu(st);
   $('#modeHint').textContent = {
     auto: 'авто: чёрный список всё равно спрашивает',
     unrestricted: 'ВСЕ ПРАВА: подтверждений нет',
@@ -1252,11 +1365,14 @@ $('#railBtn').onclick = () => {
   localStorage.setItem('lh.rail', app.classList.contains('rail') ? '1' : '0');
 };
 const mobileLayout = () => window.matchMedia('(max-width: 768px)').matches;
+const modelMenuEl = () => $('#modelMenu');
+const modelMenuOpen = () => !!modelMenuEl() && modelMenuEl().classList.contains('open');
 function syncBackdrop() {
   const backdrop = $('#sideBackdrop');
   if (!backdrop) return;
   const open = mobileLayout() && (
     ($('#side') && $('#side').classList.contains('open')) ||
+    modelMenuOpen() ||
     (settingsDrawer() && settingsDrawer().classList.contains('open'))
   );
   backdrop.hidden = !open;
@@ -1271,23 +1387,63 @@ function setSideDrawer(open) {
 if ($('#mobileMenuBtn')) $('#mobileMenuBtn').onclick = () => setSideDrawer(true);
 if ($('#sideCloseBtn')) $('#sideCloseBtn').onclick = () => setSideDrawer(false);
 
+function setModelMenu(open) {
+  const menu = modelMenuEl();
+  if (!menu) return;
+  menu.classList.toggle('open', open);
+  menu.setAttribute('aria-hidden', open ? 'false' : 'true');
+  const chip = $('#modelChip');
+  if (chip) chip.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) {
+    if (mobileLayout()) {
+      menu.style.left = '';
+      menu.style.right = '';
+      menu.style.bottom = '';
+      menu.style.width = '';
+    } else if (chip) {
+      const cr = chip.getBoundingClientRect();
+      const width = Math.min(430, window.innerWidth - 32);
+      const left = Math.min(Math.max(12, cr.left), window.innerWidth - width - 12);
+      menu.style.width = width + 'px';
+      menu.style.left = left + 'px';
+      menu.style.right = 'auto';
+      menu.style.bottom = Math.max(12, window.innerHeight - cr.top + 10) + 'px';
+    }
+  }
+  syncBackdrop();
+  if (open) {
+    const on = menu.querySelector('.mm-model.on') || menu.querySelector('.mm-model');
+    if (on) setTimeout(() => on.scrollIntoView({ block: 'nearest' }), 60);
+  }
+}
+if ($('#modelChip')) $('#modelChip').onclick = () => setModelMenu(!modelMenuOpen());
+if ($('#modelMenuClose')) $('#modelMenuClose').onclick = () => setModelMenu(false);
+document.addEventListener('pointerdown', (e) => {
+  if (!modelMenuOpen()) return;
+  if (e.target.closest('#modelMenu, #modelChip')) return;
+  setModelMenu(false);
+});
+
 const settingsDrawer = () => $('#settingsDrawer');
 function setSettingsDrawer(open) {
   const d = settingsDrawer();
   if (!d) return;
-  if (!open && d.contains(document.activeElement)) $('#gearBtn')?.focus();
+  if (!open && d.contains(document.activeElement)) {
+    const gear = $('#gearBtn');
+    if (gear && gear.offsetParent) gear.focus();
+  }
   d.classList.toggle('open', open);
   d.setAttribute('aria-hidden', open ? 'false' : 'true');
   if ($('#gearBtn')) $('#gearBtn').classList.toggle('on', open);
-  if ($('#mobileGearBtn')) $('#mobileGearBtn').classList.toggle('on', open);
+  if (open) refreshRemote();
   syncBackdrop();
 }
 if ($('#gearBtn')) $('#gearBtn').onclick = () => setSettingsDrawer(!settingsDrawer().classList.contains('open'));
-if ($('#mobileGearBtn')) $('#mobileGearBtn').onclick = () => setSettingsDrawer(!settingsDrawer().classList.contains('open'));
 if ($('#drawerClose')) $('#drawerClose').onclick = () => setSettingsDrawer(false);
 if ($('#sideBackdrop')) {
   $('#sideBackdrop').onclick = () => {
     setSideDrawer(false);
+    setModelMenu(false);
     setSettingsDrawer(false);
   };
 }
@@ -1295,9 +1451,11 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
     setSettingsDrawer(false);
     setSideDrawer(false);
+    setModelMenu(false);
   }
 });
 window.addEventListener('resize', syncBackdrop);
+window.addEventListener('resize', () => { if (modelMenuOpen()) setModelMenu(false); });
 if (window.visualViewport) {
   window.visualViewport.addEventListener('resize', () => {
     if (currentView === 'chat' && log) log.scrollTop = log.scrollHeight;
@@ -1332,6 +1490,7 @@ $('#thinkBtn').onclick = () => {
   const off = app.classList.toggle('thinkoff');
   localStorage.setItem('lh.thinkoff', off ? '1' : '0');
   $('#thinkBtn').classList.toggle('off', off);
+  $('#thinkBtn').setAttribute('aria-pressed', off ? 'false' : 'true');
 };
 document.querySelector('.right-head').onclick = () => {
   app.classList.toggle('no-right');
@@ -1459,6 +1618,122 @@ $('#lanCopyBtn').onclick = () => {
   }
 };
 $('#gameFailsafeEnabled').onchange = (e) => patchConfig('game_failsafe', e.target.checked);
+
+let remoteTimer = null;
+let remoteQrUrl = '';
+function remoteClock(exp) {
+  if (!exp) return '';
+  const left = Math.max(0, exp - Math.floor(Date.now() / 1000));
+  const h = Math.floor(left / 3600);
+  const m = Math.floor((left % 3600) / 60);
+  return h ? h + ' ч ' + m + ' мин' : m + ' мин';
+}
+function copyText(text, okText) {
+  const done = () => pushNotice(okText + ': ' + text, 'ok');
+  const fallback = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); } catch (err) { pushNotice('Не удалось скопировать', 'bad'); }
+    document.body.removeChild(ta);
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done).catch(fallback);
+  else fallback();
+}
+function renderRemote(st) {
+  if (!st) return;
+  const phase = st.phase || 'idle';
+  const busy = phase === 'starting';
+  $('#remoteEnabled').checked = busy || phase === 'running';
+  $('#remoteSection').hidden = phase === 'idle';
+  if (phase === 'idle') {
+    $('#remoteMeta').textContent = '';
+    $('#remoteHint').textContent = '';
+  }
+  $('#remoteCode').textContent = st.display || '·····-·····';
+  $('#remoteCopyBtn').disabled = !st.code;
+  $('#remoteRotateBtn').disabled = phase !== 'running';
+  const meta = [];
+  if (phase === 'starting') meta.push('Подключаюсь к реле…');
+  else if (phase === 'running') {
+    meta.push(st.connected ? 'Реле на связи' : 'Реле переподключается…');
+    if (st.expires) meta.push('код ещё ' + remoteClock(st.expires));
+    if (!st.worker_url) meta.push('реле не задано');
+    else if (!st.room) meta.push('реле: ' + (st.worker_error || 'код не отправлен'));
+  } else if (phase === 'error') meta.push('Ошибка: ' + (st.error || 'реле не ответило'));
+  $('#remoteMeta').textContent = meta.join(' · ');
+  const qr = $('#remoteQr');
+  if (st.qr_url && st.qr_url !== remoteQrUrl) {
+    remoteQrUrl = st.qr_url;
+    qr.innerHTML = '<img src="/api/qrcode?url=' + encodeURIComponent(st.qr_url) + '" width="150" height="150" alt="QR Code">';
+  } else if (!st.qr_url) {
+    remoteQrUrl = '';
+    qr.innerHTML = '';
+  }
+  $('#remoteSiteText').textContent = st.site_url || st.worker_url || 'сайт не настроен';
+  $('#remoteOpenSite').disabled = !(st.site_url || st.worker_url);
+  if (document.activeElement !== $('#remoteSiteUrl')) $('#remoteSiteUrl').value = st.site_url || '';
+  if (document.activeElement !== $('#remoteWorkerUrl')) $('#remoteWorkerUrl').value = st.worker_url || '';
+  let hint = '';
+  if (phase === 'running') {
+    if (!st.connected) hint = 'Связи с реле нет — переподключаюсь сам, ничего делать не нужно.';
+    else if (st.worker_error) hint = 'Реле ответило ошибкой: ' + st.worker_error;
+    else if (!st.worker_url) hint = 'Задай адрес реле ниже — тогда код можно вводить руками на сайте, а QR откроет его сразу.';
+    else hint = 'Открой сайт, введи код — и ты внутри. Код привязан к этой машине и перестаёт работать после «Выключить» или «Новый код».';
+  } else if (phase === 'error') {
+    hint = st.error || '';
+  } else if (phase === 'starting') {
+    hint = 'Поднимаю исходящее соединение с реле — без установки cloudflared.';
+  }
+  $('#remoteHint').textContent = hint;
+}
+async function refreshRemote() {
+  let st = null;
+  try { st = await api('/api/remote/status'); } catch (err) { return null; }
+  renderRemote(st);
+  if (remoteTimer) { clearTimeout(remoteTimer); remoteTimer = null; }
+  if (st.phase === 'starting') remoteTimer = setTimeout(refreshRemote, 1200);
+  else if (st.phase === 'running') remoteTimer = setTimeout(refreshRemote, 15000);
+  return st;
+}
+$('#remoteEnabled').onchange = async (e) => {
+  const on = e.target.checked;
+  e.target.disabled = true;
+  $('#remoteSection').hidden = false;
+  $('#remoteMeta').textContent = on ? 'Запускаю…' : 'Останавливаю…';
+  try {
+    const st = await api(on ? '/api/remote/start' : '/api/remote/stop', {});
+    renderRemote(st);
+    refreshRemote();
+  } catch (err) {
+    e.target.checked = !on;
+    pushNotice('Удалённый доступ: ' + err.message, 'bad');
+  } finally { e.target.disabled = false; }
+};
+$('#remoteCopyBtn').onclick = () => { const code = $('#remoteCode').textContent.trim(); if (code && !code.includes('·')) copyText(code, 'Код скопирован'); };
+$('#remoteRotateBtn').onclick = async () => {
+  try {
+    const st = await api('/api/remote/rotate', {});
+    renderRemote(st);
+    pushNotice('Новый код выдан, старый погашен', 'ok');
+  } catch (err) { pushNotice('Не получилось: ' + err.message, 'bad'); }
+};
+$('#remoteOpenSite').onclick = () => {
+  const url = $('#remoteSiteText').textContent.trim();
+  if (url && url !== 'сайт не настроен') window.open(url, '_blank', 'noopener');
+};
+$('#remoteCfgSave').onclick = async () => {
+  const site = $('#remoteSiteUrl').value.trim().replace(/\/+$/, '');
+  const worker = $('#remoteWorkerUrl').value.trim().replace(/\/+$/, '');
+  try {
+    await api('/api/config', { config: { remote: { site_url: site, worker_url: worker } } });
+    await refreshRemote();
+    pushNotice('Адреса сохранены', 'ok');
+  } catch (err) { pushNotice('Не сохранилось: ' + err.message, 'bad'); }
+};
 $('#lmsRefresh').onclick = refreshLM;
 const unloadAllFn = async () => {
   try {
@@ -1494,9 +1769,11 @@ $('#saveSystemPrompt').onclick = async () => {
   if (localStorage.getItem('lh.thinkoff') === '1') {
     app.classList.add('thinkoff');
     $('#thinkBtn').classList.add('off');
+    $('#thinkBtn').setAttribute('aria-pressed', 'false');
   }
   syncQuickControls();
   refreshDesktop();
+  refreshRemote();
   await refreshState();
   const st = stateCache || {};
   const first = (st.sessions || [])[0];

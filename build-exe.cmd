@@ -27,6 +27,8 @@ xcopy /e /i /y harness\webui webui >nul
 if errorlevel 1 goto :fail
 xcopy /e /i /y plugins "%STAGE%\LocalHarness\plugins" >nul
 if errorlevel 1 goto :fail
+powershell -NoProfile -Command "Get-ChildItem -Path '%STAGE%\LocalHarness\plugins' -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force"
+if errorlevel 1 goto :fail
 copy /y LICENSE "%STAGE%\LocalHarness\LICENSE" >nul
 if errorlevel 1 goto :fail
 copy /y README.md "%STAGE%\LocalHarness\README.md" >nul

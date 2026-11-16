@@ -36,3 +36,4 @@ venv/
 .qoder/
 .backup*/
 *.zip
+.wrangler/

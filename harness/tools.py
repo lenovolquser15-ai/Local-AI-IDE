@@ -458,8 +458,8 @@ class Toolkit:
             argv += ["-i", os.path.expanduser(str(key))]
         argv += argv_tail
         try:
-            proc = subprocess.run(argv, capture_output=True, timeout=float(timeout), creationflags=NO_WINDOW,
-                                  env=child_env())
+            proc = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True,
+                                  timeout=float(timeout), creationflags=NO_WINDOW, env=child_env())
             return {"ok": proc.returncode == 0, "exit": proc.returncode, "host": target,
                     "stdout": truncate(decode_bytes(proc.stdout), 3000)[0],
                     "stderr": truncate(decode_bytes(proc.stderr), 3000)[0]}
@@ -546,13 +546,14 @@ class Toolkit:
                 log_path = os.path.join(DATA_DIR, "jobs", "%s.log" % uuid.uuid4().hex[:6])
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
                 handle = open(log_path, "w", encoding="utf-8", errors="replace")
-                proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT,
-                                        creationflags=NO_WINDOW)
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=handle,
+                                        stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
                 self.jobs[proc.pid] = {"pid": proc.pid, "log": log_path,
                                        "cmd": "ssh %s" % target, "started": time.time(), "handle": handle}
                 return {"ok": True, "background": True, "pid": proc.pid, "log": log_path,
                         "host": target}
             proc = subprocess.run(argv, input=cmd_str.encode("utf-8") if use_stdin else None,
+                                  stdin=None if use_stdin else subprocess.DEVNULL,
                                   capture_output=True, timeout=float(timeout), creationflags=NO_WINDOW,
                                   env=child_env())
             out = truncate(decode_bytes(proc.stdout), MAX_OUT)[0]
@@ -647,8 +648,8 @@ class Toolkit:
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             handle = open(log_path, "w", encoding="utf-8", errors="replace")
             try:
-                proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT,
-                                        creationflags=NO_WINDOW)
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=handle,
+                                        stderr=subprocess.STDOUT, creationflags=NO_WINDOW)
             except Exception as exc:
                 return {"ok": False, "error": "не удалось запустить ssh tunnel: %s" % exc}
 
@@ -765,8 +766,9 @@ class Toolkit:
                 log_path = os.path.join(DATA_DIR, "jobs", "%s.log" % uuid.uuid4().hex[:6])
                 os.makedirs(os.path.dirname(log_path), exist_ok=True)
                 handle = open(log_path, "w", encoding="utf-8", errors="replace")
-                proc = subprocess.Popen(argv, stdout=handle, stderr=subprocess.STDOUT, cwd=cwd,
-                                        creationflags=flags, shell=False, env=child_env())
+                proc = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=handle,
+                                        stderr=subprocess.STDOUT, cwd=cwd, creationflags=flags,
+                                        shell=False, env=child_env())
                 self.jobs[proc.pid] = {"pid": proc.pid, "log": log_path, "cmd": cmd, "started": time.time(), "handle": handle}
                 return {"ok": True, "background": True, "pid": proc.pid, "log": log_path,
                         "note": "запущено в фоне; забери вывод через jobs(action='log', pid=%d)" % proc.pid}
@@ -1368,6 +1370,8 @@ class Toolkit:
         return self.shell(cmd=cmd, timeout=120, mode="raw")
 
     def remember(self, text=None, **kw):
+        if not self.cfg.get("memory_enabled", False):
+            return {"ok": False, "error": "долговременная память выключена в настройках"}
         from . import memory as mem_mod
         res = mem_mod.add_fact(text)
         try:
@@ -1379,6 +1383,8 @@ class Toolkit:
         return res
 
     def recall(self, query=None, **kw):
+        if not self.cfg.get("memory_enabled", False):
+            return {"ok": False, "error": "долговременная память выключена в настройках"}
         from . import memory as mem_mod
         facts = mem_mod.search_facts(query)
         return {"ok": True, "facts": facts, "count": len(facts)}

@@ -20,6 +20,7 @@ SHOTS_PER_TURN = 3
 UNITS_PER_TOKEN = 3.0        # условных единиц в одном токене
 ASCII_UNIT = 0.75            # латиница и пунктуация: ~4 символа на токен
 WIDE_UNIT = 1.6              # кириллица: ~2 символа на токен
+MIN_DIALOG_UNITS = 4096 * UNITS_PER_TOKEN  # меньше этого на диалог — полная схема уже не оправдана
 _NON_ASCII = re.compile(r"[^\x00-\x7f]")
 LOOP_HINT_AT = 2             # столько одинаковых провалов — подсказка «смени аргументы»
 LOOP_WEB_AT = 3              # столько — подсказка «поищи в интернете»
@@ -487,7 +488,9 @@ class Agent:
         return extra + base
 
     def _system(self, protocol):
-        base = schemas.build_system_prompt(self.cfg, self.profile, vision=self.vision)
+        # В native-режиме описания инструментов уже приходят схемой — не дублируем их текстом.
+        base = schemas.build_system_prompt(self.cfg, self.profile, vision=self.vision,
+                                           tools_doc=(protocol != "native"))
         if self.vision:
             base += ("\nТы видишь изображения: прикреплённые картинки и скриншоты приходят тебе автоматически. "
                      "После значимых действий с GUI/сайтом делай screenshot (region='window' для конкретного окна), "
@@ -509,7 +512,7 @@ class Agent:
         return data_url
 
     def _tools_for(self, protocol):
-        return schemas.native_tools(self.profile) if protocol == "native" else None
+        return schemas.native_tools(self.profile, self.cfg) if protocol == "native" else None
 
     def _tools_units(self, protocol):
         """Вес схемы инструментов: она уходит в каждый запрос."""
@@ -533,15 +536,18 @@ class Agent:
         return max(2000.0, self.window_units - self._reserve_units(protocol))
 
     def _context_event(self, messages, protocol):
-        """Снимок заполнения контекста для шкалы в интерфейсе."""
-        used = _estimate_units(messages)
-        total = used + self._tools_units(protocol)
-        window = self.window_units
+        """Заполнение окна по частям: схема инструментов + диалог + резерв под ответ.
+        Порог сжатия — это бюджет диалога; полная шкала показывает, сколько осталось до окна."""
+        history = _estimate_units(messages)
+        tools = self._tools_units(protocol)
         answer = self._answer_units()
+        window = self.window_units
+        total = history + tools
         toks = lambda units: int(units // UNITS_PER_TOKEN)
         return {"type": "context", "chars": int(total), "tokens": toks(total),
-                "window": toks(window), "threshold": toks(window - answer),
-                "answer": toks(answer), "pct": int(min(100.0, total * 100.0 / max(1.0, window)))}
+                "history": toks(history), "tools": toks(tools), "answer": toks(answer),
+                "window": toks(window), "threshold": toks(self._budget_units(protocol)),
+                "pct": int(min(100.0, total * 100.0 / max(1.0, window)))}
 
     def _delta(self, piece):
         self.bridge.emit({"type": "delta", "text": piece})
@@ -660,6 +666,7 @@ class Agent:
             steps += 1
             mode = self.squeeze
             budget = self._budget_units(protocol)
+            before_units = _estimate_units(messages)
             if mode == "off":
                 folded, dropped = messages, 0
             elif mode in ("hard", "always"):
@@ -669,7 +676,9 @@ class Agent:
                 if _estimate_units(folded) > budget:
                     folded, dropped = fold_hard(messages, budget)
             if dropped:
-                self.bridge.emit({"type": "compact", "folded_turns": dropped, "chars": int(_estimate_units(folded))})
+                toks = lambda units: int(units // UNITS_PER_TOKEN)
+                self.bridge.emit({"type": "compact", "folded_turns": dropped,
+                                  "before": toks(before_units), "after": toks(_estimate_units(folded))})
             self.bridge.emit(self._context_event(folded, protocol))
             try:
                 pump = ReasonPump(self.bridge, limit=80, interval=0.12)
@@ -836,19 +845,39 @@ class Agent:
                 old_units = self.window_units
                 self.window_units = float(detected) * UNITS_PER_TOKEN
                 self._reserve_cache.clear()
+                configured = int(self.cfg.get("context_tokens") or self.cfg.get("lms_context_length") or 0)
                 if abs(self.window_units - old_units) > 100:
-                    self.bridge.emit({
-                        "type": "notice",
-                        "text": "контекст модели определён автоматически: %d токенов (окно адаптировано)" % detected
-                    })
+                    text = "окно модели определено: %d токенов" % detected
+                    if configured and detected < configured * 0.9:
+                        text += (" — LM Studio загрузил её с меньшим контекстом, чем настроено (%d). "
+                                 "Перезагрузи модель с нужным контекстом, иначе история будет сжиматься раньше."
+                                 % configured)
+                    self.bridge.emit({"type": "notice", "text": text})
         except Exception:
             pass
 
+    def _fit_profile(self):
+        """Тесное окно не тянет полную схему: full оставляем, только если на диалог остаётся запас."""
+        if self.profile != "full":
+            return False
+        tools_units = self._tools_units("native")
+        left = self.window_units - tools_units - self._answer_units()
+        if left >= MIN_DIALOG_UNITS:
+            return False
+        self.profile = "core"
+        self._reserve_cache.clear()
+        toks = lambda units: int(units // UNITS_PER_TOKEN)
+        self.bridge.emit({"type": "notice", "text":
+                          "окно %d токенов: полная схема инструментов (~%d) оставляет на диалог лишь %d — "
+                          "в этом прогоне включён профиль core" % (toks(self.window_units), toks(tools_units), toks(left))})
+        return True
+
     def run(self, user_text, history=None, goal=None, image=None, images=None):
         self._sync_context_window()
+        self._fit_profile()
         protocol = self.cfg.get("tool_protocol", "auto")
         if protocol == "auto":
-            protocol = self.llm.probe_protocol(schemas.native_tools(self.profile))
+            protocol = self.llm.probe_protocol(schemas.native_tools(self.profile, self.cfg))
         self.vision = vision_mod.supports_vision(self.cfg, self.llm.model)
         messages = [{"role": "system", "content": self._system(protocol)}]
         hist = history or []

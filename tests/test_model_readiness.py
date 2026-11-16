@@ -207,8 +207,8 @@ class LoadedModelCacheTests(unittest.TestCase):
             self.assertEqual(result["context_length"], 4096)
             self.assertTrue(result["warnings"])
             cli.assert_called_once_with(cfg)
-            run.assert_called_once_with(["mock-lms", "ps", "--json"], capture_output=True,
-                                        timeout=20, creationflags=lms.NO_WINDOW)
+            run.assert_called_once_with(["mock-lms", "ps", "--json"], stdin=subprocess.DEVNULL,
+                                        capture_output=True, timeout=20, creationflags=lms.NO_WINDOW)
 
     def test_empty_failed_cli_response_is_unverified_not_missing(self):
         proc = subprocess.CompletedProcess([], 1, stdout=b"", stderr=b"")

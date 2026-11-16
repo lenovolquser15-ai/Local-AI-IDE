@@ -14,6 +14,7 @@ from . import llm as llm_mod
 from . import lms as lms_mod
 from . import memory as mem_mod
 from . import plugins
+from . import remote
 from . import schemas
 from . import session as session_mod
 from . import sizing as sizing_mod
@@ -251,7 +252,8 @@ def start_lms_job(kind, args, timeout=3600):
 
     def runner():
         try:
-            proc = subprocess.Popen([cli] + list(args), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            proc = subprocess.Popen([cli] + list(args), stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                     creationflags=flags)
             deadline = time.time() + timeout
             for raw in proc.stdout:
@@ -397,6 +399,29 @@ def _json_response(handler, data, status=200):
     handler.wfile.write(json.dumps(data, ensure_ascii=False).encode("utf-8"))
 
 
+_REMOTE_PAGE = """<!doctype html><html lang="ru"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LocalHarness</title>
+<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0f17;
+color:#e8eefc;font:15px/1.5 system-ui,Segoe UI,sans-serif;padding:24px}
+.box{max-width:420px;background:#131a26;border:1px solid #24314a;border-radius:18px;padding:26px}
+h1{font-size:18px;margin:0 0 10px}p{margin:0;color:#9fb0cc}
+code{color:#8fd0ff}</style>
+<div class="box"><h1>%s</h1><p>%s</p></div></html>"""
+
+
+def _remote_denied(handler, detail):
+    body = _REMOTE_PAGE % ("Нужен код доступа", detail)
+    payload = body.encode("utf-8")
+    handler.send_response(401)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Robots-Tag", "noindex")
+    handler.send_header("Content-Length", str(len(payload)))
+    handler.end_headers()
+    handler.wfile.write(payload)
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass
@@ -409,6 +434,20 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, {"ok": False, "error": "доступ с этого адреса запрещён"}, 403)
             return
 
+        tunneled = remote.is_tunnel(self.headers)
+        if tunneled and path != "/api/remote/claim" and not remote.authorized(self.headers):
+            _remote_denied(self, "Открой сайт подключения и введи временный код из раздела "
+                                 "«Удалённый доступ» — без него интернет-запросы закрыты.")
+            return
+
+        if path == "/api/remote/claim":
+            self.serve_remote_claim(query.get("rt", [""])[0])
+            return
+
+        if path == "/api/remote/status":
+            _json_response(self, remote.status())
+            return
+
         if path == "/api/state":
             cfg = load()
             ps = cached_provider_status(cfg)
@@ -417,7 +456,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception as exc:
                 dns_probe = {"ok": False, "error": str(exc)}
             pl = plugins.status()
-            tools_list = [spec["name"] for spec in schemas.entries(cfg.get("tool_profile", "core"))]
+            tools_list = [spec["name"] for spec in schemas.entries(cfg.get("tool_profile", "core"), cfg)]
             loaded_items, _ = lms_mod.loaded_models(cfg) if cfg.get("provider") == "lmstudio" else ([], "")
             lms_loaded = [lms_mod.model_key(m) for m in (loaded_items or []) if lms_mod.model_key(m)]
             lan_ip = get_lan_ip()
@@ -582,6 +621,14 @@ class Handler(BaseHTTPRequestHandler):
         if not is_allowed_client(self.client_address[0], load()):
             _json_response(self, {"ok": False, "error": "доступ с этого адреса запрещён"}, 403)
             return
+        if remote.is_tunnel(self.headers):
+            if not remote.authorized(self.headers):
+                _json_response(self, {"ok": False, "error": "нужен временный код доступа"}, 401)
+                return
+            origin = self.headers.get("Origin")
+            if origin and urlparse(origin).netloc != (self.headers.get("Host") or ""):
+                _json_response(self, {"ok": False, "error": "запрос с чужого источника"}, 403)
+                return
         try:
             length = int(self.headers.get("Content-Length", 0))
         except ValueError:
@@ -610,6 +657,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/lms/download": self.handle_lms_download,
             "/api/lms/import": self.handle_lms_import,
             "/api/lms/estimate": self.handle_lms_estimate,
+            "/api/remote/start": self.handle_remote_start,
+            "/api/remote/stop": self.handle_remote_stop,
+            "/api/remote/rotate": self.handle_remote_rotate,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -773,6 +823,42 @@ class Handler(BaseHTTPRequestHandler):
             return
         _json_response(self, {"ok": True, "title": title.strip()})
 
+    def serve_remote_claim(self, token):
+        info = remote.verify_token(token)
+        insecure = not remote.is_https(self.headers)
+        if not info:
+            body = _REMOTE_PAGE % ("Код недействителен",
+                                   "Срок действия истёк или ссылка повреждена. "
+                                   "Запроси новый код в приложении LocalHarness.")
+            payload = body.encode("utf-8")
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        max_age = max(60, int(info["exp"] - time.time()))
+        cookie = "%s=%s; Path=/; HttpOnly; SameSite=Lax; Max-Age=%d%s" % (
+            remote.COOKIE, token, max_age, "" if insecure else "; Secure")
+        self.send_response(302)
+        self.send_header("Set-Cookie", cookie)
+        self.send_header("Location", "/")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Robots-Tag", "noindex")
+        self.end_headers()
+
+    def handle_remote_start(self, body):
+        remote.save_cfg(auto_start=True)
+        _json_response(self, remote.start())
+
+    def handle_remote_stop(self, body):
+        remote.save_cfg(auto_start=False)
+        _json_response(self, remote.stop())
+
+    def handle_remote_rotate(self, body):
+        _json_response(self, remote.rotate())
+
     def handle_autostart(self, body):
         from . import desktop
         origin = self.headers.get("Origin")
@@ -876,10 +962,11 @@ class Handler(BaseHTTPRequestHandler):
         _json_response(self, {"ok": True, "model": model_name, "estimate": estimate})
 
     def stream_events(self, sid, since):
+        self.close_connection = True
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "keep-alive")
+        self.send_header("Connection", "close")
         self.end_headers()
 
         with RUNS_LOCK:
@@ -952,6 +1039,10 @@ def serve(cfg):
             print("LocalHarness server on http://%s:%d" % ("127.0.0.1", port))
             if host == "0.0.0.0":
                 print("  LAN access enabled: http://%s:%d" % (get_lan_ip(), port))
+            try:
+                remote.autostart()
+            except Exception as exc:
+                print("  remote autostart: %s" % exc)
             try:
                 server.serve_forever()
             except KeyboardInterrupt:

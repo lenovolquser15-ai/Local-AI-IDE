@@ -57,6 +57,15 @@ DEFAULTS = {
     "comfyui_url": "http://127.0.0.1:8188",
     "lan_access": False,
     "game_failsafe": True,
+    "remote": {
+        "auto_start": False,
+        "code_ttl": 28800,
+        "worker_url": "",
+        "site_url": "",
+        "secret": "",
+        "epoch": 1,
+        "cloudflared": "",
+    },
 }
 
 LOCK = threading.RLock()

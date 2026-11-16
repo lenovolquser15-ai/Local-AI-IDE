@@ -106,7 +106,7 @@ def main(argv=None):
             print("dns-обход: %s" % dnsfix.resolve("html.duckduckgo.com"))
         except Exception as exc:
             print("dns-обход сломан: %s" % exc)
-        print("инструменты (%s): %s" % (cfg.get("tool_profile"), ", ".join(s["name"] for s in schemas.entries(cfg.get("tool_profile", "core")))))
+        print("инструменты (%s): %s" % (cfg.get("tool_profile"), ", ".join(s["name"] for s in schemas.entries(cfg.get("tool_profile", "core"), cfg))))
         print("chrome cdp: %s" % (chrome_path() or "не найден"))
         return 0 if models else 1
     if command == "tools":

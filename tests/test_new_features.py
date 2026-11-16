@@ -54,6 +54,16 @@ def test_tools_remember_and_recall():
     memory.clear_facts()
 
 
+def test_memory_tools_hidden_when_disabled():
+    names = [s["name"] for s in schemas.entries("full", {"memory_enabled": False})]
+    assert "remember" not in names and "recall" not in names
+    names = [s["name"] for s in schemas.entries("full", {"memory_enabled": True})]
+    assert "remember" in names and "recall" in names
+    tk = Toolkit(cfg={"memory_enabled": False})
+    assert tk.remember("тест").get("ok") is False
+    assert tk.recall("тест").get("ok") is False
+
+
 def test_comfyui_disabled():
     res = comfyui.generate_image({"image_gen_enabled": False}, "a beautiful cat")
     assert res.get("ok") is False

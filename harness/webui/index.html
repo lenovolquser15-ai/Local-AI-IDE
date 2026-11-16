@@ -7,6 +7,29 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>LocalHarness</title>
+<script>
+/* Pick the UI tier before the first paint: phone / tablet / desktop + aspect bucket. */
+(function () {
+  var d = document.documentElement;
+  var ua = navigator.userAgent || '';
+  var coarse = window.matchMedia ? matchMedia('(pointer: coarse)').matches : false;
+  var touch = coarse || navigator.maxTouchPoints > 0;
+  var sw = window.screen ? screen.width : 0;
+  var sh = window.screen ? screen.height : 0;
+  var side = Math.min(sw, sh) || Math.min(innerWidth, innerHeight) || 360;
+  var long = Math.max(sw, sh) || Math.max(innerWidth, innerHeight) || 640;
+  var ratio = long / side;
+  d.dataset.ui = touch && side < 820 ? 'phone'
+    : !touch && innerWidth <= 640 ? 'phone'
+    : touch && side < 1180 ? 'tablet'
+    : 'desktop';
+  d.dataset.ratio = ratio >= 1.95 ? '19x9' : ratio >= 1.7 ? 'tall' : 'classic';
+  d.dataset.browser = /Edg\//.test(ua) ? 'edge' : /Firefox\//.test(ua) ? 'firefox'
+    : /Safari\//.test(ua) && !/Chrome\//.test(ua) ? 'safari'
+    : /Chrome\//.test(ua) ? 'chromium' : 'other';
+  if (touch) d.classList.add('touch');
+})();
+</script>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -39,18 +62,23 @@
   <main class="center">
     <header class="head">
       <button id="mobileMenuBtn" class="icon mobile-only" type="button" title="Сессии и меню">☰</button>
-      <span class="head-title" id="sessionTitle">новая сессия</span>
+      <div class="head-brand mobile-only" aria-hidden="true"><span class="brand-mark">LH</span></div>
+      <div class="head-titles">
+        <span class="head-kicker mobile-only">LocalHarness</span>
+        <span class="head-title" id="sessionTitle">новая сессия</span>
+      </div>
       <span class="grow"></span>
       <button id="headUnloadBtn" class="ghost small-btn" title="Выгрузить модель из памяти LM Studio" hidden>⏏ Выгрузить</button>
       <span class="stat" id="speed" title="скорость генерации"></span>
       <span class="stat" id="stat"></span>
       <button id="stopBtn" class="danger" disabled>Стоп</button>
-      <button id="mobileGearBtn" class="icon mobile-only" type="button" title="Настройки">⚙</button>
     </header>
 
     <div class="ctxbar" id="ctxBar" hidden>
       <div class="ctxbar-track">
+        <div class="ctxbar-tools" id="ctxTools"></div>
         <div class="ctxbar-fill" id="ctxFill"></div>
+        <div class="ctxbar-answer" id="ctxAnswer"></div>
         <div class="ctxbar-mark" id="ctxMark"></div>
       </div>
       <div class="ctxbar-meta">
@@ -157,39 +185,70 @@
         <div class="attach-strip" id="attachStrip" hidden></div>
         <textarea id="input" rows="2" placeholder="Что сделать на компе? Enter — отправить, Shift+Enter — перенос"></textarea>
         <div class="composer-row">
-          <div class="composer-selectors">
-            <select id="provider" class="compact" title="Провайдер"></select>
-            <select id="model" class="compact wide" title="Модель"></select>
-            <select id="protocol" class="compact" title="Как модель вызывает инструменты">
-              <option value="auto">tools: auto</option>
-              <option value="native">native</option>
-              <option value="json">json</option>
-            </select>
-            <select id="profile" class="compact" title="Набор инструментов">
-              <option value="core">core</option>
-              <option value="full">full</option>
-            </select>
-            <select id="perms" class="compact" title="Сколько прав дать модели">
-              <option value="auto">права: авто</option>
-              <option value="unrestricted">права: всё</option>
-              <option value="ask">права: спрашивать</option>
-            </select>
-            <button id="thinkBtn" class="icon" title="Показывать размышления модели">⌁</button>
-            <label class="goal-toggle" title="Модель работает, пока сама не подтвердит достижение цели">
-              <input type="checkbox" id="goalMode"><span>цель</span>
-            </label>
-            <input type="text" id="goalCriteria" placeholder="критерий готовности" hidden>
-          </div>
-          <span class="grow desktop-only"></span>
+          <button id="modelChip" class="model-chip" type="button" aria-haspopup="dialog" aria-expanded="false" title="Модель и режим">
+            <span class="model-chip-dot" id="modelChipDot"></span>
+            <span class="model-chip-text">
+              <span class="model-chip-prov" id="modelChipProv">LM Studio</span>
+              <span class="model-chip-name" id="modelChipName">модель</span>
+            </span>
+            <svg class="model-chip-caret" viewBox="0 0 10 6" aria-hidden="true"><path d="M1 1l4 4 4-4" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </button>
           <div class="composer-actions">
             <span class="hint" id="modeHint"></span>
-            <button id="attachBtn" class="icon" title="Прикрепить картинки (или Ctrl+V / перетащи в поле)">🖼</button>
+            <button id="attachBtn" class="composer-icon" type="button" title="Прикрепить картинки (или Ctrl+V / перетащи в поле)">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="8.8" cy="9.6" r="1.5" fill="currentColor"/><path d="M4.5 16.5l4.2-4 3.3 3 2.6-2.2 4.9 4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
             <input type="file" id="attachFile" accept="image/png,image/jpeg,image/webp,image/gif" multiple hidden>
-            <button id="send" class="primary">Отправить</button>
+            <button id="send" class="send-round" type="button" title="Отправить" aria-label="Отправить">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><path d="M5.6 11.3L12 4.9l6.4 6.4" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+            </button>
           </div>
         </div>
       </div>
     </footer>
+    <div id="modelMenu" class="model-menu" role="dialog" aria-label="Модель и режим" aria-hidden="true">
+        <div class="mm-grab" aria-hidden="true"></div>
+        <div class="mm-head">
+          <div>
+            <div class="mm-kicker">Подключение</div>
+            <div class="mm-title" id="mmProviderTitle">LM Studio</div>
+          </div>
+          <span class="grow"></span>
+          <button id="modelMenuClose" class="icon" type="button" title="Закрыть">✕</button>
+        </div>
+        <div class="mm-providers" id="mmProviders" role="tablist" aria-label="Провайдер"></div>
+        <div class="mm-label">Модель</div>
+        <div class="mm-models" id="mmModels"></div>
+        <div class="mm-grid">
+          <label class="mm-field"><span>tools</span>
+            <select id="protocol" class="compact" title="Как модель вызывает инструменты">
+              <option value="auto">auto</option>
+              <option value="native">native</option>
+              <option value="json">json</option>
+            </select>
+          </label>
+          <label class="mm-field"><span>набор</span>
+            <select id="profile" class="compact" title="Набор инструментов">
+              <option value="core">core</option>
+              <option value="full">full</option>
+            </select>
+          </label>
+          <label class="mm-field"><span>права</span>
+            <select id="perms" class="compact" title="Сколько прав дать модели">
+              <option value="auto">авто</option>
+              <option value="unrestricted">всё</option>
+              <option value="ask">спрашивать</option>
+            </select>
+          </label>
+        </div>
+        <div class="mm-toggles">
+          <button id="thinkBtn" class="mm-toggle" type="button" aria-pressed="true"><span class="ico">⌁</span> раздумья</button>
+          <label class="mm-toggle"><input type="checkbox" id="goalMode"><span>цель</span></label>
+        </div>
+        <input type="text" id="goalCriteria" placeholder="критерий готовности" hidden>
+        <select id="provider" class="compact" aria-label="Провайдер" hidden></select>
+        <select id="model" class="compact wide" aria-label="Модель" hidden></select>
+    </div>
   </main>
 
   <aside id="right" class="right">
@@ -265,6 +324,36 @@
           <button id="lanCopyBtn" class="ghost" type="button">Копировать</button>
         </div>
         <div id="qrCodeContainer" class="qr-container"></div>
+      </div>
+    </div>
+    <div class="settings-block" id="remoteBlock">
+      <div class="plate-title">Удалённый доступ из любой сети</div>
+      <label class="autostart-label"><input id="remoteEnabled" type="checkbox"> Включить удалённый доступ</label>
+      <div class="page-sub">ПК сам держит исходящее соединение с реле Cloudflare — белый IP и проброс портов не нужны. Приложение выдаёт временный код: введи его на сайте подключения, и LocalHarness откроется с любого устройства. Пока доступ включён, наружу пускаются только запросы с этим кодом.</div>
+      <div id="remoteSection" hidden>
+        <div class="remote-code-row">
+          <span id="remoteCode" class="remote-code">·····-·····</span>
+          <button id="remoteCopyBtn" class="ghost" type="button" disabled>Копировать</button>
+          <button id="remoteRotateBtn" class="ghost" type="button" disabled>Новый код</button>
+        </div>
+        <div id="remoteMeta" class="page-sub"></div>
+        <div class="remote-warn">Код даёт полный доступ к этому компьютеру — не пересылай его. «Новый код» сразу отключает все прежние подключения.</div>
+        <div id="remoteQr" class="qr-container"></div>
+        <div class="urlrow">
+          <span id="remoteSiteText" class="field grow monospace" style="overflow:hidden;text-overflow:ellipsis;">сайт не настроен</span>
+          <button id="remoteOpenSite" class="ghost" type="button" disabled>Открыть сайт</button>
+        </div>
+        <details class="remote-adv">
+          <summary>Сайт и реле</summary>
+          <div class="urlrow">
+            <input type="text" id="remoteSiteUrl" class="field grow" placeholder="https://…pages.dev — сайт с вводом кода">
+          </div>
+          <div class="urlrow">
+            <input type="text" id="remoteWorkerUrl" class="field grow" placeholder="https://…workers.dev — реле кодов">
+          </div>
+          <button id="remoteCfgSave" class="ghost" type="button">Сохранить адреса</button>
+        </details>
+        <div id="remoteHint" class="page-sub"></div>
       </div>
     </div>
     <div class="settings-block">

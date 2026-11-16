@@ -59,7 +59,7 @@ def get_hardware_profile(force=False):
         try:
             proc = subprocess.run(
                 [smi, "--query-gpu=name,memory.total,memory.free", "--format=csv,noheader,nounits"],
-                capture_output=True, timeout=3.0, creationflags=NO_WINDOW
+                stdin=subprocess.DEVNULL, capture_output=True, timeout=3.0, creationflags=NO_WINDOW
             )
             if proc.returncode == 0 and proc.stdout:
                 line = proc.stdout.decode("utf-8", "replace").strip().splitlines()[0]

@@ -3,6 +3,7 @@
 import json
 import os
 import sys
+import threading
 import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -528,6 +529,54 @@ def main():
     finally:
         search_mod._fetch = old_fetch
     search_mod.reset_state()
+
+    # 20. Camoufox: алиасы, парсинг выдачи и запасной проход, когда поисковики заблокированы
+    from harness import camoufox_browser
+    camo_rows = [{"title": "Camoufox пример", "snippet": "snippet",
+                  "url": "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fcamo"}]
+
+    class FakeSession:
+        def __init__(self):
+            self.opened = []
+
+        def open(self, url, cfg=None):
+            self.opened.append(url)
+            return {"ok": True}
+
+        def evaluate(self, js):
+            return {"ok": True, "result": camo_rows}
+
+    fake = FakeSession()
+    old_get_session = camoufox_browser.get_session
+    old_fetch_camo = search_mod._fetch
+    camoufox_browser.get_session = lambda: fake
+    try:
+        search_mod.reset_state()
+        res_camo = search_mod.search("camoufox", count=2, engine="stealth")
+        check(res_camo["sources"] == ["camoufox"],
+              "camoufox: алиас stealth не включил движок (%s)" % res_camo["sources"])
+        check(res_camo["results"] and res_camo["results"][0]["url"] == "https://example.com/camo",
+              "camoufox: редирект uddg не развёрнут (%s)" % res_camo.get("results"))
+        check(any("html.duckduckgo.com" in u for u in fake.opened),
+              "camoufox: DuckDuckGo не открывался (%s)" % fake.opened)
+        check("камофокс" in search_mod.ALIASES,
+              "camoufox: кириллический алиас не зарегистрирован")
+
+        search_mod.reset_state()
+        search_mod._fetch = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("HTTP 403"))
+        res_fallback = search_mod.search("camoufox", count=3)
+        check("camoufox" in res_fallback["sources"],
+              "camoufox: заблокированные движки не включили запасной проход (%s)"
+              % res_fallback["sources"])
+        check(res_fallback["results"][0]["source"] == "camoufox",
+              "camoufox: запасная выдача не первая (%s)" % res_fallback["results"][:1])
+    finally:
+        camoufox_browser.get_session = old_get_session
+        search_mod._fetch = old_fetch_camo
+        search_mod.reset_state()
+
+    check(isinstance(camoufox_browser.CamoufoxSession()._lock, type(threading.RLock())),
+          "camoufox: lock должен быть реентрантным (иначе дедлок на первом open)")
 
     print("FAILURES: %d" % len(failures))
     for item in failures:

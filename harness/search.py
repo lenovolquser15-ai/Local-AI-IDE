@@ -354,6 +354,53 @@ def rightdao(query, count=8, timeout=DEFAULT_TIMEOUT):
     return results
 
 
+CAMOUFOX_JS = """(() => Array.from(document.querySelectorAll('.result')).slice(0, 25)
+  .map((row) => {
+    const link = row.querySelector('.result__a');
+    if (!link) return null;
+    const snip = row.querySelector('.result__snippet');
+    return {title: link.textContent.trim(), url: link.href,
+            snippet: snip ? snip.textContent.trim() : ''};
+  }).filter(Boolean))()"""
+
+
+def _ddg_target(href):
+    if "uddg=" in href:
+        found = re.search(r"[?&]uddg=([^&]+)", href)
+        if found:
+            href = urllib.parse.unquote(found.group(1))
+    if href.startswith("//"):
+        href = "https:" + href
+    return href
+
+
+def camoufox(query, count=8, timeout=DEFAULT_TIMEOUT):
+    """Stealth-браузер Camoufox: открывает DuckDuckGo настоящим Firefox с подменённым
+    отпечатком. Последний запасной движок, когда обычные запросы ловят капчу или 403."""
+    from . import camoufox_browser
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query, "kl": "wt-wt"})
+    try:
+        session = camoufox_browser.get_session()
+        session.open(url, cfg={"camoufox_headless": True})
+        raw = session.evaluate(CAMOUFOX_JS) or {}
+    except ImportError as exc:
+        raise RuntimeError("Camoufox не установлен: pip install camoufox playwright (%s)" % exc)
+    rows = raw.get("result") if isinstance(raw, dict) else raw
+    if not isinstance(rows, list):
+        raise RuntimeError("camoufox: не удалось разобрать выдачу")
+    results = []
+    for row in rows:
+        target = _ddg_target(str(row.get("url") or ""))
+        if target.startswith("http"):
+            results.append(_item(row.get("title") or "", target,
+                                 row.get("snippet") or "", "camoufox"))
+        if len(results) >= count:
+            break
+    if not results:
+        raise RuntimeError("camoufox: выдача пустая (капча или блокировка DuckDuckGo)")
+    return results
+
+
 def searxng(query, count=8, timeout=DEFAULT_TIMEOUT, base_url="http://127.0.0.1:8080"):
     """Свой инстанс SearXNG: агрегирует десятки движков с твоего IP, без общих лимитов.
     Включается галочкой в настройках; инстанс должен отдавать JSON (search.formats)."""
@@ -591,14 +638,19 @@ def hackernews(query, count=5, timeout=DEFAULT_TIMEOUT):
 
 
 GENERAL = [duckduckgo, ddg_lite, bing, rightdao]
+# Camoufox запускает браузер, поэтому он не в параллельной группе общих движков:
+# идёт отдельным запасным проходом, только когда обычная выдача пустая.
+STEALTH = [camoufox]
 VERTICALS = [ddg_ia, versions, habr, wikipedia, stackexchange, github, hackernews, arxiv, npm, pypi]
-ENGINES = {fn.__name__: fn for fn in GENERAL + VERTICALS}
+ENGINES = {fn.__name__: fn for fn in GENERAL + STEALTH + VERTICALS}
 ALIASES = {"ddg": "duckduckgo", "duckduckgo_html": "duckduckgo", "lite": "ddg_lite",
            "so": "stackexchange", "stack": "stackexchange", "stackoverflow": "stackexchange",
            "wiki": "wikipedia", "hn": "hackernews", "pypi": "pypi", "npm": "npm",
            "github": "github", "arxiv": "arxiv", "bing": "bing", "rightdao": "rightdao",
            "ddg_ia": "ddg_ia", "ia": "ddg_ia", "versions": "versions", "eol": "versions",
-           "version": "versions", "habr": "habr", "хабр": "habr", "habrahabr": "habr"}
+           "version": "versions", "habr": "habr", "хабр": "habr", "habrahabr": "habr",
+           "camoufox": "camoufox", "stealth": "camoufox", "firefox": "camoufox",
+           "камофокс": "camoufox"}
 
 
 def engine_names():
@@ -729,7 +781,8 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
     if name != "auto":
         fn = engines_norm[name]
         lists = _run_group([fn], query, count, timeout, errors,
-                           relevance=fn.__name__ in general_names, respect_cooldown=False)
+                           relevance=fn.__name__ in general_names or fn.__name__ == "camoufox",
+                           respect_cooldown=False)
         results = _rrf(lists)
         sources = [n for n, items in lists if items]
     else:
@@ -747,6 +800,20 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
                 if k and k not in seen:
                     seen.add(k)
                     results.append(item)
+        general_hit = any(name in general_names for name, _ in lists)
+        if not results or (not general_hit and len(results) < count):
+            # Поисковики упёрлись в капчу/403: настоящий Firefox (Camoufox) добирает выдачу.
+            slists = _run_group(STEALTH, query, count, timeout, errors, relevance=True)
+            sources += [n for n, items in slists if items]
+            stealth_items = _rrf(slists)
+            seen = {_norm_url(item.get("url") or "") for item in stealth_items}
+            merged = list(stealth_items)
+            for item in results:
+                k = _norm_url(item.get("url") or "")
+                if k and k not in seen:
+                    seen.add(k)
+                    merged.append(item)
+            results = merged
 
     # Если выдача пустая, а в запросе были кавычки или спецсимволы — автоматически перезапускаем без них
     if not results and any(ch in orig_query for ch in ('"', "'", '«', '»', '“', '”', '+')):

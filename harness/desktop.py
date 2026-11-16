@@ -263,6 +263,11 @@ class _Runtime:
                                       kwargs={"poll_interval": 0.2}, name="LH-http", daemon=True)
             thread.start()
             self._http_thread = thread
+            try:
+                from . import remote
+                remote.autostart()
+            except Exception:
+                logging.exception("remote autostart failed")
             self.icon.run(setup=self._setup)
             if self._startup_error is not None:
                 raise RuntimeError("Could not start the desktop tray") from self._startup_error

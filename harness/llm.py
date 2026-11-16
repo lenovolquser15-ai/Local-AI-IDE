@@ -330,46 +330,54 @@ class LLM:
             message.setdefault("tool_calls", [])
             return message
         splitter = ThinkSplitter(self.reason_cb)
-        for raw in resp.iter_lines(decode_unicode=True):
-            if not raw or not raw.startswith("data:"):
-                continue
-            data = raw[5:].strip()
-            if data == "[DONE]":
-                break
-            try:
-                chunk = json.loads(data)
-            except ValueError:
-                continue
-            meter.usage(chunk.get("usage") or {})
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            if choices[0].get("finish_reason"):
-                result["finish_reason"] = choices[0]["finish_reason"]
-            delta = choices[0].get("delta") or {}
-            extra = _reason_of(delta)
-            if extra:
-                result["reasoning"] += extra
-                if self.reason_cb:
-                    self.reason_cb(extra)
-                meter.piece(extra)
-            piece = delta.get("content") or ""
-            if piece:
-                visible = splitter.feed(piece)
-                meter.piece(piece)
-                if visible and self.stream_cb:
-                    self.stream_cb(visible)
-            for call in delta.get("tool_calls") or []:
-                idx = call.get("index", 0)
-                slot = buffers.setdefault(idx, {"id": "", "name": "", "arguments": ""})
-                if call.get("id"):
-                    slot["id"] = call["id"]
-                fn = call.get("function") or {}
-                if fn.get("name"):
-                    slot["name"] = fn["name"]
-                if fn.get("arguments"):
-                    slot["arguments"] += fn["arguments"]
-                    meter.piece(fn["arguments"])
+        try:
+            for raw in resp.iter_lines(decode_unicode=True):
+                if not raw or not raw.startswith("data:"):
+                    continue
+                data = raw[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except ValueError:
+                    continue
+                meter.usage(chunk.get("usage") or {})
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                if choices[0].get("finish_reason"):
+                    result["finish_reason"] = choices[0]["finish_reason"]
+                delta = choices[0].get("delta") or {}
+                extra = _reason_of(delta)
+                if extra:
+                    result["reasoning"] += extra
+                    if self.reason_cb:
+                        self.reason_cb(extra)
+                    meter.piece(extra)
+                piece = delta.get("content") or ""
+                if piece:
+                    visible = splitter.feed(piece)
+                    meter.piece(piece)
+                    if visible and self.stream_cb:
+                        self.stream_cb(visible)
+                for call in delta.get("tool_calls") or []:
+                    idx = call.get("index", 0)
+                    slot = buffers.setdefault(idx, {"id": "", "name": "", "arguments": ""})
+                    if call.get("id"):
+                        slot["id"] = call["id"]
+                    fn = call.get("function") or {}
+                    if fn.get("name"):
+                        slot["name"] = fn["name"]
+                    if fn.get("arguments"):
+                        slot["arguments"] += fn["arguments"]
+                        meter.piece(fn["arguments"])
+        except Exception as exc:
+            resp.close()
+            with self._active_lock:
+                self._active_response = None
+            raise LLMError("LM Studio оборвал поток на середине (%s). Обычно это переполнение контекста "
+                           "модели или её выгрузка — перезагрузи модель с большим контекстом и повтори."
+                           % (exc.__class__.__name__ if not str(exc) else str(exc)[:200]))
         tail = splitter.flush()
         if tail:
             result["content"] += tail
@@ -410,6 +418,8 @@ class LLM:
         try:
             return self._post(body, True)
         except LLMError as exc:
+            if stop is not None and stop.is_set():
+                raise LLMError("остановлено пользователем")
             if "stream_options" in str(exc) and body.pop("stream_options", None):
                 self.meter = SpeedMeter(stats_cb)
                 return self._post(body, True)
