@@ -57,6 +57,7 @@ DEFAULTS = {
     "comfyui_url": "http://127.0.0.1:8188",
     "lan_access": False,
     "game_failsafe": True,
+    "virustotal_api_key": "",
     "remote": {
         "auto_start": False,
         "code_ttl": 28800,

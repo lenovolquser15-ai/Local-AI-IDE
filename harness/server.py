@@ -487,6 +487,7 @@ class Handler(BaseHTTPRequestHandler):
                 "lan_ip": lan_ip,
                 "lan_url": "http://%s:%d" % (lan_ip, port),
                 "game_failsafe": cfg.get("game_failsafe", True),
+                "virustotal_enabled": bool(cfg.get("virustotal_api_key")),
                 "sessions": session_mod.list_sessions(),
                 "tools": tools_list,
                 "plugins": pl,
@@ -553,6 +554,38 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/plugins/catalog":
             _json_response(self, plugins.catalog())
+            return
+
+        if path == "/api/plugins/workshop":
+            _json_response(self, plugins.workshop_catalog())
+            return
+
+        if path == "/api/plugins/workshop/code":
+            plugin_id = query.get("id", [""])[0]
+            _json_response(self, plugins.get_workshop_code(plugin_id))
+            return
+
+        if path == "/api/plugins/code":
+            fname = os.path.basename(query.get("file", [""])[0])
+            _json_response(self, plugins.get_plugin_code(fname))
+            return
+
+        if path == "/api/plugins/download":
+            fname = os.path.basename(query.get("file", [""])[0])
+            code_path = os.path.join(plugins.PLUGIN_DIR, fname)
+            if not os.path.isfile(code_path):
+                code_path = os.path.join(plugins.WORKSHOP_DIR, fname)
+            if not os.path.isfile(code_path):
+                self.send_error(404, "File not found")
+                return
+            with open(code_path, "rb") as fh:
+                data = fh.read()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/x-python; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
             return
 
         if path == "/api/memory":
@@ -652,6 +685,14 @@ class Handler(BaseHTTPRequestHandler):
             "/api/plugins/toggle": self.handle_plugin_toggle,
             "/api/plugins/remove": self.handle_plugin_remove,
             "/api/plugins/install": self.handle_plugin_install,
+            "/api/plugins/create": self.handle_plugin_create,
+            "/api/plugins/publish": self.handle_plugin_publish,
+            "/api/plugins/unpublish": self.handle_plugin_unpublish,
+            "/api/plugins/test_tool": self.handle_plugin_test_tool,
+            "/api/plugins/generate_ai": self.handle_plugin_generate_ai,
+            "/api/plugins/workshop/install": self.handle_plugin_workshop_install,
+            "/api/plugins/convert_repo": self.handle_plugin_convert_repo,
+            "/api/plugins/virustotal": self.handle_plugin_virustotal,
             "/api/lms/load": self.handle_lms_load,
             "/api/lms/unload": self.handle_lms_unload,
             "/api/lms/download": self.handle_lms_download,
@@ -895,6 +936,46 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_plugin_install(self, body):
         _json_response(self, plugins.install_catalog(body.get("id", ""), body.get("url", "")))
+
+    def handle_plugin_create(self, body):
+        _json_response(self, plugins.create_plugin(
+            name=body.get("name", ""),
+            code=body.get("code", ""),
+            desc=body.get("desc", ""),
+            author=body.get("author", ""),
+            publish=bool(body.get("publish", False)),
+            tags=body.get("tags"),
+        ))
+
+    def handle_plugin_publish(self, body):
+        _json_response(self, plugins.publish_to_workshop(
+            fname_or_name=body.get("file") or body.get("name", ""),
+            author=body.get("author", "Пользователь LocalHarness"),
+            desc=body.get("desc", ""),
+            tags=body.get("tags"),
+        ))
+
+    def handle_plugin_unpublish(self, body):
+        plugin_id = body.get("id") or body.get("name") or body.get("file", "")
+        _json_response(self, plugins.unpublish_from_workshop(plugin_id))
+
+    def handle_plugin_test_tool(self, body):
+        tool_name = body.get("tool", "")
+        args = body.get("args") or {}
+        _json_response(self, plugins.test_plugin_tool(tool_name, args, load()))
+
+    def handle_plugin_generate_ai(self, body):
+        prompt = body.get("prompt", "")
+        _json_response(self, plugins.generate_plugin_ai(prompt, load()))
+
+    def handle_plugin_workshop_install(self, body):
+        _json_response(self, plugins.install_workshop(body.get("id", "")))
+
+    def handle_plugin_convert_repo(self, body):
+        _json_response(self, plugins.convert_and_install_repo(body.get("url", ""), body.get("name")))
+
+    def handle_plugin_virustotal(self, body):
+        _json_response(self, plugins.scan_virustotal(body.get("file") or body.get("code", "")))
 
     def handle_lms_load(self, body):
         cfg = load()

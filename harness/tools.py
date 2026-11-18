@@ -1159,7 +1159,11 @@ class Toolkit:
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
-    def browser(self, action="tabs", url=None, selector=None, value=None, tab_id=None, **kw):
+    def browser(self, action="tabs", url=None, selector=None, value=None, tab_id=None, engine=None, **kw):
+        engine = str(engine or kw.get("engine") or "auto").lower()
+        if engine == "camoufox":
+            return self._camoufox_browser(action=action, url=url, selector=selector, value=value, **kw)
+
         cdp = self.cfg.get("chrome_cdp")
         try:
             if action == "tabs":
@@ -1178,7 +1182,15 @@ class Toolkit:
                 return {"ok": True, "result": browser.fill(selector, value or "", tab_id=tab_id, cdp=cdp)}
         except Exception as exc:
             message = str(exc)
-            if "9222" in (cdp or "") or "Connection refused" in message or "NewConnectionError" in message:
+            if "9222" in (cdp or "") or "Connection refused" in message or "NewConnectionError" in message or "Failed to establish" in message:
+                # Try fallback to Camoufox stealth browser
+                try:
+                    res = self._camoufox_browser(action=action, url=url, selector=selector, value=value, **kw)
+                    if res.get("ok"):
+                        res["note"] = "Chrome CDP порт закрыт, действие выполнено через stealth Camoufox"
+                        return res
+                except Exception:
+                    pass
                 return {"ok": False, "error": (
                     "Chrome недоступен: не запущен браузер с отладочным портом %s (или порт закрыт). "
                     "Перезагружать компьютер и сбрасывать сеть НЕЛЬЗЯ — это уронит машину пользователя. "
@@ -1187,6 +1199,31 @@ class Toolkit:
                     % ((cdp or "").rsplit(":", 1)[-1], (cdp or "").rsplit(":", 1)[-1]))}
             return {"ok": False, "error": "Chrome/CDP: %s" % message}
         return {"ok": False, "error": "неизвестное действие %s" % action}
+
+    def _camoufox_browser(self, action="read", url=None, selector=None, value=None, **kw):
+        from . import camoufox_browser
+        session = camoufox_browser.get_session()
+        if action == "open":
+            return session.open(url or "", cfg=self.cfg)
+        if action == "read":
+            if url:
+                session.open(url, cfg=self.cfg)
+            res = session.read(cfg=self.cfg)
+            res["text"] = truncate(res.get("text", ""), MAX_OUT)[0]
+            return res
+        if action == "click":
+            return session.click(selector or "", cfg=self.cfg)
+        if action == "fill":
+            return session.fill(selector or "", value or "", cfg=self.cfg)
+        if action == "screenshot":
+            return session.screenshot(path=kw.get("path"), full_page=kw.get("full_page", False), cfg=self.cfg)
+        if action == "scroll":
+            return session.scroll(direction=kw.get("direction", "down"), amount=kw.get("amount", 600), cfg=self.cfg)
+        if action == "evaluate":
+            return session.evaluate(kw.get("expression") or value or "", cfg=self.cfg)
+        if action == "tabs":
+            return session.tabs(cfg=self.cfg)
+        return {"ok": False, "error": f"Camoufox: неизвестное действие {action}"}
 
     # ---------- desktop ----------
     def screenshot(self, region="screen", title=None, hwnd=None, x=None, y=None, w=None, h=None,

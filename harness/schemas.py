@@ -26,7 +26,7 @@ SPECS = [
     {"profile":"full","name":"glob","desc":"Найти файлы по маске.","params":{"pattern":("string","маска"),"path":("string?","папка"),"limit":("number","макс")},"required":["pattern"]},
     {"profile":"full","name":"jobs","desc":"Фоновые задачи: list|log|kill.","params":{"action":("string","list|log|kill"),"pid":("number?","PID"),"lines":("number","строк")},"required":["action"]},
     {"profile":"full","name":"sysinfo","desc":"Машина: overview|processes|ports|disks|env|gpu.","params":{"action":("string","overview|processes|ports|disks|env|gpu")},"required":[]},
-    {"profile":"full","name":"browser","desc":"Chrome через CDP: tabs|open|read|click|fill.","params":{"action":("string","tabs|open|read|click|fill"),"url":("string?","URL"),"selector":("string?","CSS"),"value":("string?","значение"),"tab_id":("string?","вкладка")},"required":["action"]},
+    {"profile":"full","name":"browser","desc":"Браузер (Chrome CDP или stealth Camoufox): tabs|open|read|click|fill|screenshot|scroll|evaluate.","params":{"action":("string","tabs|open|read|click|fill|screenshot|scroll|evaluate"),"url":("string?","URL"),"selector":("string?","CSS"),"value":("string?","значение"),"tab_id":("string?","вкладка"),"engine":("string?","auto|chrome|camoufox")},"required":["action"]},
     {"profile":"full","name":"download","desc":"Скачать URL в файл.","params":{"url":("string","ссылка"),"path":("string?","путь")},"required":["url"]},
     {"profile":"full","name":"kill_process","desc":"Остановить процесс.","params":{"pid":("number?","PID"),"name":("string?","имя")},"required":[]},
     {"profile":"full","name":"clipboard","desc":"Буфер обмена: get|set.","params":{"action":("string","get|set"),"text":("string?","текст")},"required":[]},

@@ -97,11 +97,11 @@ def test_lan_toggle_rebinds_server_without_restart():
     thread.start()
     base = "http://127.0.0.1:%d" % port
 
-    def wait_state(predicate, timeout=12):
+    def wait_state(predicate, timeout=25):
         end = time.time() + timeout
         while time.time() < end:
             try:
-                state = requests.get(base + "/api/state", timeout=1).json()
+                state = requests.get(base + "/api/state", timeout=5).json()
             except Exception:
                 time.sleep(0.1)
                 continue

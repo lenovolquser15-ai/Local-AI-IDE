@@ -249,7 +249,7 @@ class WorkerTests(unittest.TestCase):
         if not node:
             self.skipTest("Node.js не найден")
         script = ROOT / "tests" / "test_worker.mjs"
-        proc = subprocess.run([node, str(script), remote.secret()],
+        proc = subprocess.run([node, str(script), remote.secret(), str(remote.epoch())],
                               capture_output=True, text=True, timeout=120)
         self.assertEqual(proc.returncode, 0, (proc.stdout or "") + (proc.stderr or ""))
         lines = [line for line in (proc.stdout or "").splitlines() if line.startswith("{")]

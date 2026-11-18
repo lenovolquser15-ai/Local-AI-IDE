@@ -686,7 +686,10 @@ function setView(name) {
   if (quick) quick.style.display = chat ? '' : 'none';
   $('#right').style.display = chat ? '' : 'none';
   localStorage.setItem('lh.view', name);
-  if (name === 'plugins') refreshPlugins();
+  if (name === 'plugins') {
+    refreshPlugins();
+    if (currentPlugSubtab === 'workshop') refreshWorkshop();
+  }
   if (name === 'lm') refreshLM();
 }
 
@@ -798,6 +801,19 @@ async function refreshState() {
     }
   }
   $('#gameFailsafeEnabled').checked = st.game_failsafe !== false;
+  const vtOn = !!st.virustotal_enabled;
+  const keyChip = $('#vtKeyChip');
+  if (keyChip) {
+    keyChip.className = 'sec-chip ' + (vtOn ? 'ok' : '');
+    keyChip.textContent = vtOn ? 'ключ задан' : 'ключ не задан';
+  }
+  const modeChip = $('#vtModeChip');
+  if (modeChip) {
+    modeChip.className = 'sec-chip ' + (vtOn ? 'ok' : '');
+    modeChip.textContent = vtOn ? 'VirusTotal API' : 'локальный аудит';
+  }
+  const secNote = $('#plugSecNote');
+  if (secNote) secNote.textContent = vtOn ? 'аудит кода + VirusTotal' : 'аудит кода включён';
   $('#toolsChip').textContent = 'инструментов: ' + (st.tools || []).length + ' · профиль ' + (st.tool_profile || 'core');
   $('#toolsChip').title = (st.tools || []).join(', ');
   fillSelect($('#provider'), Object.keys(st.providers || {}).map((k) => [k, st.providers[k]]), st.provider);
@@ -1070,9 +1086,20 @@ function delBtn(title, onclick) {
 
 async function refreshPlugins() {
   try {
-    const [st, cat] = await Promise.all([api('/api/plugins'), api('/api/plugins/catalog')]);
+    const [st, cat, ws] = await Promise.all([
+      api('/api/plugins'),
+      api('/api/plugins/catalog'),
+      api('/api/plugins/workshop').catch(() => null),
+    ]);
     plugCache = { st, cat };
+    if (ws) {
+      workshopCache = ws;
+      const cnt = $('#plugCountWorkshop');
+      if (cnt) cnt.textContent = (ws.entries || []).length;
+    }
     renderPlugins();
+    renderWorkshop();
+    renderVtQuick();
   } catch (err) {
     $('#plugInstalled').innerHTML = '';
     $('#plugInstalled').append(node('div', 'empty-note', 'не удалось получить список: ' + err.message));
@@ -1083,8 +1110,12 @@ function renderPlugins() {
   if (!plugCache) return;
   const st = plugCache.st;
   const cat = plugCache.cat;
-  $('#plugDir').textContent = 'папка: ' + (st.dir || '…') + ' · загружено ' + (st.loaded || 0) +
-    ' · инструментов ' + (st.tools || []).length;
+  $('#plugDir').textContent = 'папка: ' + (st.dir || '…') + ' · инструментов: ' + (st.tools || []).length;
+  const total = (st.plugins || []).length;
+  const cntInst = $('#plugCountInstalled');
+  if (cntInst) cntInst.textContent = total;
+  const cntBox = $('#plugInstalledCount');
+  if (cntBox) cntBox.textContent = total ? total + ' · активно ' + (st.plugins || []).filter((p) => p.enabled !== false).length : '';
   const q = plugFilter.trim().toLowerCase();
   const inst = $('#plugInstalled');
   inst.innerHTML = '';
@@ -1094,6 +1125,51 @@ function renderPlugins() {
     const on = p.enabled !== false;
     const actions = [];
     if (p.error) actions.push(node('span', 'pcard-file', 'ошибка'));
+    const pubBtn = node('button', 'ghost small-btn', 'В Мастерскую 🚀');
+    pubBtn.title = 'Опубликовать плагин в Мастерскую сообщества LocalHarness';
+    pubBtn.onclick = async () => {
+      pubBtn.disabled = true;
+      pubBtn.textContent = 'публикую…';
+      try {
+        const res = await api('/api/plugins/publish', { file: p.file });
+        if (!res.ok) throw new Error(res.error || 'Ошибка публикации');
+        pushNotice(`Плагин ${p.name} опубликован в Мастерскую сообщества!`, 'ok');
+        await refreshWorkshop();
+        await refreshPlugins();
+      } catch (err) {
+        alert('Ошибка публикации: ' + err.message);
+      } finally {
+        pubBtn.disabled = false;
+        pubBtn.textContent = 'В Мастерскую 🚀';
+      }
+    };
+    actions.push(pubBtn);
+
+    const editBtn = node('button', 'ghost small-btn', '✏️ Редактировать');
+    editBtn.title = 'Открыть и редактировать плагин в Конструкторе';
+    editBtn.onclick = async () => {
+      try {
+        const res = await api('/api/plugins/code?file=' + encodeURIComponent(p.file));
+        if (!res.ok) throw new Error(res.error || 'Ошибка чтения файла');
+        if ($('#creatorName')) $('#creatorName').value = res.name || p.name;
+        if ($('#creatorDesc')) $('#creatorDesc').value = res.desc || p.desc || '';
+        if ($('#creatorCode')) $('#creatorCode').value = res.code || '';
+        setPlugSubtab('creator');
+        if (typeof updateTesterToolOptions === 'function') {
+          updateTesterToolOptions(res.tools || p.tools || []);
+        }
+        pushNotice(`Плагин ${p.name} открыт в Конструкторе`, 'ok');
+      } catch (err) {
+        alert('Ошибка: ' + err.message);
+      }
+    };
+    actions.push(editBtn);
+
+    const dlBtn = node('a', 'ghost small-btn', '📥 Скачать');
+    dlBtn.href = '/api/plugins/download?file=' + encodeURIComponent(p.file);
+    dlBtn.download = p.file;
+    dlBtn.title = 'Скачать .py файл плагина';
+    actions.push(dlBtn);
     actions.push(switchEl(on, async () => {
       try {
         await api('/api/plugins/toggle', { file: p.file, enabled: !on });
@@ -1134,6 +1210,780 @@ function renderPlugins() {
     }
     list.append(plugCard({ name: e.name, desc: e.desc, tools: e.tools, version: e.version, file: e.url || e.file }, actions));
   });
+}
+
+/* ---------- plugin sub-views: installed / workshop / converter / creator ---------- */
+let currentPlugSubtab = 'installed';
+let workshopCache = null;
+let workshopFilter = 'all';
+
+function setPlugSubtab(tab) {
+  currentPlugSubtab = tab;
+  document.querySelectorAll('#plugNav .seg-btn').forEach((b) => {
+    const on = b.dataset.tab === tab;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  if ($('#plugTabInstalled')) $('#plugTabInstalled').hidden = tab !== 'installed';
+  if ($('#plugTabWorkshop')) $('#plugTabWorkshop').hidden = tab !== 'workshop';
+  if ($('#plugTabConverter')) $('#plugTabConverter').hidden = tab !== 'converter';
+  if ($('#plugTabCreator')) $('#plugTabCreator').hidden = tab !== 'creator';
+  if (tab === 'workshop' && !workshopCache) refreshWorkshop();
+  if (tab === 'installed') renderPlugins();
+}
+
+$('#plugNav').addEventListener('click', (e) => {
+  const btn = e.target.closest('.seg-btn');
+  if (btn) setPlugSubtab(btn.dataset.tab);
+});
+
+if ($('#plugCreateTopBtn')) {
+  $('#plugCreateTopBtn').onclick = () => setPlugSubtab('creator');
+}
+
+document.querySelectorAll('.wfilter-chip').forEach((chip) => {
+  chip.onclick = () => {
+    document.querySelectorAll('.wfilter-chip').forEach((c) => c.classList.remove('active'));
+    chip.classList.add('active');
+    workshopFilter = chip.dataset.filter || 'all';
+    renderWorkshop();
+  };
+});
+
+async function refreshWorkshop() {
+  const list = $('#plugWorkshopList');
+  try {
+    const data = await api('/api/plugins/workshop');
+    workshopCache = data;
+    const cnt = $('#plugCountWorkshop');
+    if (cnt) cnt.textContent = (data.entries || []).length;
+    renderWorkshop();
+    renderVtQuick();
+  } catch (err) {
+    if (list) list.innerHTML = `<div class="empty-note">Не удалось загрузить Мастерскую: ${esc(err.message)}</div>`;
+  }
+}
+
+function secChip(audit) {
+  const clean = !audit || audit.clean !== false;
+  const tone = clean ? 'ok' : (audit && audit.findings > 1 ? 'danger' : 'warn');
+  const text = clean ? 'аудит: чисто' : 'замечаний: ' + (audit ? audit.findings : '?');
+  return node('span', 'sec-chip ' + tone, text);
+}
+
+function reportRow(label, value, mono) {
+  const rowLabel = node('div', 'report-label', label);
+  const rowValue = node('div', mono === false ? 'report-value plain' : 'report-value', value || '—');
+  return [rowLabel, rowValue];
+}
+
+function openCodeDialog(title, meta) {
+  const dlg = $('#codeDialog');
+  if (!dlg) return;
+  $('#codeDialogTitle').textContent = title;
+  $('#codeDialogMeta').textContent = meta || '';
+  $('#codeDialogText').textContent = 'Загрузка кода…';
+  if (typeof dlg.showModal === 'function') dlg.showModal();
+  else dlg.setAttribute('open', '');
+}
+
+function renderWorkshop() {
+  const list = $('#plugWorkshopList');
+  if (!list || !workshopCache) return;
+  const entries = workshopCache.entries || [];
+  const issues = entries.filter((e) => e.audit && !e.audit.clean).length;
+  const stats = $('#workshopStats');
+  if (stats) {
+    stats.innerHTML = '';
+    stats.append(
+      node('span', 'stat-chip', entries.length + ' плагинов'),
+      node('span', 'stat-chip', issues ? 'замечания: ' + issues : 'аудит: чисто'),
+      node('span', 'stat-chip', workshopCache.vt_api_enabled ? 'VirusTotal: вкл' : 'VirusTotal: ключ не задан'),
+    );
+  }
+
+  list.innerHTML = '';
+  const q = plugFilter.trim().toLowerCase();
+  const filtered = entries.filter((e) => {
+    if (q && !(e.name + ' ' + (e.desc || '') + ' ' + (e.tags || []).join(' ')).toLowerCase().includes(q)) {
+      return false;
+    }
+    if (workshopFilter === 'lh') {
+      return !!e.made_in_localharness || (e.tags || []).includes('localharness') || (e.author || '').toLowerCase().includes('localharness');
+    }
+    if (workshopFilter === 'utils') {
+      return (e.tags || []).some((t) => ['система', 'мониторинг', 'железо', 'утилиты'].includes(t));
+    }
+    if (workshopFilter === 'crypto') {
+      return (e.tags || []).some((t) => ['финансы', 'крипта', 'рынок'].includes(t));
+    }
+    if (workshopFilter === 'msg') {
+      return (e.tags || []).some((t) => ['мессенджер', 'уведомления', 'алерты'].includes(t));
+    }
+    return true;
+  });
+  if (!filtered.length) {
+    list.append(node('div', 'empty-note', q ? 'В Мастерской ничего не найдено' : 'В этой категории пока нет плагинов'));
+    renderVtQuick();
+    return;
+  }
+  const installedNames = new Set((plugCache?.st?.plugins || []).map((p) => p.name));
+
+  filtered.forEach((e) => {
+    const card = node('div', 'wcard');
+    const isInstalled = installedNames.has(e.name) || e.installed;
+
+    const head = node('div', 'wcard-head');
+    const name = node('span', 'wcard-name', e.name);
+    head.append(name);
+    if (e.version) head.append(node('span', 'wcard-ver', 'v' + e.version));
+    if (e.made_in_localharness || (e.tags || []).includes('localharness')) {
+      head.append(node('span', 'lh-badge', '✨ LocalHarness'));
+    }
+    head.append(secChip(e.audit));
+    card.append(head);
+
+    const meta = [];
+    if (e.author) meta.push(e.author);
+    if (e.tools && e.tools.length) meta.push(e.tools.length + ' инстр.');
+    if (meta.length) card.append(node('div', 'wcard-meta', meta.join(' · ')));
+    if (e.desc) card.append(node('div', 'wcard-desc', e.desc));
+
+    if (e.tools && e.tools.length) {
+      const toolsBox = node('div', 'wcard-tools');
+      e.tools.forEach((t) => toolsBox.append(node('span', 'ptool', t)));
+      card.append(toolsBox);
+    }
+    if (e.tags && e.tags.length) {
+      const tagsBox = node('div', 'wcard-tags');
+      e.tags.forEach((t) => tagsBox.append(node('span', 'wcard-tag', '#' + t)));
+      card.append(tagsBox);
+    }
+
+    const foot = node('div', 'wcard-foot');
+    const hash = node('span', 'wcard-hash', e.sha256 ? 'sha256 ' + e.sha256.slice(0, 10) : '');
+    if (e.sha256) hash.title = e.sha256;
+    foot.append(hash);
+
+    const actions = node('div', 'wcard-actions');
+    const codeBtn = node('button', 'ghost small-btn', 'Код');
+    codeBtn.title = 'Посмотреть исходный код';
+    codeBtn.onclick = () => previewWorkshopCode(e);
+    actions.append(codeBtn);
+
+    const dlBtn = node('a', 'ghost small-btn', '📥 .py');
+    dlBtn.href = '/api/plugins/download?file=' + encodeURIComponent(e.file || (e.name + '.py'));
+    dlBtn.download = e.file || (e.name + '.py');
+    dlBtn.title = 'Скачать файл плагина';
+    actions.append(dlBtn);
+
+    if (e.made_in_localharness) {
+      const unpubBtn = node('button', 'ghost small-btn', 'Снять');
+      unpubBtn.title = 'Отозвать плагин из Мастерской';
+      unpubBtn.onclick = async () => {
+        if (!confirm(`Отозвать ${e.name} из Мастерской сообщества?`)) return;
+        try {
+          await api('/api/plugins/unpublish', { id: e.id || e.name });
+          pushNotice(`Плагин ${e.name} снят с публикации`, 'ok');
+          await refreshWorkshop();
+        } catch (err) { alert(err.message); }
+      };
+      actions.append(unpubBtn);
+    }
+
+    if (isInstalled) {
+      actions.append(node('span', 'sec-chip ok', 'установлен'));
+    } else {
+      const btn = node('button', 'primary small-btn', 'Установить');
+      btn.onclick = async () => {
+        btn.disabled = true;
+        btn.textContent = 'ставлю…';
+        try {
+          const res = await api('/api/plugins/workshop/install', { id: e.id });
+          if (!res.ok) throw new Error(res.error || 'Ошибка установки');
+          pushNotice('Плагин ' + e.name + ' установлен и прошёл аудит', 'ok');
+          await refreshPlugins();
+          await refreshWorkshop();
+          await refreshState();
+        } catch (err) {
+          alert('Ошибка установки: ' + err.message);
+          btn.disabled = false;
+          btn.textContent = 'Установить';
+        }
+      };
+      actions.append(btn);
+    }
+    foot.append(actions);
+    card.append(foot);
+    list.append(card);
+  });
+  renderVtQuick();
+}
+
+async function previewWorkshopCode(e) {
+  openCodeDialog(e.name + '.py', 'Мастерская · ' + (e.author || 'сообщество'));
+  try {
+    const res = await api(`/api/plugins/workshop/code?id=${encodeURIComponent(e.id)}`);
+    $('#codeDialogText').textContent = res.ok ? res.code : 'Ошибка: ' + res.error;
+  } catch (err) {
+    $('#codeDialogText').textContent = 'Ошибка загрузки кода: ' + err.message;
+  }
+}
+
+function renderVtQuick() {
+  const wrap = $('#vtQuickPick');
+  if (!wrap) return;
+  wrap.innerHTML = '';
+  const names = new Set();
+  (plugCache?.st?.plugins || []).forEach((p) => { if (p.file) names.add(p.file); });
+  (workshopCache?.entries || []).forEach((e) => { if (e.file) names.add(e.file); });
+  Array.from(names).slice(0, 10).forEach((fname) => {
+    const chip = node('button', 'preset-chip', fname);
+    chip.type = 'button';
+    chip.onclick = () => {
+      $('#vtCheckInput').value = fname;
+      runVtCheck();
+    };
+    wrap.append(chip);
+  });
+}
+
+async function runVtCheck() {
+  const input = $('#vtCheckInput').value.trim();
+  if (!input) return;
+  const box = $('#vtCheckResult');
+  box.hidden = false;
+  box.innerHTML = '';
+  box.append(node('div', 'report-wait', 'Считаю SHA-256 и сверяю с базой…'));
+  try {
+    const res = await api('/api/plugins/virustotal', { file: input, code: input });
+    if (res.ok === false) throw new Error(res.error || 'Ошибка проверки');
+    const vt = res.vt || {};
+    const queried = !!vt.queried_api;
+    const clean = !!res.clean;
+    const tone = clean ? 'ok' : (res.threat_level === 'malicious' ? 'danger' : 'warn');
+
+    box.innerHTML = '';
+    const head = node('div', 'report-head');
+    head.append(node('div', 'report-title', 'Результат проверки'));
+    head.append(node('span', 'sec-chip ' + tone,
+      clean ? (queried ? 'VirusTotal: чисто' : 'аудит кода: чисто') : 'есть замечания'));
+    const copy = node('button', 'ghost small-btn', 'Копировать SHA');
+    copy.onclick = () => {
+      if (!res.sha256) return;
+      navigator.clipboard?.writeText(res.sha256).then(
+        () => pushNotice('SHA-256 скопирован', 'ok'),
+        () => {},
+      );
+    };
+    head.append(copy);
+    box.append(head);
+
+    const grid = node('div', 'report-grid');
+    grid.append(...reportRow('Файл', res.file || input));
+    grid.append(...reportRow('SHA-256', res.sha256));
+    grid.append(...reportRow('Детекты', queried ? (res.score || '—') : '—'));
+    grid.append(...reportRow('Режим', queried ? 'VirusTotal API' : 'локальный AST-аудит', false));
+    box.append(grid);
+
+    if (res.findings && res.findings.length) {
+      const list = node('ul', 'report-find');
+      res.findings.forEach((f) => list.append(node('li', '', (f.line ? 'стр. ' + f.line + ': ' : '') + (f.msg || f.type))));
+      box.append(list);
+    } else {
+      box.append(node('div', 'report-note', 'Деструктивных команд, eval/exec и обфускации не найдено.'));
+    }
+    if (!queried) {
+      box.append(node('div', 'report-note', 'Ключ VirusTotal не задан — онлайн-проверка по антивирусам не выполнялась. Добавить ключ: Настройки → Проверка плагинов.'));
+    } else if (vt.permalink) {
+      const link = node('a', 'report-note', 'Открыть отчёт на virustotal.com →');
+      link.href = vt.permalink;
+      link.target = '_blank';
+      link.rel = 'noopener';
+      box.append(link);
+    }
+  } catch (err) {
+    box.innerHTML = '';
+    box.append(node('div', 'report-note', 'Ошибка проверки: ' + err.message));
+  }
+}
+
+if ($('#vtCheckBtn')) {
+  $('#vtCheckBtn').onclick = runVtCheck;
+}
+
+if ($('#repoConvertBtn')) {
+  $('#repoConvertBtn').onclick = async () => {
+    const url = $('#repoUrlInput').value.trim();
+    const name = $('#repoNameInput').value.trim();
+    if (!url) {
+      alert('Укажи ссылку на GitHub-репозиторий, например https://github.com/owner/repo');
+      return;
+    }
+    const btn = $('#repoConvertBtn');
+    const progress = $('#repoConvertProgress');
+    const box = $('#repoConvertResult');
+    btn.disabled = true;
+    btn.textContent = 'Собираю…';
+    box.hidden = true;
+    progress.hidden = false;
+    try {
+      const res = await api('/api/plugins/convert_repo', { url, name });
+      if (!res.ok) throw new Error(res.error || 'Ошибка конвертации');
+      const sec = res.security || {};
+      const queried = !!(sec.vt && sec.vt.queried_api);
+      const clean = sec.clean !== false;
+
+      box.hidden = false;
+      box.innerHTML = '';
+      const head = node('div', 'conv-result-head');
+      head.append(node('span', 'conv-repo', res.repo));
+      if (res.stars !== undefined) head.append(node('span', 'wcard-ver', '★ ' + res.stars));
+      head.append(node('span', 'sec-chip ' + (clean ? 'ok' : 'warn'),
+        clean ? (queried ? 'VirusTotal: чисто' : 'аудит кода: чисто') : 'есть замечания'));
+      box.append(head);
+
+      const grid = node('div', 'report-grid');
+      grid.append(...reportRow('Файл', res.file));
+      grid.append(...reportRow('Инструменты', String((res.tools || []).length) + ' · ' + ((res.tools || []).join(', ') || '—'), false));
+      grid.append(...reportRow('Установка', res.installed ? 'включён в plugins' : 'не установлен', false));
+      box.append(grid);
+      if (res.description) box.append(node('div', 'report-note', res.description));
+      if (!res.installed) {
+        box.append(node('div', 'report-note', 'Плагин собран, но не активирован: установку остановила проверка безопасности. Замечания ниже.'));
+      }
+      if ((sec.findings || []).length) {
+        const list = node('ul', 'report-find');
+        sec.findings.forEach((f) => list.append(node('li', '', f.msg || f.type)));
+        box.append(list);
+      }
+
+      const fold = document.createElement('details');
+      fold.className = 'code-fold';
+      const summary = document.createElement('summary');
+      summary.textContent = 'Исходный код плагина';
+      const pre = document.createElement('pre');
+      pre.textContent = res.code || '';
+      fold.append(summary, pre);
+      box.append(fold);
+
+      pushNotice('Репозиторий ' + res.name + ' собран в плагин', 'ok');
+      await refreshPlugins();
+      await refreshWorkshop();
+      await refreshState();
+    } catch (err) {
+      box.hidden = false;
+      box.innerHTML = '';
+      box.append(node('div', 'report-note', 'Ошибка конвертации: ' + err.message));
+    } finally {
+      progress.hidden = true;
+      btn.disabled = false;
+      btn.textContent = 'Собрать плагин';
+    }
+  };
+}
+
+if ($('#codeDialogClose')) {
+  $('#codeDialogClose').onclick = () => {
+    const dlg = $('#codeDialog');
+    if (dlg) dlg.close();
+  };
+}
+if ($('#codeDialog')) {
+  $('#codeDialog').addEventListener('click', (e) => {
+    if (e.target === $('#codeDialog')) $('#codeDialog').close();
+  });
+}
+if ($('#codeDialogCopy')) {
+  $('#codeDialogCopy').onclick = async () => {
+    const text = $('#codeDialogText')?.textContent || '';
+    if (!text) return;
+    try {
+      await navigator.clipboard.writeText(text);
+      pushNotice('Код скопирован в буфер обмена', 'ok');
+    } catch {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand('copy');
+      document.body.removeChild(ta);
+      pushNotice('Код скопирован в буфер обмена', 'ok');
+    }
+  };
+}
+
+document.querySelectorAll('.preset-chip').forEach((chip) => {
+  chip.onclick = () => {
+    const repo = chip.dataset.repo || '';
+    const name = chip.dataset.name || '';
+    const inputUrl = $('#repoUrlInput');
+    const inputName = $('#repoNameInput');
+    if (inputUrl) inputUrl.value = repo.startsWith('http') ? repo : `https://github.com/${repo}`;
+    if (inputName) inputName.value = name;
+  };
+});
+
+if ($('#vtApiKeySave')) {
+  $('#vtApiKeySave').onclick = async () => {
+    const btn = $('#vtApiKeySave');
+    const field = $('#vtApiKey');
+    const key = (field?.value || '').trim();
+    btn.disabled = true;
+    try {
+      await patchConfig('virustotal_api_key', key);
+      const on = !!key;
+      const keyChip = $('#vtKeyChip');
+      if (keyChip) {
+        keyChip.className = 'sec-chip ' + (on ? 'ok' : '');
+        keyChip.textContent = on ? 'ключ задан' : 'ключ не задан';
+      }
+      const modeChip = $('#vtModeChip');
+      if (modeChip) {
+        modeChip.className = 'sec-chip ' + (on ? 'ok' : '');
+        modeChip.textContent = on ? 'VirusTotal API' : 'локальный аудит';
+      }
+      if (field) {
+        field.value = '';
+        field.placeholder = on ? 'ключ сохранён — введи новый, чтобы заменить' : 'VirusTotal API key';
+      }
+      pushNotice(on ? 'Ключ VirusTotal сохранён' : 'Ключ VirusTotal удалён', 'ok');
+      btn.textContent = 'Сохранено';
+      setTimeout(() => { btn.textContent = 'Сохранить'; }, 1500);
+    } catch (err) {
+      alert('Ошибка сохранения ключа: ' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+
+$('#vtApiKey')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#vtApiKeySave')?.click(); }
+});
+$('#vtCheckInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#vtCheckBtn')?.click(); }
+});
+$('#repoUrlInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#repoConvertBtn')?.click(); }
+});
+$('#repoNameInput')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); $('#repoConvertBtn')?.click(); }
+});
+
+/* ---------- Plugin Studio / Creator ---------- */
+const CREATOR_TEMPLATES = {
+  tool: {
+    name: 'my_custom_tool',
+    desc: 'Пользовательский инструмент для агента.',
+    code: `"""Плагин с пользовательскими инструментами для агента."""
+NAME = "my_custom_tool"
+
+def calc_sum(cfg, args):
+    """Складывает два числа a и b."""
+    a = float(args.get("a", 0))
+    b = float(args.get("b", 0))
+    return {"ok": True, "result": a + b}
+
+TOOLS = [
+    {
+        "name": "calc_sum",
+        "desc": "Складывает два числа a и b.",
+        "params": {
+            "a": ("number", "Первое число"),
+            "b": ("number", "Второе число")
+        },
+        "required": ["a", "b"],
+        "fn": calc_sum
+    }
+]
+`
+  },
+  http: {
+    name: 'api_fetcher',
+    desc: 'Выполняет HTTP GET запрос к внешнему JSON API.',
+    code: `"""Плагин для обращения к внешним API."""
+import urllib.request
+import json
+
+NAME = "api_fetcher"
+
+def fetch_json(cfg, args):
+    """Делает GET-запрос к API и возвращает JSON ответ."""
+    url = args.get("url")
+    req = urllib.request.Request(url, headers={"User-Agent": "LocalHarness/1.0"})
+    with urllib.request.urlopen(req, timeout=10) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    return {"ok": True, "data": data}
+
+TOOLS = [
+    {
+        "name": "fetch_json",
+        "desc": "Выполняет HTTP GET запрос к публичному JSON API.",
+        "params": {"url": ("string", "URL адрес эндпоинта")},
+        "required": ["url"],
+        "fn": fetch_json
+    }
+]
+`
+  },
+  sys: {
+    name: 'system_diagnostic',
+    desc: 'Диагностика системного окружения и параметров среды.',
+    code: `"""Плагин системной утилиты."""
+import platform
+import os
+
+NAME = "system_diagnostic"
+
+def check_env(cfg, args):
+    """Возвращает информацию об окружении и переменных среды."""
+    target_var = args.get("var_name")
+    return {
+        "ok": True,
+        "os": platform.platform(),
+        "python": platform.python_version(),
+        "cwd": os.getcwd(),
+        "env_value": os.environ.get(target_var, "") if target_var else None
+    }
+
+TOOLS = [
+    {
+        "name": "check_env",
+        "desc": "Диагностика системного окружения и переменных.",
+        "params": {"var_name": ("string?", "Имя переменной окружения")},
+        "required": [],
+        "fn": check_env
+    }
+]
+`
+  },
+  ai: {
+    name: 'text_cleaner',
+    desc: 'Очищает текст от HTML разметки и нормализует пробелы.',
+    code: `"""Плагин для обработки текста и форматирования данных."""
+import re
+
+NAME = "text_cleaner"
+
+def clean_text(cfg, args):
+    """Очищает текст от HTML-тегов и переносов."""
+    text = args.get("text", "")
+    clean = re.sub(r"<[^>]+>", "", text)
+    clean = re.sub(r"\\s+", " ", clean).strip()
+    return {"ok": True, "cleaned": clean, "length": len(clean)}
+
+TOOLS = [
+    {
+        "name": "clean_text",
+        "desc": "Очищает текст от HTML разметки и нормализует пробелы.",
+        "params": {"text": ("string", "Исходный текст")},
+        "required": ["text"],
+        "fn": clean_text
+    }
+]
+`
+  }
+};
+
+function applyCreatorTemplate(key) {
+  const tpl = CREATOR_TEMPLATES[key] || CREATOR_TEMPLATES.tool;
+  if ($('#creatorName')) $('#creatorName').value = tpl.name;
+  if ($('#creatorDesc')) $('#creatorDesc').value = tpl.desc;
+  if ($('#creatorCode')) $('#creatorCode').value = tpl.code;
+}
+
+if ($('#creatorCode') && !$('#creatorCode').value.trim()) {
+  applyCreatorTemplate('tool');
+}
+
+document.querySelectorAll('.template-chip').forEach((chip) => {
+  chip.onclick = () => applyCreatorTemplate(chip.dataset.tpl);
+});
+
+const creatorCodeArea = $('#creatorCode');
+if (creatorCodeArea) {
+  creatorCodeArea.addEventListener('keydown', (e) => {
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const start = creatorCodeArea.selectionStart;
+      const end = creatorCodeArea.selectionEnd;
+      creatorCodeArea.value = creatorCodeArea.value.substring(0, start) + '    ' + creatorCodeArea.value.substring(end);
+      creatorCodeArea.selectionStart = creatorCodeArea.selectionEnd = start + 4;
+    }
+  });
+}
+
+if ($('#creatorScanBtn')) {
+  $('#creatorScanBtn').onclick = async () => {
+    const code = ($('#creatorCode')?.value || '').trim();
+    if (!code) {
+      alert('Сначала введите или выберите код плагина');
+      return;
+    }
+    const box = $('#creatorResultBox');
+    box.hidden = false;
+    box.className = 'report report-wait';
+    box.textContent = 'Анализ безопасности кода и аудит AST…';
+    try {
+      const res = await api('/api/plugins/virustotal', { code });
+      box.className = 'report';
+      const clean = res.clean;
+      const chipClass = clean ? 'ok' : 'danger';
+      const chipText = clean ? '🛡️ Чисто (0 угроз)' : '⚠️ Найдены угрозы: ' + res.score;
+      box.innerHTML = `
+        <div class="report-head">
+          <span class="report-title">Результат аудита безопасности</span>
+          <span class="sec-chip ${chipClass}">${chipText}</span>
+        </div>
+        <div class="report-grid">
+          <div class="report-label">Хеш SHA-256:</div>
+          <div class="report-value">${esc(res.sha256 || '—')}</div>
+          <div class="report-label">Статус детектов:</div>
+          <div class="report-value">${esc(res.score || '0/72')}</div>
+        </div>
+        ${res.findings && res.findings.length ? `<div style="color:var(--fail); margin-top:8px;">Замечания: ${esc(res.findings.map(f => f.msg).join('; '))}</div>` : '<div style="color:var(--ok); margin-top:8px;">✓ Деструктивные команды, eval/exec и инъекции не обнаружены. Код безопасен.</div>'}
+      `;
+    } catch (err) {
+      box.className = 'report';
+      box.innerHTML = `<span style="color:var(--fail);">Ошибка проверки: ${esc(err.message)}</span>`;
+    }
+  };
+}
+
+if ($('#creatorSaveBtn')) {
+  $('#creatorSaveBtn').onclick = async () => {
+    const name = ($('#creatorName')?.value || '').trim();
+    const desc = ($('#creatorDesc')?.value || '').trim();
+    const author = ($('#creatorAuthor')?.value || '').trim();
+    const code = ($('#creatorCode')?.value || '').trim();
+    const publish = !!$('#creatorPublish')?.checked;
+
+    if (!name) {
+      alert('Укажите имя плагина (латиница, цифры и _)');
+      $('#creatorName')?.focus();
+      return;
+    }
+    if (!code) {
+      alert('Код плагина не может быть пустым');
+      $('#creatorCode')?.focus();
+      return;
+    }
+
+    const btn = $('#creatorSaveBtn');
+    const box = $('#creatorResultBox');
+    btn.disabled = true;
+    btn.textContent = 'Сохранение…';
+    box.hidden = false;
+    box.className = 'report report-wait';
+    box.textContent = 'Проверка безопасности и установка плагина в систему…';
+
+    try {
+      const res = await api('/api/plugins/create', { name, desc, author, code, publish });
+      if (!res.ok) throw new Error(res.error || 'Ошибка создания плагина');
+      box.className = 'report';
+      const pubNote = res.published ? '✨ Плагин также успешно опубликован в Мастерскую сообщества!' : '';
+      box.innerHTML = `
+        <div class="report-head">
+          <span class="report-title">✓ Плагин <code>${esc(res.name)}</code> успешно создан и активирован!</span>
+          <span class="sec-chip ok">активен</span>
+        </div>
+        <div class="report-grid">
+          <div class="report-label">Файл:</div>
+          <div class="report-value">${esc(res.file)}</div>
+          <div class="report-label">Инструменты:</div>
+          <div class="report-value">${(res.tools || []).length ? esc(res.tools.join(', ')) : 'нет'}</div>
+          <div class="report-label">SHA-256:</div>
+          <div class="report-value">${esc(res.sha256 || '—')}</div>
+        </div>
+        ${pubNote ? `<div style="color:var(--accent); font-weight:600; margin-top:8px;">${pubNote}</div>` : ''}
+      `;
+      if (res.tools && res.tools.length) updateTesterToolOptions(res.tools);
+      pushNotice(`Плагин ${res.name} создан${res.published ? ' и опубликован в Мастерскую' : ''}!`, 'ok');
+      await refreshPlugins();
+      await refreshWorkshop();
+      await refreshState();
+    } catch (err) {
+      box.className = 'report';
+      box.innerHTML = `<span style="color:var(--fail);">Ошибка создания: ${esc(err.message)}</span>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '💾 Сохранить и активировать';
+    }
+  };
+}
+
+function updateTesterToolOptions(tools) {
+  const sel = $('#creatorTestTool');
+  if (!sel) return;
+  sel.innerHTML = '';
+  if (!tools || !tools.length) {
+    const opt = document.createElement('option');
+    opt.value = '';
+    opt.textContent = 'инструменты не найдены';
+    sel.appendChild(opt);
+    return;
+  }
+  tools.forEach((t) => {
+    const opt = document.createElement('option');
+    opt.value = t;
+    opt.textContent = t;
+    sel.appendChild(opt);
+  });
+}
+
+// AI Plugin Code Generator
+if ($('#creatorAiBtn')) {
+  $('#creatorAiBtn').onclick = async () => {
+    const prompt = ($('#creatorAiPrompt')?.value || '').trim();
+    if (!prompt) {
+      alert('Опишите задачу для создания плагина');
+      $('#creatorAiPrompt')?.focus();
+      return;
+    }
+    const btn = $('#creatorAiBtn');
+    btn.disabled = true;
+    btn.textContent = 'Генерирую с ИИ…';
+    try {
+      const res = await api('/api/plugins/generate_ai', { prompt });
+      if (!res.ok) throw new Error(res.error || 'Ошибка генерации');
+      if ($('#creatorName')) $('#creatorName').value = res.name;
+      if ($('#creatorDesc')) $('#creatorDesc').value = res.desc || prompt;
+      if ($('#creatorCode')) $('#creatorCode').value = res.code;
+      updateTesterToolOptions(res.tools || []);
+      pushNotice(`Плагин ${res.name} успешно сгенерирован ИИ!`, 'ok');
+    } catch (err) {
+      alert('Ошибка генерации: ' + err.message);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Сгенерировать с ИИ';
+    }
+  };
+  $('#creatorAiPrompt')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); $('#creatorAiBtn')?.click(); }
+  });
+}
+
+// Interactive Tool Sandbox Runner
+if ($('#creatorTestBtn')) {
+  $('#creatorTestBtn').onclick = async () => {
+    const tool = $('#creatorTestTool')?.value;
+    const rawArgs = ($('#creatorTestArgs')?.value || '').trim() || '{}';
+    const resPre = $('#creatorTestResult');
+    if (!tool) {
+      alert('Сначала выберите инструмент для тестирования (сохраните плагин, чтобы он зарегистрировался)');
+      return;
+    }
+    resPre.hidden = false;
+    resPre.textContent = `⏳ Вызываю инструмент ${tool}…`;
+    try {
+      const res = await api('/api/plugins/test_tool', { tool, args: rawArgs });
+      if (!res.ok) throw new Error(res.error || 'Ошибка вызова');
+      resPre.textContent = `⏱️ Время выполнения: ${res.duration_ms} мс\n\nРезультат:\n` + JSON.stringify(res.result, null, 2);
+    } catch (err) {
+      resPre.textContent = `❌ Ошибка тестирования:\n${err.message}`;
+    }
+  };
 }
 
 /* ---------- LM Studio view: two plates ---------- */
@@ -1500,11 +2350,12 @@ document.querySelector('.right-head').onclick = () => {
 document.querySelectorAll('.view-tab').forEach((b) => {
   b.onclick = () => setView(b.dataset.view);
 });
-$('#plugSearch').oninput = (e) => { plugFilter = e.target.value; renderPlugins(); };
+$('#plugSearch').oninput = (e) => { plugFilter = e.target.value; renderPlugins(); renderWorkshop(); };
 $('#plugReload').onclick = async () => {
   try {
     await api('/api/plugins/reload', {});
-    refreshPlugins();
+    await refreshPlugins();
+    refreshWorkshop();
     refreshState();
   } catch (err) { alert(err.message); }
 };

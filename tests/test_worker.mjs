@@ -1,5 +1,5 @@
 // Runs the Cloudflare relay Worker in plain Node with a fake Durable Object.
-// Usage: node tests/test_worker.mjs <secret>
+// Usage: node tests/test_worker.mjs <secret> [epoch]
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { copyFileSync, mkdtempSync, rmSync } from "node:fs";
@@ -12,6 +12,7 @@ if (!secret) {
   console.error("secret argument is required");
   process.exit(2);
 }
+const epochBase = Number(process.argv[3] || 1);
 
 const tmp = mkdtempSync(join(tmpdir(), "lh-worker-"));
 const modulePath = join(tmp, "worker.mjs");
@@ -47,7 +48,7 @@ async function call(method, path, { body, headers = {} } = {}) {
   return worker.fetch(new Request(base + path, { method, body, headers }), env);
 }
 function now() { return Math.floor(Date.now() / 1000); }
-async function register(code, url, ttl = 3600, relay = false, epoch = 1) {
+async function register(code, url, ttl = 3600, relay = false, epoch = epochBase) {
   const ts = String(now());
   const body = JSON.stringify({ code, url, exp: now() + ttl, epoch, relay });
   return call("POST", "/api/rooms", {
@@ -123,7 +124,7 @@ try {
   assert.ok(extended.exp > shortRoom.exp, "re-registering the same code extends its expiry");
   assert.notEqual(extended.token, shortRoom.token, "extended room mints a new token");
 
-  res = await register(relayCode, "", 3600, true, 2);
+  res = await register(relayCode, "", 3600, true, epochBase + 1);
   assert.equal(res.status, 200);
   res = await call("GET", "/", { headers: { "Cookie": cookie.split(";")[0] } });
   assert.equal(res.status, 200, "stale cookie falls back to the connect page");

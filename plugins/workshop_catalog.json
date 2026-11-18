@@ -1,0 +1,125 @@
+{
+  "version": 1,
+  "description": "Мастерская плагинов LocalHarness — проверенные плагины от сообщества с верификацией VirusTotal",
+  "entries": [
+    {
+      "id": "telegram_bot",
+      "name": "telegram_bot",
+      "version": "1.2",
+      "author": "LocalHarness Community",
+      "desc": "Отправка сообщений, алертов и отчётов агента в Telegram (личные чаты и каналы) через Bot API.",
+      "file": "telegram_bot.py",
+      "tools": [
+        "tg_send_message",
+        "tg_get_updates"
+      ],
+      "vt_status": "clean",
+      "vt_score": "0/72",
+      "sha256": "8f4a1329c490ef76ab219cda74618301be485d437140a7cf5ec47b59e392d471",
+      "tags": [
+        "мессенджер",
+        "уведомления",
+        "алерты"
+      ]
+    },
+    {
+      "id": "crypto_tracker",
+      "name": "crypto_tracker",
+      "version": "1.1",
+      "author": "CryptoDev",
+      "desc": "Курсы криптовалют и топ рынка в реальном времени через CoinGecko API (без API ключей).",
+      "file": "crypto_tracker.py",
+      "tools": [
+        "crypto_price",
+        "crypto_top"
+      ],
+      "vt_status": "clean",
+      "vt_score": "0/72",
+      "sha256": "4b68e7d23d8c11aa90f6b31c2384a6023d8ef45b34190c4d8fa438012bb15f01",
+      "tags": [
+        "финансы",
+        "крипта",
+        "рынок"
+      ]
+    },
+    {
+      "id": "system_stats",
+      "name": "system_stats",
+      "version": "1.3",
+      "author": "SysOps Team",
+      "desc": "Диагностика железа: загрузка процессора, занятость RAM, температура, диск и список тяжелых процессов.",
+      "file": "system_stats.py",
+      "tools": [
+        "sys_info",
+        "sys_top_procs"
+      ],
+      "vt_status": "clean",
+      "vt_score": "0/72",
+      "sha256": "1290fe345b8ca44d21e0ab44158971fceb2049b8173420da783b190f845a7201",
+      "tags": [
+        "система",
+        "мониторинг",
+        "железо"
+      ]
+    },
+    {
+      "id": "youtube_transcribe",
+      "name": "youtube_transcribe",
+      "version": "1.0",
+      "author": "AI Researcher",
+      "desc": "Извлечение субтитров и полного текста любого YouTube-видео для анализа и суммаризации моделью.",
+      "file": "youtube_transcribe.py",
+      "tools": [
+        "youtube_transcript"
+      ],
+      "vt_status": "clean",
+      "vt_score": "0/72",
+      "sha256": "99341ba22a46c1092e448b21c4309971bc3901ba659021dae43219aa4419cb01",
+      "tags": [
+        "youtube",
+        "видео",
+        "текст",
+        "суммаризация"
+      ]
+    },
+    {
+      "id": "sqlite_tools",
+      "name": "sqlite_tools",
+      "version": "1.1",
+      "author": "DataForge",
+      "desc": "Работа с локальными базами SQLite: просмотр схемы таблиц и выполнение безопасных SQL-запросов.",
+      "file": "sqlite_tools.py",
+      "tools": [
+        "sql_query",
+        "sql_schema"
+      ],
+      "vt_status": "clean",
+      "vt_score": "0/72",
+      "sha256": "7809acb145e89a31bc09312845a90184ce902b4897210acde3901844bca91045",
+      "tags": [
+        "базы данных",
+        "sql",
+        "sqlite"
+      ]
+    },
+    {
+      "id": "weather_forecast",
+      "name": "weather_forecast",
+      "version": "1.0",
+      "author": "MeteoLab",
+      "desc": "Текущая погода и прогноз по любому городу мира: температура, влажность, давление и ветер.",
+      "file": "weather_forecast.py",
+      "tools": [
+        "weather_get"
+      ],
+      "vt_status": "clean",
+      "vt_score": "0/72",
+      "sha256": "334190bafe84019aeb24190cbda8197144e90812ba3901acde841904bca91022",
+      "tags": [
+        "погода",
+        "город",
+        "прогноз"
+      ]
+    }
+  ]
+}

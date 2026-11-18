@@ -100,31 +100,226 @@
     </section>
 
     <section id="viewPlugins" class="pageview" hidden>
-      <div class="page-inner">
+      <div class="page-inner plug-page">
         <div class="page-head">
-          <div>
+          <div class="page-head-text">
             <div class="page-title">Плагины</div>
             <div class="page-sub" id="plugDir">папка: …</div>
           </div>
           <span class="grow"></span>
-          <input type="text" id="plugSearch" class="field" placeholder="фильтр по названию…">
-          <button id="plugReload" class="ghost">перечитать папку</button>
-        </div>
-        <div class="plug-grid">
-          <section class="plate">
-            <div class="plate-title">Установленные</div>
-            <div id="plugInstalled" class="cardlist"></div>
-          </section>
-          <section class="plate">
-            <div class="plate-title">Каталог — скачать и поставить</div>
-            <div id="plugCatalog" class="cardlist"></div>
-            <div class="urlrow">
-              <input type="text" id="plugUrl" class="field grow" placeholder="https://…/plugin.py — прямой линк на файл">
-              <button id="plugInstallUrl" class="primary">Скачать</button>
+          <div class="page-head-tools">
+            <div class="search-box">
+              <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="7" cy="7" r="4.4"/><path d="m10.4 10.4 3.2 3.2"/></svg>
+              <input type="text" id="plugSearch" class="search-input" placeholder="поиск по названию и инструментам…">
             </div>
-            <div class="page-sub" id="plugCatalogNote">Каталог — локальный список из plugins\catalog.json. Добавь свой источник в config.json → plugin_catalog_url.</div>
+            <button id="plugReload" class="icon-btn" type="button" title="Перечитать папку плагинов" aria-label="Перечитать папку плагинов">
+              <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13.4 8a5.4 5.4 0 1 1-1.6-3.8"/><path d="M13.4 2.6v3.2H10.2"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="segbar" id="plugNav" role="tablist" aria-label="Разделы плагинов">
+          <button class="seg-btn active" data-tab="installed" type="button" role="tab" aria-selected="true">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2.6 5.1 8 2.4l5.4 2.7v5.8L8 13.6l-5.4-2.7z"/><path d="M2.6 5.1 8 7.9l5.4-2.8M8 7.9v5.7"/></svg>
+            <span>Установленные</span><span class="seg-count" id="plugCountInstalled">0</span>
+          </button>
+          <button class="seg-btn" data-tab="workshop" type="button" role="tab" aria-selected="false">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M8 2.1 13.2 4v4.1c0 2.9-2.1 5.2-5.2 5.9-3.1-.7-5.2-3-5.2-5.9V4z"/><path d="m5.9 7.8 1.5 1.5 2.8-3"/></svg>
+            <span>Мастерская</span><span class="seg-count" id="plugCountWorkshop">0</span>
+          </button>
+          <button class="seg-btn" data-tab="converter" type="button" role="tab" aria-selected="false">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><circle cx="4.4" cy="3.9" r="1.5"/><circle cx="4.4" cy="12.1" r="1.5"/><circle cx="11.6" cy="6.3" r="1.5"/><path d="M4.4 5.4v5.2M11.6 7.8c0 2-1.7 2.5-3.3 2.7"/></svg>
+            <span>Конвертер</span>
+          </button>
+          <button class="seg-btn" data-tab="creator" type="button" role="tab" aria-selected="false">
+            <svg viewBox="0 0 16 16" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><path d="M8 3v10M3 8h10"/></svg>
+            <span>Конструктор</span>
+          </button>
+          <span class="grow"></span>
+          <button id="plugCreateTopBtn" class="ghost" type="button" style="font-size:12px; padding:3px 10px; display:inline-flex; align-items:center; gap:5px; border-radius:var(--r-md); cursor:pointer; color:var(--accent); border:1px solid var(--accent);">
+            <span>➕ Создать плагин</span>
+          </button>
+          <span class="seg-note" id="plugSecNote">аудит кода включён</span>
+        </div>
+
+        <!-- Tab 1: Installed & Local catalog -->
+        <div id="plugTabInstalled" class="plug-pane">
+          <div class="plug-grid">
+            <section class="plate">
+              <div class="plate-headline">
+                <div class="plate-title">Установленные плагины</div>
+                <span class="plate-count" id="plugInstalledCount"></span>
+              </div>
+              <div id="plugInstalled" class="cardlist"></div>
+            </section>
+            <section class="plate">
+              <div class="plate-headline">
+                <div class="plate-title">Каталог</div>
+                <span class="plate-count">скачать и поставить</span>
+              </div>
+              <div id="plugCatalog" class="cardlist"></div>
+              <div class="urlrow">
+                <input type="text" id="plugUrl" class="field grow" placeholder="https://…/plugin.py — прямой линк на файл">
+                <button id="plugInstallUrl" class="primary">Скачать</button>
+              </div>
+              <div class="page-sub" id="plugCatalogNote">Каталог — локальный список из plugins\catalog.json. Добавь свой источник в config.json → plugin_catalog_url.</div>
+            </section>
+          </div>
+        </div>
+
+        <!-- Tab 2: Workshop -->
+        <div id="plugTabWorkshop" class="plug-pane" hidden>
+          <div class="secbar">
+            <span class="secbar-ico">
+              <svg viewBox="0 0 16 16" width="17" height="17" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M8 2.1 13.2 4v4.1c0 2.9-2.1 5.2-5.2 5.9-3.1-.7-5.2-3-5.2-5.9V4z"/><path d="m5.9 7.8 1.5 1.5 2.8-3"/></svg>
+            </span>
+            <div class="secbar-main">
+              <div class="secbar-title">Мастерская плагинов LocalHarness</div>
+              <div class="secbar-sub">Каталог проверенных плагинов от сообщества и созданных прямо внутри LocalHarness. Каждый плагин проверен через VirusTotal и готов к скачиванию в 1 клик.</div>
+            </div>
+            <div class="secbar-stats" id="workshopStats"></div>
+          </div>
+
+          <div class="wfilter-row">
+            <button type="button" class="wfilter-chip active" data-filter="all">Все плагины</button>
+            <button type="button" class="wfilter-chip" data-filter="lh">✨ Сделано в LocalHarness</button>
+            <button type="button" class="wfilter-chip" data-filter="utils">Утилиты и система</button>
+            <button type="button" class="wfilter-chip" data-filter="crypto">Финансы</button>
+            <button type="button" class="wfilter-chip" data-filter="msg">Связь и алерты</button>
+          </div>
+
+          <div id="plugWorkshopList" class="workshop-grid"></div>
+
+          <section class="plate">
+            <div class="plate-headline">
+              <div class="plate-title">Проверка плагина</div>
+              <span class="sec-chip" id="vtModeChip">локальный аудит</span>
+            </div>
+            <div class="page-sub">Имя установленного плагина, файл из Мастерской или исходный код — перед установкой.</div>
+            <div class="urlrow">
+              <input type="text" id="vtCheckInput" class="field grow" placeholder="waitfor.py · telegram_bot.py · или вставь код…">
+              <button id="vtCheckBtn" class="primary">Проверить</button>
+            </div>
+            <div class="chip-row" id="vtQuickPick"></div>
+            <div id="vtCheckResult" class="report" hidden></div>
           </section>
         </div>
+
+        <!-- Tab 3: AI Repo Converter -->
+        <div id="plugTabConverter" class="plug-pane" hidden>
+          <section class="plate conv-panel">
+            <div class="conv-head">
+              <span class="conv-step">01</span>
+              <div class="conv-head-text">
+                <div class="conv-title">GitHub-репозиторий</div>
+                <div class="page-sub">Подойдёт любой AI-, MCP- или утилитарный репозиторий на Python. Конвертер разберёт код, соберёт инструменты и установит плагин в plugins.</div>
+              </div>
+            </div>
+            <div class="conv-form">
+              <input type="text" id="repoUrlInput" class="field" placeholder="https://github.com/owner/repo">
+              <input type="text" id="repoNameInput" class="field conv-name" placeholder="имя плагина — необязательно">
+              <button id="repoConvertBtn" class="primary">Собрать плагин</button>
+            </div>
+            <div class="conv-presets">
+              <span class="page-sub">Примеры:</span>
+              <button type="button" class="preset-chip" data-repo="ollama/ollama-python" data-name="ollama_tools">ollama/ollama-python</button>
+              <button type="button" class="preset-chip" data-repo="psf/requests" data-name="requests_tools">psf/requests</button>
+              <button type="button" class="preset-chip" data-repo="modelcontextprotocol/servers" data-name="mcp_tools">mcp/servers</button>
+            </div>
+            <div id="repoConvertProgress" class="conv-progress" hidden>Запрашиваю GitHub, разбираю AST и собираю инструменты…</div>
+            <div id="repoConvertResult" class="conv-result" hidden></div>
+          </section>
+        </div>
+
+        <!-- Tab 4: Plugin Creator / Studio -->
+        <div id="plugTabCreator" class="plug-pane" hidden>
+          <section class="plate creator-panel">
+            <div class="plate-headline">
+              <div>
+                <div class="plate-title">🛠️ Конструктор плагинов LocalHarness</div>
+                <div class="page-sub">Создай свой инструмент на Python, проверь безопасность через VirusTotal и опубликуй в Мастерскую, чтобы другие пользователи могли его скачать.</div>
+              </div>
+              <span class="sec-chip" id="creatorSecChip">авто-валидация AST</span>
+            </div>
+
+            <div class="creator-meta-grid">
+              <div class="field-group">
+                <label class="field-label" for="creatorName">Имя плагина (идентификатор):</label>
+                <input type="text" id="creatorName" class="field" placeholder="например: currency_calc">
+                <span class="field-hint">Только латиница, цифры и _ (сохранится как .py файл)</span>
+              </div>
+              <div class="field-group">
+                <label class="field-label" for="creatorAuthor">Автор:</label>
+                <input type="text" id="creatorAuthor" class="field" placeholder="Ваш никнейм или имя">
+                <span class="field-hint">Отобразится в карточке Мастерской</span>
+              </div>
+              <div class="field-group full-width">
+                <label class="field-label" for="creatorDesc">Описание возможностей плагина:</label>
+                <input type="text" id="creatorDesc" class="field" placeholder="Кратко опишите, что делает плагин и когда агенту его вызывать...">
+              </div>
+            </div>
+
+            <div class="template-selector">
+              <span class="page-sub" style="font-weight:600;">Готовые шаблоны:</span>
+              <button type="button" class="template-chip" data-tpl="tool">⚡ Базовый инструмент</button>
+              <button type="button" class="template-chip" data-tpl="http">🌐 HTTP API / Запрос</button>
+              <button type="button" class="template-chip" data-tpl="sys">💻 Системная утилита</button>
+              <button type="button" class="template-chip" data-tpl="ai">🧠 Обработка текста</button>
+            </div>
+
+            <div class="ai-prompt-box">
+              <div class="field-label">✨ Генерация плагина с помощью локального ИИ:</div>
+              <div class="urlrow">
+                <input type="text" id="creatorAiPrompt" class="field grow" placeholder="Опишите задачу плагина (например, 'парсер заголовков Hacker News' или 'проверка пинга до серверов')…">
+                <button type="button" id="creatorAiBtn" class="primary" style="white-space:nowrap;">Сгенерировать с ИИ</button>
+              </div>
+            </div>
+
+            <div class="editor-wrap">
+              <div class="editor-head">
+                <span class="editor-label">Исходный код плагина (Python):</span>
+                <span class="editor-format">TOOLS = [{name, desc, params, required, fn}]</span>
+              </div>
+              <textarea id="creatorCode" class="creator-code-area" spellcheck="false" rows="14"></textarea>
+            </div>
+
+            <div class="creator-options">
+              <label class="creator-check-label">
+                <input type="checkbox" id="creatorPublish" checked>
+                <span><b>Опубликовать в Мастерскую плагинов</b> (плагин появится в Мастерской с бейджем «✨ Сделано в LocalHarness» и будет доступен для скачивания)</span>
+              </label>
+            </div>
+
+            <div class="creator-actions">
+              <button type="button" id="creatorScanBtn" class="ghost">🧪 Проверить код (AST + VirusTotal)</button>
+              <button type="button" id="creatorSaveBtn" class="primary">💾 Сохранить и активировать</button>
+            </div>
+
+            <div id="creatorResultBox" class="report" hidden></div>
+
+            <div class="tester-wrap">
+              <div class="plate-headline" style="margin-top:12px; padding-top:12px; border-top:.5px solid var(--l1);">
+                <div>
+                  <div class="plate-title">🧪 Интерактивная песочница инструмента</div>
+                  <div class="page-sub">Проверь вызов инструмента с реальными параметрами прямо сейчас.</div>
+                </div>
+              </div>
+              <div class="creator-meta-grid" style="grid-template-columns: minmax(180px, 1fr) 2fr auto; align-items: flex-end; gap:8px;">
+                <div class="field-group">
+                  <label class="field-label" for="creatorTestTool">Инструмент:</label>
+                  <select id="creatorTestTool" class="field compact"></select>
+                </div>
+                <div class="field-group">
+                  <label class="field-label" for="creatorTestArgs">Параметры (JSON):</label>
+                  <input type="text" id="creatorTestArgs" class="field" placeholder='{"a": 5, "b": 10}' value="{}">
+                </div>
+                <button type="button" id="creatorTestBtn" class="primary" style="white-space:nowrap; height:34px;">▶️ Запустить</button>
+              </div>
+              <pre id="creatorTestResult" class="code-modal-pre" style="max-height:160px; margin-top:8px;" hidden></pre>
+            </div>
+          </section>
+        </div>
+
       </div>
     </section>
 
@@ -362,6 +557,17 @@
       <div class="page-sub">При нажатии клавиши Escape или Pause во время выполнения игровых действий модель мгновенно отпустит все клавиши и передаст управление пользователю.</div>
     </div>
     <div class="settings-block">
+      <div class="plate-title-row">
+        <div class="plate-title">Проверка плагинов</div>
+        <span class="sec-chip" id="vtKeyChip">ключ не задан</span>
+      </div>
+      <div class="urlrow">
+        <input type="password" id="vtApiKey" class="field grow" placeholder="VirusTotal API key">
+        <button id="vtApiKeySave" class="ghost" type="button">Сохранить</button>
+      </div>
+      <div class="page-sub">Ключ с virustotal.com (профиль → API key). Даёт сверку SHA-256 с базой 70+ антивирусов. Без ключа плагины проверяет локальный аудит кода — файлы никуда не отправляются.</div>
+    </div>
+    <div class="settings-block">
       <div class="plate-title">Помощь</div>
       <a id="bugReport" class="bug-link" href="https://github.com/lenovolquser15-ai/Local-AI-IDE/issues/new" target="_blank" rel="noopener">Нашли баг? Расскажите нам о нём →</a>
       <div class="page-sub">Откроется GitHub Issues репозитория. Напиши, что делал и что увидел — так починим быстрее.</div>
@@ -377,6 +583,20 @@
       <button class="danger" value="delete">Удалить</button>
     </div>
   </form>
+</dialog>
+<dialog id="codeDialog" class="code-modal">
+  <div class="modal-head">
+    <div class="modal-head-text">
+      <span class="modal-title" id="codeDialogTitle">Исходный код плагина</span>
+      <span class="modal-meta" id="codeDialogMeta"></span>
+    </div>
+    <span class="grow"></span>
+    <button id="codeDialogCopy" class="ghost small-btn" type="button">Копировать</button>
+    <button id="codeDialogClose" class="icon" type="button" title="Закрыть">✕</button>
+  </div>
+  <div class="modal-body">
+    <pre id="codeDialogText" class="code-modal-pre"></pre>
+  </div>
 </dialog>
 <script src="/app.js"></script>
 </body>
