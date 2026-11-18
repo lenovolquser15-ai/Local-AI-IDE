@@ -314,6 +314,95 @@ def test_generate_plugin_ai_fallback_and_structure():
     assert gen["security"]["clean"] is True
 
 
+def _drop_workshop_entry(plugin_id):
+    wpath = os.path.join(plugins.PLUGIN_DIR, "workshop_catalog.json")
+    if os.path.exists(wpath):
+        with open(wpath, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        before = len(data.get("entries", []))
+        data["entries"] = [e for e in data.get("entries", []) if e.get("id") != plugin_id]
+        if len(data["entries"]) != before:
+            with open(wpath, "w", encoding="utf-8") as fh:
+                json.dump(data, fh, indent=2, ensure_ascii=False)
+    w_file = os.path.join(plugins.PLUGIN_DIR, "_workshop", f"{plugin_id}.py")
+    if os.path.exists(w_file):
+        os.remove(w_file)
+
+
+def test_install_code_tools_are_plugin_specific():
+    code = """NAME = "isolated_tools_plugin"
+def solo(cfg, args): return {"ok": True}
+TOOLS = [{"name": "solo_tool", "desc": "solo", "params": {}, "required": [], "fn": solo}]
+"""
+    res = plugins.install_code(code, "isolated_tools_plugin.py")
+    assert res["ok"] is True
+    assert res["tools"] == ["solo_tool"]
+    plugins.remove_file("isolated_tools_plugin.py")
+
+
+def test_sandbox_runs_out_of_process_and_enforces_timeout():
+    code = """import time
+NAME = "sandbox_probe"
+def fast(cfg, args): return {"ok": True, "result": args.get("x")}
+def slow(cfg, args):
+    time.sleep(5)
+    return {"ok": True}
+TOOLS = [
+    {"name": "sb_fast", "desc": "fast", "params": {"x": ("string", "x")}, "required": [], "fn": fast},
+    {"name": "sb_slow", "desc": "slow", "params": {}, "required": [], "fn": slow},
+]
+"""
+    plugins.install_code(code, "sandbox_probe.py")
+    ok = plugins.test_plugin_tool("sb_fast", {"x": "hi"})
+    assert ok["ok"] is True and ok["sandboxed"] is True
+    assert ok["result"] == {"ok": True, "result": "hi"}
+
+    timed = plugins.test_plugin_tool("sb_slow", {}, timeout=1)
+    assert timed["ok"] is False and timed["sandboxed"] is True
+    assert "уложился" in timed["error"]
+
+    missing = plugins.test_plugin_tool("sb_nope", {})
+    assert missing["ok"] is False
+    plugins.remove_file("sandbox_probe.py")
+
+
+def test_generate_ai_handles_quotes_and_newlines():
+    prompt = 'плагин "проверка" с """кавычками"""\nи переносом строки \\ backslash'
+    gen = plugins.generate_plugin_ai(prompt)
+    assert gen["ok"] is True
+    compile(gen["code"], "gen.py", "exec")
+    assert virustotal.scan_plugin(gen["code"])["clean"] is True
+
+
+def test_publish_uses_entered_name_and_warns_on_mismatch():
+    code = """NAME = "different_inner_name"
+def fn(cfg, args): return {"ok": True}
+TOOLS = [{"name": "hint_fn", "desc": "fn", "params": {}, "required": [], "fn": fn}]
+"""
+    res = plugins.create_plugin(name="hint_name_test", code=code, publish=True)
+    assert res["ok"] is True
+    assert res["published"] is True
+    assert res["published_entry"]["id"] == "hint_name_test"
+    assert res["published_entry"]["name"] == "hint_name_test"
+    assert res["name_warning"]
+
+    _drop_workshop_entry("hint_name_test")
+    plugins.remove_file("hint_name_test.py")
+
+
+def test_publish_failure_is_surfaced(monkeypatch):
+    code = """NAME = "fail_pub_test"
+def fn(cfg, args): return {"ok": True}
+TOOLS = [{"name": "fn", "desc": "fn", "params": {}, "required": [], "fn": fn}]
+"""
+    monkeypatch.setattr(plugins, "publish_to_workshop", lambda **kw: {"ok": False, "error": "boom"})
+    res = plugins.create_plugin(name="fail_pub_test", code=code, publish=True)
+    assert res["ok"] is True
+    assert res["published"] is False
+    assert res["publish_error"] == "boom"
+    plugins.remove_file("fail_pub_test.py")
+
+
 def test_unpublish_from_workshop():
     code = """NAME = "temp_pub_tool"
 def fn(cfg, args): return {"ok": True}

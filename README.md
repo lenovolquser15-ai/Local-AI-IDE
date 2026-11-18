@@ -4,7 +4,7 @@
 > tool use (shell, files, browser via CDP, multi-engine web search), goal mode with
 > automatic context compaction, session history with Markdown export, Windows build via PyInstaller.
 >
-> **Quick start (Windows):** download `LocalHarness-Setup-v1.0.5.exe` from
+> **Quick start (Windows):** download `LocalHarness-Setup-v1.0.6.exe` from
 > [Releases](https://github.com/lenovolquser15-ai/Local-AI-IDE/releases) (or use the portable zip),
 > install LM Studio and load a model. The UI opens at `http://127.0.0.1:7788`.
 > From source: Python 3.10+, deps from `requirements.txt`, `python -m harness serve`.
@@ -16,11 +16,26 @@
 
 ![Чат: сессии, чеклист цели, шкала контекста (схема/диалог/ответ), траектория](docs/screenshots/ui-chat.png)
 
-![Настройки в шторке: долговременная память, удалённый доступ, LAN](docs/screenshots/ui-settings.png)
+![Настройки в шторке: параметры контекста, память, удалённый доступ, LAN](docs/screenshots/ui-settings.png)
 
 ![Мобильный и удалённый доступ: адрес, временный код и QR](docs/screenshots/ui-lan.png)
 
-![Вкладка плагинов: установленные и каталог](docs/screenshots/ui-plugins.png)
+![Вкладка плагинов: установленные, включая Codex Security, мастерская и каталог](docs/screenshots/ui-plugins.png)
+
+![Конвертер: любой GitHub-репозиторий в плагин с живыми инструментами](docs/screenshots/ui-converter.png)
+
+<details>
+<summary>Архив: скриншоты версии 1.0.5</summary>
+
+![Чат 1.0.5](docs/screenshots/v1.0.5/ui-chat.png)
+
+![Настройки 1.0.5](docs/screenshots/v1.0.5/ui-settings.png)
+
+![Мобильный доступ 1.0.5](docs/screenshots/v1.0.5/ui-lan.png)
+
+![Плагины 1.0.5](docs/screenshots/v1.0.5/ui-plugins.png)
+
+</details>
 
 <details>
 <summary>Архив: скриншоты версии 1.0.4</summary>
@@ -45,7 +60,7 @@
 
 | как | что делает |
 |---|---|
-| `LocalHarness-Setup-v1.0.5.exe` (из Releases) | установщик: без прав администратора, ярлык в меню Пуск, опциональный автозапуск; обновление и удаление не трогают `data` и `config.json` |
+| `LocalHarness-Setup-v1.0.6.exe` (из Releases) | установщик: без прав администратора, ярлык в меню Пуск, опциональный автозапуск; обновление и удаление не трогают `data` и `config.json` |
 | `LocalHarness.exe` (после сборки) или `lh.cmd` | поднимает сервер на `127.0.0.1:7788` и открывает окно Chrome в режиме приложения |
 | `python -m harness serve` | то же из исходников |
 | `python -m harness cli "сделай X"` | разовый запрос в терминале |
@@ -304,7 +319,7 @@ DuckDuckGo html-версию, когда обычные HTTP-запросы ло
 
 ## Параметры контекста LM Studio
 
-`context_tokens` — лимит истории, которую LocalHarness отправляет модели после сжатия. Он не меняет уже загруженную модель. `lms_context_length` — длина контекста при следующей загрузке через `lms load`; после изменения параметра модель нужно выгрузить и загрузить заново. По умолчанию оба значения — `8192`.
+`context_tokens` — лимит истории, которую LocalHarness отправляет модели после сжатия. Он не меняет уже загруженную модель. `lms_context_length` — длина контекста при следующей загрузке через `lms load`; после изменения параметра модель нужно выгрузить и загрузить заново. По умолчанию оба значения — `16384`, допустимый диапазон — `512–262144`; `max_tokens` — `64–32768`. Значения вне диапазона и мусор в полях зажимаются на сервере и в интерфейсе, в ответе `/api/config` приходит предупреждение с фактическим числом.
 
 Batch size и eval batch size — параметры backend/GGUF в LM Studio, а не параметры OpenAI-compatible запроса. LocalHarness не может надёжно изменить их через `/v1/chat/completions`; поэтому они остаются настройками LM Studio. В интерфейсе отображается и применяется только то, что поддерживает CLI: context length и TTL. Batch size и eval batch size берутся из профиля загрузки LM Studio; приложение их не перезаписывает.
 
@@ -418,6 +433,38 @@ TOOLS = [{
 Пример в репозитории: `plugins\waitfor.py` (`sleep`, `wait_port`). Каталог: `plugins\catalog.json`
 (waitfor, netprobe, notes) — «Установить» копирует шаблон из `plugins\_templates` или качает по `url`.
 Свой источник каталога: `config.json → plugin_catalog_url` (JSON со списком записей).
+
+### Конвертер репозиториев
+
+Вкладка «Конвертер» превращает любой GitHub-репозиторий в рабочий плагин: Python-библиотеку,
+MCP-сервер, Node-пакет или CLI-утилиту. Плагин получает четыре живых инструмента: `<имя>_info`
+(звёзды, язык, лицензия, пакет, CLI), `<имя>_files` (дерево файлов через GitHub API), `<имя>_read`
+(файл с защитой от `..`) и `<имя>_cli` (запуск CLI репозитория, если он объявлен в `package.json`,
+`pyproject.toml`, `setup.py`, `Cargo.toml` или `go.mod`). Для монорепозиториев ищутся вложенные
+манифесты, для npm доступен запасной запуск через `npx -y <пакет>`. Сгенерированный код проходит
+статический аудит и ставится в `plugins/`.
+
+Встроенный пример: `plugins/codex_security.py` — обёртка CLI
+[openai/codex-security](https://github.com/openai/codex-security): `codex_security_status`,
+`codex_security_scan` (пути, diff, deep, лимит времени), `codex_security_scans`,
+`codex_security_cli`. Нужен Node.js 22.13+/24.x/26.x, затем `npm i -g @openai/codex-security`
+и `cs login`; без установленного CLI инструменты честно сообщают, чего не хватает.
+
+### Мастерская, Конструктор и аудит
+
+Вкладка «Плагины» состоит из четырёх подвкладок:
+
+- **Установленные** — включение, удаление, скачивание, публикация в Мастерскую и переход в Конструктор;
+- **Мастерская** — общий каталог плагинов сообщества (`plugins\workshop_catalog.json`, файлы в
+  `plugins\_workshop`): просмотр кода, установка в один клик, фильтры по категориям;
+- **Конвертер** — превращение GitHub-репозитория в плагин (см. выше);
+- **Конструктор** — создание и редактирование плагина прямо в интерфейсе: имя, описание, код,
+  проверка синтаксиса, тестовый вызов инструмента в песочнице (`harness/plugin_sandbox.py`) и публикация.
+
+Перед установкой и публикацией код проходит статический аудит (`harness/virustotal.py`): AST-скан
+ищет опасные вызовы (`os.system`, `subprocess`, `eval`, `exec`), сеть и ввод с клавиатуры. Бейдж
+«аудит кода: чисто» показывает результат; при заданном ключе VirusTotal в настройках дополнительно
+проверяется хэш файла по базе. Аудит не заменяет чтение кода — особенно для плагинов из Мастерской.
 
 ## Git
 

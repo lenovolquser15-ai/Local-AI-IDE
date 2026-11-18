@@ -691,7 +691,8 @@ class Toolkit:
         from . import sizing as sizing_mod
         from . import lms as lms_mod
         cfg = self.cfg
-        ctx = int(context_length or cfg.get("lms_context_length") or 8192)
+        from .config import normalize_context
+        ctx = normalize_context(context_length or cfg.get("lms_context_length"), 8192)
         disk, _ = lms_mod.disk_models(cfg)
         loaded, _ = lms_mod.loaded_models(cfg)
         target = None

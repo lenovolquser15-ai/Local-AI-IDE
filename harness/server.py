@@ -20,7 +20,8 @@ from . import session as session_mod
 from . import sizing as sizing_mod
 from . import vision as vision_mod
 from .agent import Agent, Bridge
-from .config import DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save, _merge
+from .config import (DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save, _merge,
+                     as_int, normalize_context, MAX_TOKENS_MIN, MAX_TOKENS_MAX)
 
 RUNS = {}
 RUNS_LOCK = threading.Lock()
@@ -231,7 +232,7 @@ def lms_state(cfg):
     disk, disk_err = lms_mod.disk_models(cfg)
     loaded, ps_err = lms_mod.loaded_models(cfg)
     hw = sizing_mod.get_hardware_profile()
-    ctx_len = int(cfg.get("lms_context_length") or cfg.get("context_tokens") or 8192)
+    ctx_len = normalize_context(cfg.get("lms_context_length") or cfg.get("context_tokens"), 8192)
     enriched_disk = [sizing_mod.enrich_model_item(m, context_length=ctx_len, hw=hw) for m in (disk or [])]
     enriched_loaded = [sizing_mod.enrich_model_item(m, context_length=m.get("contextLength") or ctx_len, hw=hw)
                        for m in (loaded or [])]
@@ -916,14 +917,31 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, {"ok": False, "error": str(exc)}, 400)
 
     def handle_config(self, body):
+        incoming = body.get("config") if isinstance(body.get("config"), dict) else {}
+        warnings = []
         with CONFIG_LOCK:
             old = load()
-            cfg = _merge(old, body.get("config", {}))
+            cfg = _merge(old, incoming)
+            for key in ("context_tokens", "lms_context_length"):
+                if key in incoming:
+                    raw = cfg.get(key)
+                    fixed = normalize_context(raw, old.get(key) or 8192)
+                    if str(raw) != str(fixed):
+                        warnings.append("Контекст: %s → %d (допустимо 512–262144)" % (raw, fixed))
+                    cfg[key] = fixed
+            if "max_tokens" in incoming:
+                raw = cfg.get("max_tokens")
+                fixed = as_int(raw, old.get("max_tokens") or 1500, MAX_TOKENS_MIN, MAX_TOKENS_MAX)
+                if str(raw) != str(fixed):
+                    warnings.append("max_tokens: %s → %d (допустимо 64–32768)" % (raw, fixed))
+                cfg["max_tokens"] = fixed
             save(cfg)
         lms_mod.invalidate()
         with _PROBE["lock"]:
             _PROBE["at"] = 0.0
         payload = {"ok": True, "config": cfg}
+        if warnings:
+            payload["warnings"] = warnings
         if bind_address(old) != bind_address(cfg):
             payload["restart"] = request_restart()
         _json_response(self, payload)
@@ -983,7 +1001,8 @@ class Handler(BaseHTTPRequestHandler):
         if not model:
             _json_response(self, {"ok": False, "error": "не указана модель"}, 400)
             return
-        context_length = body.get("context_length", cfg.get("lms_context_length", 8192))
+        context_length = normalize_context(
+            body.get("context_length"), cfg.get("lms_context_length") or cfg.get("context_tokens") or 8192)
         ttl = body.get("ttl", cfg.get("lms_ttl", 0))
         args = ["load", model, "--context-length", str(context_length)]
         try:
@@ -1025,7 +1044,7 @@ class Handler(BaseHTTPRequestHandler):
     def handle_lms_estimate(self, body):
         cfg = load()
         model_name = body.get("model")
-        ctx = int(body.get("context_length") or cfg.get("lms_context_length") or 8192)
+        ctx = normalize_context(body.get("context_length"), cfg.get("lms_context_length") or 8192)
         disk, _ = lms_mod.disk_models(cfg)
         loaded, _ = lms_mod.loaded_models(cfg)
         target = None

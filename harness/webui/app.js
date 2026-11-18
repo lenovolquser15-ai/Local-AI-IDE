@@ -342,6 +342,15 @@ function showSpeed(ev) {
 }
 
 /* ---------- context meter: сколько контекста съедено и где начнётся сжатие ---------- */
+const CTX_MIN = 512;
+const CTX_MAX = 262144;
+
+function clampContext(value, fallback) {
+  const n = Math.round(Number(value));
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(CTX_MAX, Math.max(CTX_MIN, n));
+}
+
 function fmtTok(n) {
   n = Number(n) || 0;
   if (n >= 1000) return (n / 1000).toFixed(n >= 10000 ? 0 : 1).replace('.0', '') + 'k';
@@ -685,6 +694,7 @@ function setView(name) {
   const quick = document.querySelector('.quick-controls');
   if (quick) quick.style.display = chat ? '' : 'none';
   $('#right').style.display = chat ? '' : 'none';
+  app.classList.toggle('wide', !chat);
   localStorage.setItem('lh.view', name);
   if (name === 'plugins') {
     refreshPlugins();
@@ -779,7 +789,7 @@ async function refreshState() {
   $('#dnsChip').textContent = 'dns-обход: ' + (st.dns_probe && st.dns_probe.ok ? st.dns_probe.ip : 'не работает');
   $('#dnsChip').title = st.dns_probe && st.dns_probe.ok ? '' : (st.dns_probe || {}).error || '';
   $('#modelCount').textContent = (ps.label || st.provider) + ' · моделей: ' + ((ps.models || []).length);
-  $('#lmContext').value = st.lms_context_length || st.context_tokens || 8192;
+  $('#lmContext').value = clampContext(st.lms_context_length || st.context_tokens, 8192);
   $('#lmTtl').value = st.lms_ttl || 0;
   if (document.activeElement !== $('#systemPrompt')) $('#systemPrompt').value = st.system_prompt || '';
   $('#searxngEnabled').checked = !!st.search_searxng;
@@ -1037,6 +1047,7 @@ async function waitServerRestart() {
 
 async function patchConfig(key, value) {
   const res = await api('/api/config', { config: { [key]: value } });
+  (res && res.warnings || []).forEach((w) => pushNotice(w, 'warn'));
   if (res && res.restart) await waitServerRestart();
   await refreshState();
 }
@@ -1170,14 +1181,15 @@ function renderPlugins() {
     dlBtn.download = p.file;
     dlBtn.title = 'Скачать .py файл плагина';
     actions.push(dlBtn);
-    actions.push(switchEl(on, async () => {
+    const tail = node('div', 'pcard-tail');
+    tail.append(switchEl(on, async () => {
       try {
         await api('/api/plugins/toggle', { file: p.file, enabled: !on });
         refreshPlugins();
         refreshState();
       } catch (err) { alert(err.message); }
     }));
-    actions.push(delBtn('удалить файл плагина', async () => {
+    tail.append(delBtn('удалить файл плагина', async () => {
       if (!confirm('Удалить ' + p.file + ' безвозвратно?')) return;
       try {
         await api('/api/plugins/remove', { file: p.file });
@@ -1185,6 +1197,7 @@ function renderPlugins() {
         refreshState();
       } catch (err) { alert(err.message); }
     }));
+    actions.push(tail);
     inst.append(plugCard(p, actions));
   });
   const list = $('#plugCatalog');
@@ -1229,7 +1242,18 @@ function setPlugSubtab(tab) {
   if ($('#plugTabConverter')) $('#plugTabConverter').hidden = tab !== 'converter';
   if ($('#plugTabCreator')) $('#plugTabCreator').hidden = tab !== 'creator';
   if (tab === 'workshop' && !workshopCache) refreshWorkshop();
+  if (tab === 'creator') populateTesterFromInstalled();
   if (tab === 'installed') renderPlugins();
+}
+
+function populateTesterFromInstalled() {
+  const sel = $('#creatorTestTool');
+  if (!sel || sel.options.length > 1) return;
+  const names = [];
+  (plugCache?.st?.plugins || []).forEach((p) => {
+    if (!p.error && p.enabled !== false) names.push(...(p.tools || []));
+  });
+  if (names.length) updateTesterToolOptions(names);
 }
 
 $('#plugNav').addEventListener('click', (e) => {
@@ -1545,12 +1569,20 @@ if ($('#repoConvertBtn')) {
 
       const grid = node('div', 'report-grid');
       grid.append(...reportRow('Файл', res.file));
+      grid.append(...reportRow('Режим', res.mode === 'cli' ? 'репозиторий + CLI' : 'только чтение репозитория', false));
+      if (res.language) grid.append(...reportRow('Язык', res.language, false));
+      if (res.package) grid.append(...reportRow('Пакет', res.package));
+      if ((res.cli || []).length) grid.append(...reportRow('CLI', res.cli.join(', '), false));
+      if (res.files_count !== undefined) grid.append(...reportRow('Файлов в репо', String(res.files_count), false));
       grid.append(...reportRow('Инструменты', String((res.tools || []).length) + ' · ' + ((res.tools || []).join(', ') || '—'), false));
       grid.append(...reportRow('Установка', res.installed ? 'включён в plugins' : 'не установлен', false));
       box.append(grid);
       if (res.description) box.append(node('div', 'report-note', res.description));
+      if (res.install_hint) box.append(node('div', 'report-note', 'Чтобы включить CLI: ' + res.install_hint));
       if (!res.installed) {
-        box.append(node('div', 'report-note', 'Плагин собран, но не активирован: установку остановила проверка безопасности. Замечания ниже.'));
+        box.append(node('div', 'report-note', res.install_error
+          ? 'Плагин собран, но не установлен: ' + res.install_error
+          : 'Плагин собран, но не активирован: установку остановила проверка безопасности. Замечания ниже.'));
       }
       if ((sec.findings || []).length) {
         const list = node('ul', 'report-find');
@@ -1828,9 +1860,10 @@ if ($('#creatorScanBtn')) {
     try {
       const res = await api('/api/plugins/virustotal', { code });
       box.className = 'report';
-      const clean = res.clean;
-      const chipClass = clean ? 'ok' : 'danger';
-      const chipText = clean ? '🛡️ Чисто (0 угроз)' : '⚠️ Найдены угрозы: ' + res.score;
+      const queried = !!(res.vt && res.vt.queried_api);
+      const clean = !!res.clean;
+      const chipClass = clean ? 'ok' : (res.threat_level === 'malicious' ? 'danger' : 'warn');
+      const chipText = clean ? (queried ? 'VirusTotal: чисто' : 'аудит кода: чисто') : 'есть замечания';
       box.innerHTML = `
         <div class="report-head">
           <span class="report-title">Результат аудита безопасности</span>
@@ -1839,10 +1872,15 @@ if ($('#creatorScanBtn')) {
         <div class="report-grid">
           <div class="report-label">Хеш SHA-256:</div>
           <div class="report-value">${esc(res.sha256 || '—')}</div>
-          <div class="report-label">Статус детектов:</div>
-          <div class="report-value">${esc(res.score || '0/72')}</div>
+          <div class="report-label">Детекты:</div>
+          <div class="report-value">${esc(queried ? (res.score || '—') : '—')}</div>
+          <div class="report-label">Режим:</div>
+          <div class="report-value plain">${queried ? 'VirusTotal API' : 'локальный AST-аудит'}</div>
         </div>
-        ${res.findings && res.findings.length ? `<div style="color:var(--fail); margin-top:8px;">Замечания: ${esc(res.findings.map(f => f.msg).join('; '))}</div>` : '<div style="color:var(--ok); margin-top:8px;">✓ Деструктивные команды, eval/exec и инъекции не обнаружены. Код безопасен.</div>'}
+        ${res.findings && res.findings.length
+          ? `<div style="color:var(--fail); margin-top:8px;">Замечания: ${esc(res.findings.map(f => f.msg || f.type).join('; '))}</div>`
+          : '<div style="color:var(--ok); margin-top:8px;">✓ Деструктивные команды, eval/exec и обфускация не обнаружены.</div>'}
+        ${queried ? '' : '<div class="report-note">Ключ VirusTotal не задан — проверка выполнена локально по AST, файлы никуда не отправлялись.</div>'}
       `;
     } catch (err) {
       box.className = 'report';
@@ -1856,6 +1894,7 @@ if ($('#creatorSaveBtn')) {
     const name = ($('#creatorName')?.value || '').trim();
     const desc = ($('#creatorDesc')?.value || '').trim();
     const author = ($('#creatorAuthor')?.value || '').trim();
+    const tags = ($('#creatorTags')?.value || '').split(',').map((t) => t.trim()).filter(Boolean);
     const code = ($('#creatorCode')?.value || '').trim();
     const publish = !!$('#creatorPublish')?.checked;
 
@@ -1879,10 +1918,12 @@ if ($('#creatorSaveBtn')) {
     box.textContent = 'Проверка безопасности и установка плагина в систему…';
 
     try {
-      const res = await api('/api/plugins/create', { name, desc, author, code, publish });
+      const res = await api('/api/plugins/create', { name, desc, author, code, publish, tags });
       if (!res.ok) throw new Error(res.error || 'Ошибка создания плагина');
       box.className = 'report';
-      const pubNote = res.published ? '✨ Плагин также успешно опубликован в Мастерскую сообщества!' : '';
+      const pubNote = res.published
+        ? '✨ Плагин также опубликован в Мастерскую сообщества!'
+        : (res.publish_error ? '⚠️ Плагин установлен, но опубликовать не удалось: ' + res.publish_error : '');
       box.innerHTML = `
         <div class="report-head">
           <span class="report-title">✓ Плагин <code>${esc(res.name)}</code> успешно создан и активирован!</span>
@@ -1896,7 +1937,8 @@ if ($('#creatorSaveBtn')) {
           <div class="report-label">SHA-256:</div>
           <div class="report-value">${esc(res.sha256 || '—')}</div>
         </div>
-        ${pubNote ? `<div style="color:var(--accent); font-weight:600; margin-top:8px;">${pubNote}</div>` : ''}
+        ${pubNote ? `<div style="color:${res.published ? 'var(--accent)' : 'var(--warn, #d9a441)'}; font-weight:600; margin-top:8px;">${esc(pubNote)}</div>` : ''}
+        ${res.name_warning ? `<div class="report-note">${esc(res.name_warning)}</div>` : ''}
       `;
       if (res.tools && res.tools.length) updateTesterToolOptions(res.tools);
       pushNotice(`Плагин ${res.name} создан${res.published ? ' и опубликован в Мастерскую' : ''}!`, 'ok');
@@ -1951,7 +1993,16 @@ if ($('#creatorAiBtn')) {
       if ($('#creatorDesc')) $('#creatorDesc').value = res.desc || prompt;
       if ($('#creatorCode')) $('#creatorCode').value = res.code;
       updateTesterToolOptions(res.tools || []);
-      pushNotice(`Плагин ${res.name} успешно сгенерирован ИИ!`, 'ok');
+      const box = $('#creatorResultBox');
+      if (!res.generated_by_ai && box) {
+        box.hidden = false;
+        box.className = 'report';
+        box.innerHTML = `<div class="report-head"><span class="report-title">Собран шаблон</span><span class="sec-chip warn">ИИ недоступен</span></div>
+          <div class="report-note">${esc(res.warning || 'Локальная модель не ответила — отредактируй код под задачу или повтори позже.')}</div>`;
+        pushNotice('Модель недоступна — собран шаблон плагина', 'warn');
+      } else {
+        pushNotice(`Плагин ${res.name} сгенерирован ИИ — проверь код перед сохранением`, 'ok');
+      }
     } catch (err) {
       alert('Ошибка генерации: ' + err.message);
     } finally {
@@ -1975,11 +2026,14 @@ if ($('#creatorTestBtn')) {
       return;
     }
     resPre.hidden = false;
-    resPre.textContent = `⏳ Вызываю инструмент ${tool}…`;
+    resPre.textContent = `⏳ Вызываю инструмент ${tool} в изолированном процессе…`;
     try {
       const res = await api('/api/plugins/test_tool', { tool, args: rawArgs });
       if (!res.ok) throw new Error(res.error || 'Ошибка вызова');
-      resPre.textContent = `⏱️ Время выполнения: ${res.duration_ms} мс\n\nРезультат:\n` + JSON.stringify(res.result, null, 2);
+      const parts = [`⏱️ Изолированный процесс · ${res.duration_ms} мс`];
+      if (res.output) parts.push('Вывод плагина:\n' + res.output);
+      parts.push('Результат:\n' + JSON.stringify(res.result, null, 2));
+      resPre.textContent = parts.join('\n\n');
     } catch (err) {
       resPre.textContent = `❌ Ошибка тестирования:\n${err.message}`;
     }
@@ -2064,7 +2118,7 @@ function renderLM(data) {
     loadBtn.onclick = async () => {
       loadBtn.disabled = true;
       loadBtn.textContent = 'грузится…';
-      try { await api('/api/lms/load', { model: m.modelKey || m.path, context_length: Number($('#lmContext').value) || 8192, ttl: Number($('#lmTtl').value) || 0 }); refreshLM(); }
+      try { await api('/api/lms/load', { model: m.modelKey || m.path, context_length: clampContext($('#lmContext').value, 8192), ttl: Number($('#lmTtl').value) || 0 }); refreshLM(); }
       catch (err) { alert(err.message); loadBtn.disabled = false; loadBtn.textContent = isLoaded ? 'Перезагрузить' : 'Загрузить'; }
     };
     actions.push(loadBtn);
@@ -2371,7 +2425,15 @@ $('#plugInstallUrl').onclick = async () => {
   } catch (err) { alert(err.message); }
   $('#plugInstallUrl').disabled = false;
 };
-$('#lmContext').onchange = (e) => patchConfig('lms_context_length', Number(e.target.value) || 8192);
+$('#lmContext').onchange = async (e) => {
+  const prev = clampContext(stateCache && (stateCache.lms_context_length || stateCache.context_tokens), 8192);
+  const next = clampContext(e.target.value, prev);
+  if (String(e.target.value).trim() !== String(next)) {
+    pushNotice('Контекст ограничен диапазоном 512–262144 токенов: ' + next, 'warn');
+  }
+  e.target.value = next;
+  if (next !== prev) await patchConfig('lms_context_length', next);
+};
 $('#lmTtl').onchange = (e) => patchConfig('lms_ttl', Number(e.target.value) || 0);
 $('#searxngEnabled').onchange = (e) => patchConfig('search_searxng', e.target.checked);
 $('#searxngUrl').onchange = (e) => patchConfig('search_searxng_url', e.target.value.trim() || 'http://127.0.0.1:8080');

@@ -6,7 +6,7 @@ from harness.stdout_fix import force_utf8
 
 force_utf8()
 
-KNOWN = ("serve", "cli", "chat", "check", "wake", "open", "tools", "config")
+KNOWN = ("serve", "cli", "chat", "check", "wake", "open", "tools", "config", "plugin-run")
 
 
 def run():

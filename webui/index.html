@@ -175,7 +175,7 @@
             </span>
             <div class="secbar-main">
               <div class="secbar-title">Мастерская плагинов LocalHarness</div>
-              <div class="secbar-sub">Каталог проверенных плагинов от сообщества и созданных прямо внутри LocalHarness. Каждый плагин проверен через VirusTotal и готов к скачиванию в 1 клик.</div>
+              <div class="secbar-sub">Каталог плагинов от сообщества и созданных прямо внутри LocalHarness. Каждый проходит локальный аудит кода; при заданном ключе SHA-256 дополнительно сверяется с базой VirusTotal.</div>
             </div>
             <div class="secbar-stats" id="workshopStats"></div>
           </div>
@@ -212,7 +212,7 @@
               <span class="conv-step">01</span>
               <div class="conv-head-text">
                 <div class="conv-title">GitHub-репозиторий</div>
-                <div class="page-sub">Подойдёт любой AI-, MCP- или утилитарный репозиторий на Python. Конвертер разберёт код, соберёт инструменты и установит плагин в plugins.</div>
+                <div class="page-sub">Подойдёт любой репозиторий: Python-библиотека, MCP-сервер, Node-пакет или CLI-утилита. Плагин получит живые инструменты: справка, список файлов, чтение файла и запуск CLI репозитория (если он его объявляет).</div>
               </div>
             </div>
             <div class="conv-form">
@@ -222,11 +222,12 @@
             </div>
             <div class="conv-presets">
               <span class="page-sub">Примеры:</span>
+              <button type="button" class="preset-chip" data-repo="openai/codex-security" data-name="codex_security_repo">openai/codex-security</button>
               <button type="button" class="preset-chip" data-repo="ollama/ollama-python" data-name="ollama_tools">ollama/ollama-python</button>
               <button type="button" class="preset-chip" data-repo="psf/requests" data-name="requests_tools">psf/requests</button>
               <button type="button" class="preset-chip" data-repo="modelcontextprotocol/servers" data-name="mcp_tools">mcp/servers</button>
             </div>
-            <div id="repoConvertProgress" class="conv-progress" hidden>Запрашиваю GitHub, разбираю AST и собираю инструменты…</div>
+            <div id="repoConvertProgress" class="conv-progress" hidden>Запрашиваю GitHub, читаю манифесты и собираю инструменты…</div>
             <div id="repoConvertResult" class="conv-result" hidden></div>
           </section>
         </div>
@@ -237,7 +238,7 @@
             <div class="plate-headline">
               <div>
                 <div class="plate-title">🛠️ Конструктор плагинов LocalHarness</div>
-                <div class="page-sub">Создай свой инструмент на Python, проверь безопасность через VirusTotal и опубликуй в Мастерскую, чтобы другие пользователи могли его скачать.</div>
+                <div class="page-sub">Создай свой инструмент на Python: код проходит локальный аудит AST (и VirusTotal, если задан ключ), после чего его можно опубликовать в Мастерскую.</div>
               </div>
               <span class="sec-chip" id="creatorSecChip">авто-валидация AST</span>
             </div>
@@ -256,6 +257,11 @@
               <div class="field-group full-width">
                 <label class="field-label" for="creatorDesc">Описание возможностей плагина:</label>
                 <input type="text" id="creatorDesc" class="field" placeholder="Кратко опишите, что делает плагин и когда агенту его вызывать...">
+              </div>
+              <div class="field-group full-width">
+                <label class="field-label" for="creatorTags">Теги для Мастерской (через запятую):</label>
+                <input type="text" id="creatorTags" class="field" placeholder="утилиты, сеть, мониторинг">
+                <span class="field-hint">Используются фильтрами Мастерской: утилиты · финансы · связь</span>
               </div>
             </div>
 
@@ -301,7 +307,7 @@
               <div class="plate-headline" style="margin-top:12px; padding-top:12px; border-top:.5px solid var(--l1);">
                 <div>
                   <div class="plate-title">🧪 Интерактивная песочница инструмента</div>
-                  <div class="page-sub">Проверь вызов инструмента с реальными параметрами прямо сейчас.</div>
+                  <div class="page-sub">Вызов идёт в отдельном процессе с таймаутом 30 с — зависший плагин не остановит сервер.</div>
                 </div>
               </div>
               <div class="creator-meta-grid" style="grid-template-columns: minmax(180px, 1fr) 2fr auto; align-items: flex-end; gap:8px;">
@@ -347,13 +353,11 @@
             <div class="plate-title">На диске</div>
             <div id="lmDisk" class="cardlist"></div>
             <div class="lm-options">
-              <label>Контекст LM Studio <input id="lmContext" class="small-field" type="number" min="512" step="512"></label>
+              <label>Контекст LM Studio <input id="lmContext" class="small-field" type="number" min="512" max="262144" step="512" title="512–262144 токенов; не больше реального контекста модели"></label>
               <label>TTL, сек <input id="lmTtl" class="small-field" type="number" min="0" step="60" placeholder="0 = выкл."></label>
             </div>
-            <div class="urlrow">
-              <input type="text" id="lmQuery" class="field grow" placeholder="имя модели, напр. qwen/qwen3-4b-instruct">
-              <button id="lmDownload" class="primary">Скачать</button>
-            </div>
+            <div class="page-sub">Контекст: 512–262144 токенов, кратно 512. Больше реального контекста модели выставлять нельзя — LM Studio откажет или загрузит модель не влезающей в память.</div>
+            <button id="lmDownload" class="primary">Скачать</button>
             <pre id="lmJobLog" class="joblog" hidden></pre>
              <div class="urlrow vision-row"><label class="file-pick">Изображение для vision<input type="file" id="visionFile" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label><span class="page-sub" id="visionName">не выбрано</span><button id="visionClear" class="ghost" type="button">очистить</button></div>
              <div class="urlrow import-row"><input type="text" id="lmImportPath" class="field grow" placeholder="C:\\Models\\model.gguf — локальный файл с Hugging Face"><select id="lmImportMode" class="compact"><option value="copy">копировать</option><option value="hard-link">hard-link</option><option value="symbolic-link">symlink</option><option value="move">переместить</option></select><button id="lmImport" class="primary">Импортировать</button></div>

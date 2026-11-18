@@ -11,6 +11,7 @@ from . import permissions
 from . import schemas
 from . import session as session_mod
 from . import vision as vision_mod
+from .config import normalize_context, as_int, MAX_TOKENS_MIN, MAX_TOKENS_MAX
 from .tools import Toolkit
 
 RESULT_LIMIT = 9000
@@ -369,7 +370,7 @@ class Agent:
         self.llm = llm_mod.LLM(cfg)
         self.profile = cfg.get("tool_profile", "core")
         self.max_steps = int(cfg.get("max_steps", 40))
-        self.window_units = float(cfg.get("context_tokens", 18000)) * UNITS_PER_TOKEN
+        self.window_units = normalize_context(cfg.get("context_tokens"), 16384) * UNITS_PER_TOKEN
         self._reserve_cache = {}
         self.squeeze = str(cfg.get("context_mode", "auto"))  # off | auto | hard | always
         self.perm_mode = (cfg.get("permissions") or {}).get("mode", "auto")
@@ -524,7 +525,7 @@ class Agent:
 
     def _answer_units(self):
         """Запас под ответ модели: max_tokens тоже места в окне."""
-        return float(self.cfg.get("max_tokens", 1500)) * UNITS_PER_TOKEN
+        return as_int(self.cfg.get("max_tokens"), 1500, MAX_TOKENS_MIN, MAX_TOKENS_MAX) * UNITS_PER_TOKEN
 
     def _reserve_units(self, protocol):
         """Сколько окна занято всегда: схема инструментов + запас под ответ.
@@ -842,10 +843,11 @@ class Agent:
         try:
             detected = self.llm.detect_context_length(self.llm.model)
             if detected and detected >= 2048:
+                detected = normalize_context(detected, 16384)
                 old_units = self.window_units
                 self.window_units = float(detected) * UNITS_PER_TOKEN
                 self._reserve_cache.clear()
-                configured = int(self.cfg.get("context_tokens") or self.cfg.get("lms_context_length") or 0)
+                configured = as_int(self.cfg.get("context_tokens") or self.cfg.get("lms_context_length"), 0)
                 if abs(self.window_units - old_units) > 100:
                     text = "окно модели определено: %d токенов" % detected
                     if configured and detected < configured * 0.9:

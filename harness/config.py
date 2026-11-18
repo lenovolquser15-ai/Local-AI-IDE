@@ -71,6 +71,31 @@ DEFAULTS = {
 
 LOCK = threading.RLock()
 
+CONTEXT_MIN = 512
+CONTEXT_MAX = 262144
+MAX_TOKENS_MIN = 64
+MAX_TOKENS_MAX = 32768
+
+
+def as_int(value, default=None, lo=None, hi=None):
+    """Приводит значение к int, не падая на мусоре; опционально зажимает в диапазон."""
+    try:
+        n = int(float(str(value).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    if lo is not None:
+        n = max(lo, n)
+    if hi is not None:
+        n = min(hi, n)
+    return n
+
+
+def normalize_context(value, default=8192):
+    """Размер контекста: только 512…262144, всё остальное — безопасный дефолт или граница."""
+    fallback = as_int(default, 8192, CONTEXT_MIN, CONTEXT_MAX)
+    return as_int(value, fallback, CONTEXT_MIN, CONTEXT_MAX)
+
+
 def app_root():
     if getattr(sys, 'frozen', False):
         return os.path.dirname(os.path.abspath(sys.executable))
@@ -101,6 +126,9 @@ def load():
         except Exception:
             raw = {}
     cfg = _merge(DEFAULTS, raw)
+    for key in ("context_tokens", "lms_context_length"):
+        cfg[key] = normalize_context(cfg.get(key), DEFAULTS[key])
+    cfg["max_tokens"] = as_int(cfg.get("max_tokens"), DEFAULTS["max_tokens"], MAX_TOKENS_MIN, MAX_TOKENS_MAX)
     workspace = cfg.get('workspace') or os.path.join(ROOT, 'work')
     cfg['workspace'] = workspace
     os.makedirs(workspace, exist_ok=True)

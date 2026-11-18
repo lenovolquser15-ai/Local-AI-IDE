@@ -72,6 +72,9 @@ def main(argv=None):
     if command in ("--tray", "--no-tray", "--background", "--open"):
         command = "serve"
     cfg = load()
+    if command == "plugin-run":
+        from .plugin_sandbox import main as sandbox_main
+        return sandbox_main()
     if command == "serve":
         from . import desktop
         open_browser = ("--background" not in argv

@@ -115,8 +115,10 @@ textarea:focus { outline: none; }
 .app.rail .new-session { width: 36px; padding: 6px 0; }
 .app.no-right { grid-template-columns: clamp(264px, 20vw, 420px) minmax(400px, 1fr) 0; }
 .app.no-right .right { display: none; }
+.app.wide { grid-template-columns: clamp(264px, 20vw, 420px) minmax(400px, 1fr) 0; }
+.app.wide .right { display: none; }
 @media (max-width: 1024px) {
-  .app, .app.no-right { grid-template-columns: min(260px, 40vw) minmax(0, 1fr) 0; }
+  .app, .app.no-right, .app.wide { grid-template-columns: min(260px, 40vw) minmax(0, 1fr) 0; }
   .app.rail { grid-template-columns: 56px minmax(0, 1fr) 0; }
   .app .right { display: none; }
 }
@@ -271,7 +273,7 @@ textarea:focus { outline: none; }
 @media (max-width: 1180px) { .plug-grid, .plug-grid.two { grid-template-columns: 1fr; } }
 .plate {
   background: var(--layer-1); border: .5px solid var(--l1); border-radius: var(--r-lg);
-  padding: 14px; display: flex; flex-direction: column; gap: 10px; min-height: 120px;
+  padding: 14px; display: flex; flex-direction: column; gap: 10px; min-height: 120px; min-width: 0;
 }
 .plate-title { font-size: 12px; letter-spacing: .4px; text-transform: uppercase; color: var(--text-cap); font-weight: 500; }
 .plate-title-row { display: flex; align-items: center; justify-content: space-between; }
@@ -279,9 +281,10 @@ textarea:focus { outline: none; }
 .cardlist { display: flex; flex-direction: column; gap: 8px; }
 .pcard {
   background: var(--layer-2); border: .5px solid var(--l1); border-radius: var(--r-md);
-  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; min-width: 0;
 }
-.pcard-head { display: flex; align-items: center; gap: 8px; }
+.pcard-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pcard-tail { display: flex; align-items: center; gap: 8px; }
 .pcard-name { font-size: 14px; font-weight: 500; color: var(--text-1); }
 .pcard-file { font-size: 12px; color: var(--text-dim); font-family: var(--mono); }
 .pcard-desc { font-size: 13px; line-height: 20px; color: var(--text-3); }

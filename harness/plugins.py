@@ -11,11 +11,15 @@ A plugin file looks like this:
 удалять их, ставить из каталога plugins/catalog.json и скачивать по URL.
 """
 import ast
+import hashlib
 import importlib.util
 import json
 import os
 import re
+import subprocess
+import sys
 import threading
+import time
 
 from . import permissions
 from .config import app_root, load as load_cfg, save as save_cfg
@@ -159,8 +163,9 @@ def install_code(code, fname):
     scan(force=True)
     info = PLUGINS.get(fname) or {}
     if info.get("error"):
-        return {"ok": False, "error": info["error"], "file": fname, **status()}
-    return {"ok": True, "file": fname, "name": info.get("name"), "tools": info.get("tools") or [], **status()}
+        return {"ok": False, "error": info["error"], "file": fname, "tools": [], **status()}
+    return {**status(), "ok": True, "file": fname, "name": info.get("name"),
+            "tools": list(info.get("tools") or [])}
 
 
 def install_url(url):
@@ -389,29 +394,42 @@ def create_plugin(name, code, desc="", author="", publish=False, tags=None):
         return res
 
     published_entry = None
+    publish_error = ""
     if publish:
         pub_res = publish_to_workshop(
             fname_or_name=fname,
             author=author or "Пользователь LocalHarness",
             desc=desc,
             tags=tags,
+            name_hint=clean_name,
         )
         if pub_res.get("ok"):
             published_entry = pub_res.get("entry")
+        else:
+            publish_error = pub_res.get("error") or "не удалось опубликовать в Мастерскую"
+
+    installed_name = str(res.get("name") or "").strip()
+    name_warning = ""
+    if installed_name and installed_name != clean_name:
+        name_warning = (f"В коде NAME = \"{installed_name}\", а файл сохранён как {fname}. "
+                        f"Приведи NAME к \"{clean_name}\", чтобы имена совпадали.")
 
     return {
         "ok": True,
         "name": clean_name,
         "file": fname,
         "tools": res.get("tools", []),
-        "published": bool(publish),
+        "published": bool(published_entry),
         "published_entry": published_entry,
+        "publish_error": publish_error,
+        "name_warning": name_warning,
         "security": vt_res,
         "sha256": vt_res.get("sha256"),
     }
 
 
-def publish_to_workshop(fname_or_name, author="Пользователь LocalHarness", desc="", tags=None):
+def publish_to_workshop(fname_or_name, author="Пользователь LocalHarness", desc="", tags=None,
+                        name_hint=None):
     """Публикация установленного плагина в Мастерскую сообщества (создано в LocalHarness)."""
     from . import virustotal
     src_path = _resolve_plugin_file(fname_or_name)
@@ -439,7 +457,7 @@ def publish_to_workshop(fname_or_name, author="Пользователь LocalHar
     # Parse metadata from AST
     tools = []
     docstring = ""
-    plugin_name = os.path.splitext(os.path.basename(src_path))[0]
+    parsed_name = os.path.splitext(os.path.basename(src_path))[0]
     try:
         tree = ast.parse(code)
         docstring = ast.get_docstring(tree) or ""
@@ -448,7 +466,7 @@ def publish_to_workshop(fname_or_name, author="Пользователь LocalHar
                 for target in node.targets:
                     if isinstance(target, ast.Name):
                         if target.id == "NAME" and isinstance(node.value, ast.Constant):
-                            plugin_name = str(node.value.value)
+                            parsed_name = str(node.value.value)
                         elif target.id == "TOOLS" and isinstance(node.value, ast.List):
                             for elt in node.value.elts:
                                 if isinstance(elt, ast.Dict):
@@ -458,7 +476,10 @@ def publish_to_workshop(fname_or_name, author="Пользователь LocalHar
     except Exception:
         pass
 
-    fname = f"{plugin_name}.py"
+    plugin_name = str(name_hint or "").strip() or parsed_name
+    plugin_id = re.sub(r"[^a-zA-Z0-9_]", "_", plugin_name).strip("_").lower() or "plugin"
+    display_name = re.sub(r"[\x00-\x1f<>/\\]", "", str(plugin_name)).strip() or plugin_id
+    fname = f"{plugin_id}.py"
     os.makedirs(WORKSHOP_DIR, exist_ok=True)
     dst_path = os.path.join(WORKSHOP_DIR, fname)
     with open(dst_path, "w", encoding="utf-8") as fh:
@@ -487,21 +508,23 @@ def publish_to_workshop(fname_or_name, author="Пользователь LocalHar
     sha256 = virustotal.sha256_of(code)
 
     entry = {
-        "id": plugin_name,
-        "name": plugin_name,
+        "id": plugin_id,
+        "name": display_name,
         "version": "1.0",
         "author": author or "Пользователь LocalHarness",
-        "desc": desc or docstring or f"Пользовательский плагин {plugin_name}, созданный в LocalHarness",
+        "desc": desc or docstring or f"Пользовательский плагин {display_name}, созданный в LocalHarness",
         "file": fname,
         "tools": tools,
-        "vt_status": "clean",
-        "vt_score": "0/72",
+        "vt_status": "verified_clean" if vt_res.get("vt", {}).get("queried_api") else "static_audit",
+        "vt_score": vt_res.get("score") if vt_res.get("vt", {}).get("queried_api") else "—",
         "sha256": sha256,
         "tags": final_tags,
         "made_in_localharness": True,
     }
 
-    idx = next((i for i, e in enumerate(entries) if str(e.get("id")) == plugin_name or str(e.get("name")) == plugin_name), -1)
+    idx = next((i for i, e in enumerate(entries)
+                if str(e.get("id")) in (plugin_id, display_name, plugin_name)
+                or str(e.get("name")) in (plugin_id, display_name, plugin_name)), -1)
     if idx >= 0:
         entries[idx] = entry
     else:
@@ -607,8 +630,51 @@ def get_plugin_code(fname):
     }
 
 
-def test_plugin_tool(tool_name, args=None, cfg=None):
-    """Выполнить вызов инструмента плагина в тестовом режиме и вернуть результат."""
+TOOL_SANDBOX_TIMEOUT = 30
+
+
+def _tool_source(tool_name):
+    """Файл плагина, в котором зарегистрирован инструмент (только включённые)."""
+    scan()
+    item = REGISTRY.get(tool_name)
+    if not item:
+        return None
+    module = item.get("module")
+    for info in PLUGINS.values():
+        stem = os.path.splitext(info.get("file") or "")[0]
+        if module not in (info.get("name"), stem):
+            continue
+        if info.get("error") or not info.get("enabled", True):
+            return None
+        path = os.path.join(PLUGIN_DIR, info.get("file") or "")
+        return path if os.path.isfile(path) else None
+    return None
+
+
+def _sandbox_command():
+    root = app_root()
+    if getattr(sys, "frozen", False):
+        return [sys.executable, "plugin-run"], root
+    return [sys.executable, "-m", "harness.plugin_sandbox"], root
+
+
+def _parse_sandbox(stdout):
+    from .plugin_sandbox import MARKER
+    payload = None
+    logs = []
+    for line in (stdout or "").splitlines():
+        if line.startswith(MARKER):
+            try:
+                payload = json.loads(line[len(MARKER):])
+            except ValueError:
+                payload = None
+        else:
+            logs.append(line)
+    return payload, "\n".join(logs).strip()
+
+
+def test_plugin_tool(tool_name, args=None, cfg=None, timeout=TOOL_SANDBOX_TIMEOUT):
+    """Вызвать инструмент плагина в отдельном процессе с ограничением по времени."""
     tool_name = str(tool_name or "").strip()
     if not tool_name:
         return {"ok": False, "error": "Не указано имя инструмента для тестирования"}
@@ -622,22 +688,51 @@ def test_plugin_tool(tool_name, args=None, cfg=None):
     elif not isinstance(args, dict):
         args = {}
 
-    import time
+    src = _tool_source(tool_name)
+    if not src:
+        return {"ok": False, "error": f"Инструмент '{tool_name}' не найден среди включённых плагинов"}
+
+    try:
+        timeout = max(1.0, float(timeout))
+    except (TypeError, ValueError):
+        timeout = float(TOOL_SANDBOX_TIMEOUT)
+
+    cmd, cwd = _sandbox_command()
+    payload = json.dumps({"file": src, "tool": tool_name, "args": args, "cfg": cfg}, ensure_ascii=False)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    env["PYTHONUTF8"] = "1"
+
     t0 = time.time()
-    res = call(tool_name, cfg, args)
-    duration_ms = round((time.time() - t0) * 1000, 2)
+    try:
+        proc = subprocess.run(
+            cmd, input=payload, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=timeout, cwd=cwd, env=env,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "sandboxed": True,
+                "error": f"Инструмент не уложился в {int(timeout)} с — процесс остановлен",
+                "duration_ms": round((time.time() - t0) * 1000, 1)}
+    except OSError as exc:
+        return {"ok": False, "error": f"Не удалось запустить изолированный процесс: {exc}"}
 
-    if res is None:
-        return {
-            "ok": False,
-            "error": f"Инструмент '{tool_name}' не найден среди зарегистрированных инструментов плагинов",
-        }
-
+    duration_ms = round((time.time() - t0) * 1000, 1)
+    parsed, output = _parse_sandbox(proc.stdout)
+    if not parsed:
+        tail = (output or (proc.stderr or "").strip())[-600:]
+        return {"ok": False, "sandboxed": True, "duration_ms": duration_ms,
+                "error": "Плагин завершился без результата" + (": " + tail if tail else "")}
+    if not parsed.get("ok"):
+        return {"ok": False, "sandboxed": True, "duration_ms": duration_ms,
+                "error": parsed.get("error") or "Инструмент завершился с ошибкой"}
     return {
         "ok": True,
         "tool": tool_name,
-        "result": res,
+        "result": parsed.get("result"),
         "duration_ms": duration_ms,
+        "sandboxed": True,
+        "output": output[-4000:] if output else "",
     }
 
 
@@ -687,23 +782,29 @@ def generate_plugin_ai(prompt, cfg=None):
     except Exception:
         pass
 
+    generated_by_ai = bool(code)
+
     if not code:
-        clean_slug = re.sub(r"[^a-zA-Z0-9_]", "_", prompt.lower()[:30]).strip("_") or "custom_plugin"
-        code = f'''"""Плагин: {prompt}"""
+        safe_desc = " ".join(str(prompt).split())[:160]
+        safe_desc = safe_desc.replace("\\", "\\\\").replace('"', '\\"')
+        slug_src = re.sub(r"[^a-zA-Z0-9_]+", "_", str(prompt).lower()).strip("_")
+        digest = hashlib.sha256(str(prompt).encode("utf-8")).hexdigest()[:6]
+        clean_slug = (slug_src[:24].strip("_") or "custom_plugin") + "_" + digest
+        code = f'''"""Плагин: {safe_desc}"""
 import json
 import re
 
 NAME = "{clean_slug}"
 
 def run_task(cfg, args):
-    """Выполняет задачу: {prompt}."""
+    """Выполняет задачу: {safe_desc}."""
     input_val = args.get("input_val", "")
-    return {{"ok": True, "result": f"Обработано: {{input_val}}", "task": "{prompt}"}}
+    return {{"ok": True, "result": f"Обработано: {{input_val}}", "task": "{safe_desc}"}}
 
 TOOLS = [
     {{
         "name": "run_task",
-        "desc": "{prompt}",
+        "desc": "{safe_desc}",
         "params": {{
             "input_val": ("string", "Входные данные для обработки")
         }},
@@ -742,6 +843,9 @@ TOOLS = [
         "code": code,
         "tools": tools,
         "security": sec,
+        "generated_by_ai": generated_by_ai,
+        "warning": "" if generated_by_ai else
+                   "Локальная модель недоступна — собран шаблон. Отредактируй код под задачу или повтори позже.",
     }
 
 
