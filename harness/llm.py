@@ -46,10 +46,20 @@ class SpeedMeter:
         now = now or time.time()
         gen = max(0.0, now - (self.first or now))
         tokens = self.tokens if self.tokens is not None else max(1, int(round(self.chars / CHARS_PER_TOKEN)))
-        return {"tokens": tokens, "chars": self.chars, "exact": self.tokens is not None,
+        snap = {"tokens": tokens, "chars": self.chars, "exact": self.tokens is not None,
                 "seconds": round(now - self.t0, 2), "gen_seconds": round(gen, 2),
                 "ttft": round(self.first - self.t0, 2) if self.first else None,
                 "tps": round(tokens / gen, 1) if gen >= 0.5 else None}
+        try:
+            from . import thermal
+            th = thermal.get_cached_thermal()
+            if th and th.get("temp_c") is not None:
+                snap["gpu_temp"] = th.get("temp_c")
+                snap["gpu_status"] = th.get("status")
+                snap["gpu_throttled"] = th.get("throttle_active", False)
+        except Exception:
+            pass
+        return snap
 
     def finish(self):
         if self.cb:
@@ -331,6 +341,10 @@ class LLM:
             return message
         splitter = ThinkSplitter(self.reason_cb)
         try:
+            from . import thermal as thermal_mod
+        except Exception:
+            thermal_mod = None
+        try:
             for raw in resp.iter_lines(decode_unicode=True):
                 if not raw or not raw.startswith("data:"):
                     continue
@@ -341,6 +355,10 @@ class LLM:
                     chunk = json.loads(data)
                 except ValueError:
                     continue
+                if thermal_mod:
+                    t_delay = thermal_mod.get_stream_delay(self.cfg)
+                    if t_delay > 0:
+                        time.sleep(t_delay)
                 meter.usage(chunk.get("usage") or {})
                 choices = chunk.get("choices") or []
                 if not choices:

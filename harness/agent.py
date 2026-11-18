@@ -682,6 +682,18 @@ class Agent:
                                   "before": toks(before_units), "after": toks(_estimate_units(folded))})
             self.bridge.emit(self._context_event(folded, protocol))
             try:
+                from . import thermal as thermal_mod
+                th = thermal_mod.get_thermal_status(self.cfg)
+                if th.get("status") == "critical" and not getattr(self, "_warned_thermal_crit", False):
+                    self._warned_thermal_crit = True
+                    self.bridge.emit({
+                        "type": "notice",
+                        "text": "🔥 Внимание: GPU перегрета (%s°C)! Рекомендуется остудить систему." % th.get("temp_c", "?"),
+                        "thermal": th,
+                    })
+            except Exception:
+                pass
+            try:
                 pump = ReasonPump(self.bridge, limit=80, interval=0.12)
                 self.bridge.set_stop_callback(self.llm.stop)
                 raw = self.llm.complete(folded, tools=self._tools_for(protocol), protocol=protocol,

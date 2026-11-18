@@ -1736,3 +1736,270 @@ input.search-input:focus { outline: none; border-color: var(--accent); backgroun
   .welcome-chips { margin-top: 6px; gap: 5px; }
   .welcome-chip { padding: 5px 10px; font-size: 11.5px; line-height: 16px; }
 }
+
+/* ---------- GPU Thermal Protection & Cooldown ---------- */
+.gpu-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding: 0 9px;
+  font-size: 11.5px;
+  font-weight: 500;
+  border-radius: 999px;
+  background: rgba(34, 197, 94, .08);
+  border: 1px solid rgba(34, 197, 94, .3);
+  color: #86efac;
+  cursor: pointer;
+  transition: all .2s ease;
+  user-select: none;
+}
+.gpu-pill:hover {
+  background: rgba(34, 197, 94, .16);
+  border-color: rgba(34, 197, 94, .5);
+}
+.gpu-pill.warm {
+  background: rgba(234, 179, 8, .1);
+  border-color: rgba(234, 179, 8, .4);
+  color: #fde047;
+}
+.gpu-pill.warm:hover {
+  background: rgba(234, 179, 8, .18);
+}
+.gpu-pill.hot {
+  background: rgba(249, 115, 22, .15);
+  border-color: rgba(249, 115, 22, .55);
+  color: #fdba74;
+}
+.gpu-pill.hot:hover {
+  background: rgba(249, 115, 22, .24);
+}
+.gpu-pill.critical {
+  background: rgba(239, 68, 68, .22);
+  border-color: rgba(239, 68, 68, .75);
+  color: #fca5a5;
+  animation: thermalPulse 1.4s infinite ease-in-out;
+}
+@keyframes thermalPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(239, 68, 68, .5); }
+  50% { box-shadow: 0 0 0 6px rgba(239, 68, 68, 0); }
+}
+
+.danger-text { color: #f87171 !important; }
+.danger-btn { background: #ef4444 !important; color: #fff !important; }
+.danger-btn:hover { background: #dc2626 !important; }
+
+/* Thermal settings controls */
+.thermal-cfg-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 10px;
+  margin: 12px 0 8px;
+}
+.tcfg-item {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.tcfg-item label {
+  font-size: 11.5px;
+  color: var(--text-3);
+}
+.thermal-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin: 10px 0;
+}
+
+/* Thermal Modal Metrics */
+.thermal-modal-body {
+  padding: 18px 22px 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.tmetric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+}
+.tmetric-card {
+  background: rgba(255, 255, 255, .04);
+  border: 1px solid var(--l1);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.tmetric-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-cap);
+  margin-bottom: 4px;
+}
+.tmetric-val {
+  font-size: 20px;
+  font-weight: 700;
+  color: #fff;
+  font-family: var(--font-mono);
+}
+.tmetric-sub {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 3px;
+}
+.thermal-modal-desc {
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--text-2);
+  background: rgba(0, 0, 0, .2);
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--l0);
+}
+.thermal-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+/* Critical Emergency Alert Modal */
+.thermal-critical-modal {
+  max-width: 460px;
+  border: 1px solid rgba(239, 68, 68, .5);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .6), 0 0 30px rgba(239, 68, 68, .2);
+}
+.thermal-alert-body {
+  padding: 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+.alert-flame-icon {
+  font-size: 42px;
+  line-height: 1;
+  animation: flameWiggle 1s infinite alternate ease-in-out;
+}
+@keyframes flameWiggle {
+  from { transform: scale(1) rotate(-3deg); }
+  to { transform: scale(1.1) rotate(3deg); }
+}
+.alert-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: #fca5a5;
+}
+.alert-temp-badge {
+  font-size: 32px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  color: #ef4444;
+  background: rgba(239, 68, 68, .12);
+  padding: 4px 18px;
+  border-radius: 14px;
+  border: 1px solid rgba(239, 68, 68, .3);
+}
+.alert-message {
+  font-size: 13px;
+  line-height: 19px;
+  color: var(--text-2);
+  margin: 4px 0 12px;
+}
+.alert-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: 100%;
+}
+.alert-actions button {
+  width: 100%;
+  height: 40px;
+}
+
+/* Cooldown Modal */
+.thermal-cooldown-modal {
+  max-width: 440px;
+  border: 1px solid rgba(56, 189, 248, .3);
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .6), 0 0 30px rgba(56, 189, 248, .15);
+}
+.thermal-cooldown-body {
+  padding: 24px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.cooldown-timer-display {
+  font-size: 48px;
+  font-weight: 800;
+  font-family: var(--font-mono);
+  color: #38bdf8;
+  letter-spacing: 2px;
+  text-shadow: 0 0 16px rgba(56, 189, 248, .4);
+}
+.cooldown-tracker-row {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  width: 100%;
+}
+.ctrack-box {
+  background: rgba(255, 255, 255, .04);
+  border: 1px solid var(--l1);
+  border-radius: 10px;
+  padding: 8px 14px;
+  min-width: 90px;
+}
+.ctrack-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-cap);
+  margin-bottom: 2px;
+}
+.ctrack-value {
+  font-size: 16px;
+  font-weight: 700;
+  font-family: var(--font-mono);
+  color: #fff;
+}
+.ctrack-value.target { color: #86efac; }
+.ctrack-arrow {
+  color: var(--text-3);
+  font-size: 18px;
+}
+.cooldown-pbar-bg {
+  width: 100%;
+  height: 8px;
+  background: rgba(255, 255, 255, .08);
+  border-radius: 999px;
+  overflow: hidden;
+  margin: 6px 0;
+}
+.cooldown-pbar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #38bdf8, #818cf8);
+  border-radius: 999px;
+  transition: width .5s ease;
+}
+.cooldown-sub-note {
+  font-size: 12.5px;
+  color: var(--text-3);
+  margin: 0;
+  line-height: 18px;
+}
+.cooldown-actions-row {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+  margin-top: 6px;
+}
+.cooldown-actions-row button {
+  flex: 1;
+  height: 38px;
+}

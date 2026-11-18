@@ -58,6 +58,12 @@ DEFAULTS = {
     "lan_access": False,
     "game_failsafe": True,
     "virustotal_api_key": "",
+    "gpu_thermal_enabled": True,
+    "gpu_temp_warn": 80,
+    "gpu_temp_throttle": 85,
+    "gpu_temp_critical": 95,
+    "gpu_cooldown_duration": 180,
+    "gpu_target_temp": 70,
     "remote": {
         "auto_start": False,
         "code_ttl": 28800,

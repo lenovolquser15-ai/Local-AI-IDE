@@ -69,6 +69,10 @@
       </div>
       <span class="grow"></span>
       <button id="headUnloadBtn" class="ghost small-btn" title="Выгрузить модель из памяти LM Studio" hidden>⏏ Выгрузить</button>
+      <button id="gpuThermalPill" class="gpu-pill small-btn" type="button" title="Температура видеокарты" hidden>
+        <span class="gpu-pill-ico" id="gpuPillIco">❄️</span>
+        <span class="gpu-pill-txt" id="gpuPillTxt">--°C</span>
+      </button>
       <span class="stat" id="speed" title="скорость генерации"></span>
       <span class="stat" id="stat"></span>
       <button id="stopBtn" class="danger" disabled>Стоп</button>
@@ -555,6 +559,41 @@
         <div id="remoteHint" class="page-sub"></div>
       </div>
     </div>
+    <div class="settings-block" id="gpuThermalBlock">
+      <div class="plate-title-row">
+        <div class="plate-title">Защита видеокарты (GPU Thermal Protection)</div>
+        <span class="sec-chip" id="gpuStatusChip">опрос...</span>
+      </div>
+      <label class="autostart-label"><input id="gpuThermalEnabled" type="checkbox" checked> Включить мониторинг температуры и термо-троттлинг</label>
+      <div class="page-sub">При нагреве GPU выше порога скорость генерации токенов плавно замедляется для охлаждения чипа. При критическом нагреве (100°C+) система предложит выгрузить модель из VRAM и подождать несколько минут.</div>
+      <div id="gpuThermalSub">
+        <div class="thermal-cfg-grid">
+          <div class="tcfg-item">
+            <label for="gpuTempWarn">Предупреждение (°C):</label>
+            <input type="number" id="gpuTempWarn" class="field small-field" min="60" max="95" value="80">
+          </div>
+          <div class="tcfg-item">
+            <label for="gpuTempThrottle">Троттлинг токенов (°C):</label>
+            <input type="number" id="gpuTempThrottle" class="field small-field" min="65" max="100" value="85">
+          </div>
+          <div class="tcfg-item">
+            <label for="gpuTempCritical">Критический порог (°C):</label>
+            <input type="number" id="gpuTempCritical" class="field small-field" min="80" max="115" value="95">
+          </div>
+          <div class="tcfg-item">
+            <label for="gpuCooldownDuration">Охлаждение (мин):</label>
+            <input type="number" id="gpuCooldownDuration" class="field small-field" min="1" max="15" value="3">
+          </div>
+        </div>
+        <div class="thermal-action-row">
+          <button id="gpuThermalSaveBtn" class="ghost" type="button">Сохранить пороги</button>
+          <button id="gpuThermalTestWarnBtn" class="ghost" type="button" title="Проверить предупреждение 88°C">Тест 88°C ⚠️</button>
+          <button id="gpuThermalTestCritBtn" class="ghost danger-text" type="button" title="Проверить аварийный перегрев 102°C">Тест 102°C 🔥</button>
+          <button id="gpuThermalResetSimBtn" class="ghost" type="button" title="Вернуться к реальному датчику">Реальный датчик</button>
+        </div>
+        <div id="gpuStatusText" class="page-sub">Датчик: опрос...</div>
+      </div>
+    </div>
     <div class="settings-block">
       <div class="plate-title">Игровой режим и безопасность</div>
       <label class="autostart-label"><input id="gameFailsafeEnabled" type="checkbox" checked> Экстренный предохранитель Failsafe</label>
@@ -600,6 +639,94 @@
   </div>
   <div class="modal-body">
     <pre id="codeDialogText" class="code-modal-pre"></pre>
+  </div>
+</dialog>
+<dialog id="gpuThermalDialog" class="code-modal thermal-modal">
+  <div class="modal-head">
+    <div class="modal-head-text">
+      <span class="modal-title" id="gpuDialogTitle">Мониторинг видеокарты</span>
+      <span class="modal-meta" id="gpuDialogMeta">GPU</span>
+    </div>
+    <span class="grow"></span>
+    <button id="gpuDialogClose" class="icon" type="button" title="Закрыть">✕</button>
+  </div>
+  <div class="modal-body thermal-modal-body">
+    <div class="tmetric-grid">
+      <div class="tmetric-card">
+        <div class="tmetric-title">Температура</div>
+        <div class="tmetric-val" id="tmetricTemp">--°C</div>
+        <div class="tmetric-sub" id="tmetricTempSub">Норма</div>
+      </div>
+      <div class="tmetric-card">
+        <div class="tmetric-title">Загрузка чипа</div>
+        <div class="tmetric-val" id="tmetricUtil">--%</div>
+        <div class="tmetric-sub" id="tmetricUtilSub">GPU Load</div>
+      </div>
+      <div class="tmetric-card">
+        <div class="tmetric-title">Видеопамять VRAM</div>
+        <div class="tmetric-val" id="tmetricVram">-- / -- ГБ</div>
+        <div class="tmetric-sub" id="tmetricVramSub">Занято / Всего</div>
+      </div>
+      <div class="tmetric-card">
+        <div class="tmetric-title">Режим охлаждения</div>
+        <div class="tmetric-val" id="tmetricGovernor">В норме</div>
+        <div class="tmetric-sub" id="tmetricGovernorSub">Троттлинг не требуется</div>
+      </div>
+    </div>
+    <div class="thermal-modal-desc" id="thermalModalDesc">
+      Датчик работает штатно.
+    </div>
+    <div class="thermal-modal-actions">
+      <button id="gpuDialogUnloadBtn" class="ghost danger-text" type="button">❄️ Выгрузить модель и остудить (3 мин)</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="gpuCriticalDialog" class="code-modal thermal-critical-modal">
+  <div class="modal-body thermal-alert-body">
+    <div class="alert-flame-icon">🔥</div>
+    <h3 class="alert-title">Критическая температура видеокарты!</h3>
+    <div class="alert-temp-badge"><span id="gpuCritTempDisplay">101</span>°C</div>
+    <p class="alert-message">
+      Температура GPU превысила безопасный порог. Для защиты видеокарты от перегрева и аварийного отключения рекомендуется немедленно выгрузить модель из VRAM и дать кулерам охладить систему.
+    </p>
+    <div class="alert-actions">
+      <button id="gpuCriticalUnloadBtn" class="primary danger-btn" type="button">❄️ Выгрузить модель и остудить (3 мин)</button>
+      <button id="gpuCriticalDismissBtn" class="ghost" type="button">Отложить на 2 мин</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="gpuCooldownDialog" class="code-modal thermal-cooldown-modal">
+  <div class="modal-head">
+    <div class="modal-head-text">
+      <span class="modal-title">❄️ Охлаждение видеокарты</span>
+      <span class="modal-meta">модель выгружена из памяти</span>
+    </div>
+    <span class="grow"></span>
+    <button id="gpuCooldownClose" class="icon" type="button" title="Закрыть">✕</button>
+  </div>
+  <div class="modal-body thermal-cooldown-body">
+    <div class="cooldown-timer-display" id="gpuCooldownTimerDisplay">03:00</div>
+    <div class="cooldown-tracker-row">
+      <div class="ctrack-box">
+        <span class="ctrack-label">Текущая t°</span>
+        <span class="ctrack-value" id="gpuCooldownCurTemp">--°C</span>
+      </div>
+      <div class="ctrack-arrow">➔</div>
+      <div class="ctrack-box">
+        <span class="ctrack-label">Целевая t°</span>
+        <span class="ctrack-value target" id="gpuCooldownTargetTemp">&lt; 70°C</span>
+      </div>
+    </div>
+    <div class="cooldown-pbar-bg">
+      <div class="cooldown-pbar-fill" id="gpuCooldownPbarFill" style="width: 0%;"></div>
+    </div>
+    <p class="cooldown-sub-note" id="gpuCooldownSubNote">
+      Модель выгружена из VRAM. Вентиляторы охлаждают видеокарту...
+    </p>
+    <div class="cooldown-actions-row">
+      <button id="gpuCooldownCancelBtn" class="ghost" type="button">Прервать охлаждение</button>
+      <button id="gpuCooldownDoneBtn" class="primary" type="button" hidden>Готово, продолжить работу</button>
+    </div>
   </div>
 </dialog>
 <script src="/app.js"></script>

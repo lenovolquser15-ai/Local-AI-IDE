@@ -337,6 +337,8 @@ function showSpeed(ev) {
   bits.push((ev.tokens || 0) + ' ток');
   if (ev.ttft != null) bits.push('старт ' + ev.ttft + ' с');
   if (ev.exact === false) bits.push('~оценка');
+  if (ev.gpu_throttled) bits.push('GPU ' + (ev.gpu_temp != null ? ev.gpu_temp : '') + '°C 🧊 троттлинг');
+  else if (ev.gpu_temp && (ev.gpu_status === 'hot' || ev.gpu_status === 'warm')) bits.push('GPU ' + ev.gpu_temp + '°C');
   $('#speed').textContent = bits.join(' · ');
   paintUsage(lastSpeed, null, null);
 }
@@ -824,6 +826,7 @@ async function refreshState() {
   }
   const secNote = $('#plugSecNote');
   if (secNote) secNote.textContent = vtOn ? 'аудит кода + VirusTotal' : 'аудит кода включён';
+  renderThermalState(st.gpu_thermal);
   $('#toolsChip').textContent = 'инструментов: ' + (st.tools || []).length + ' · профиль ' + (st.tool_profile || 'core');
   $('#toolsChip').title = (st.tools || []).join(', ');
   fillSelect($('#provider'), Object.keys(st.providers || {}).map((k) => [k, st.providers[k]]), st.provider);
@@ -2675,6 +2678,253 @@ $('#saveSystemPrompt').onclick = async () => {
   catch (err) { alert(err.message); }
   finally { btn.disabled = false; }
 };
+
+/* ---------- GPU Thermal Protection & Cooldown ---------- */
+let thermalSnoozeUntil = 0;
+let cooldownTimerId = null;
+let cooldownTotalSec = 180;
+let cooldownTargetT = 70;
+
+function fmtTimer(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+}
+
+function renderThermalState(th) {
+  if (!th) return;
+  const pill = $('#gpuThermalPill');
+  if (pill) {
+    if (th.has_gpu && th.temp_c != null) {
+      pill.hidden = false;
+      const ico = th.status === 'critical' ? '🔥' : (th.status === 'hot' ? '⚠️' : (th.status === 'warm' ? '🌡️' : '❄️'));
+      $('#gpuPillIco').textContent = ico;
+      $('#gpuPillTxt').textContent = th.temp_c + '°C';
+      pill.className = 'gpu-pill small-btn ' + (th.status === 'critical' ? 'critical' : (th.status === 'hot' ? 'hot' : (th.status === 'warm' ? 'warm' : 'ok')));
+      pill.title = (th.gpu_name ? th.gpu_name + ' · ' : '') + th.status_label + (th.throttle_active ? ' · троттлинг активен' : '');
+    } else {
+      pill.hidden = true;
+    }
+  }
+
+  // Settings block
+  if ($('#gpuThermalEnabled') && th.thresholds) {
+    if (document.activeElement !== $('#gpuTempWarn') &&
+        document.activeElement !== $('#gpuTempThrottle') &&
+        document.activeElement !== $('#gpuTempCritical') &&
+        document.activeElement !== $('#gpuCooldownDuration')) {
+      $('#gpuThermalEnabled').checked = th.thresholds.enabled !== false;
+      $('#gpuTempWarn').value = th.thresholds.warn || 80;
+      $('#gpuTempThrottle').value = th.thresholds.throttle || 85;
+      $('#gpuTempCritical').value = th.thresholds.critical || 95;
+      $('#gpuCooldownDuration').value = Math.round((th.thresholds.duration || 180) / 60);
+    }
+  }
+  const sChip = $('#gpuStatusChip');
+  if (sChip) {
+    sChip.textContent = th.status_label || 'опрос...';
+    sChip.className = 'sec-chip ' + (th.status === 'normal' ? 'ok' : (th.status === 'warm' ? 'warn' : (th.status === 'critical' ? 'err' : '')));
+  }
+  const sText = $('#gpuStatusText');
+  if (sText) {
+    sText.textContent = (th.has_gpu ? th.gpu_name + ' · ' : '') + (th.message || '');
+  }
+
+  // Check critical condition
+  if (th.status === 'critical') {
+    const isCooldownOpen = $('#gpuCooldownDialog') && $('#gpuCooldownDialog').open;
+    if (!isCooldownOpen && Date.now() > thermalSnoozeUntil) {
+      const critDiag = $('#gpuCriticalDialog');
+      if (critDiag && !critDiag.open) {
+        $('#gpuCritTempDisplay').textContent = th.temp_c != null ? th.temp_c : '100+';
+        critDiag.showModal();
+      }
+    }
+  }
+}
+
+async function startGpuCooldown(durationSec, targetTemp) {
+  durationSec = Number(durationSec) || 180;
+  targetTemp = Number(targetTemp) || 70;
+  cooldownTotalSec = durationSec;
+  cooldownTargetT = targetTemp;
+
+  const res = await api('/api/thermal/cooldown/start', {
+    duration: durationSec,
+    target_temp: targetTemp,
+    unload: true
+  });
+
+  const crit = $('#gpuCriticalDialog');
+  if (crit && crit.open) crit.close();
+  const thDiag = $('#gpuThermalDialog');
+  if (thDiag && thDiag.open) thDiag.close();
+
+  const cdiag = $('#gpuCooldownDialog');
+  if (cdiag) {
+    $('#gpuCooldownTimerDisplay').textContent = fmtTimer(durationSec);
+    $('#gpuCooldownTargetTemp').textContent = '< ' + targetTemp + '°C';
+    $('#gpuCooldownCurTemp').textContent = (res && res.current_temp != null ? res.current_temp : '--') + '°C';
+    $('#gpuCooldownPbarFill').style.width = '0%';
+    $('#gpuCooldownSubNote').textContent = 'Модель выгружена из VRAM. Вентиляторы охлаждают видеокарту...';
+    $('#gpuCooldownCancelBtn').hidden = false;
+    $('#gpuCooldownDoneBtn').hidden = true;
+    if (!cdiag.open) cdiag.showModal();
+  }
+
+  if (cooldownTimerId) clearInterval(cooldownTimerId);
+  let remaining = durationSec;
+  cooldownTimerId = setInterval(async () => {
+    remaining--;
+    if (remaining < 0) remaining = 0;
+    if ($('#gpuCooldownTimerDisplay')) {
+      $('#gpuCooldownTimerDisplay').textContent = fmtTimer(remaining);
+      const pct = Math.min(100, Math.round(((durationSec - remaining) / durationSec) * 100));
+      $('#gpuCooldownPbarFill').style.width = pct + '%';
+    }
+
+    if (remaining % 3 === 0 || remaining === 0) {
+      try {
+        const curStatus = await api('/api/thermal/status');
+        if (curStatus) {
+          if ($('#gpuCooldownCurTemp')) {
+            $('#gpuCooldownCurTemp').textContent = (curStatus.temp_c != null ? curStatus.temp_c : '--') + '°C';
+          }
+          if (curStatus.temp_c != null && curStatus.temp_c <= targetTemp && (durationSec - remaining) >= 15) {
+            remaining = 0;
+          }
+        }
+      } catch (e) {}
+    }
+
+    if (remaining <= 0) {
+      clearInterval(cooldownTimerId);
+      cooldownTimerId = null;
+      if ($('#gpuCooldownTimerDisplay')) $('#gpuCooldownTimerDisplay').textContent = '00:00';
+      if ($('#gpuCooldownPbarFill')) $('#gpuCooldownPbarFill').style.width = '100%';
+      if ($('#gpuCooldownSubNote')) {
+        $('#gpuCooldownSubNote').textContent = '✅ Охлаждение завершено! Температура видеокарты снизилась. Можно продолжать работу.';
+      }
+      if ($('#gpuCooldownCancelBtn')) $('#gpuCooldownCancelBtn').hidden = true;
+      if ($('#gpuCooldownDoneBtn')) $('#gpuCooldownDoneBtn').hidden = false;
+      refreshState();
+    }
+  }, 1000);
+}
+
+// Thermal Pill and Dialog click handlers
+if ($('#gpuThermalPill')) {
+  $('#gpuThermalPill').onclick = async () => {
+    try {
+      const th = await api('/api/thermal/status');
+      if (!th) return;
+      $('#gpuDialogMeta').textContent = th.gpu_name || 'GPU';
+      $('#tmetricTemp').textContent = th.temp_c != null ? th.temp_c + '°C' : '—';
+      $('#tmetricTempSub').textContent = th.status_label || 'Норма';
+      $('#tmetricUtil').textContent = th.utilization_pct != null ? th.utilization_pct + '%' : '—';
+      const usedGb = th.vram_used_mb ? (th.vram_used_mb / 1024).toFixed(1) : '0';
+      const totGb = th.vram_total_mb ? (th.vram_total_mb / 1024).toFixed(1) : '0';
+      $('#tmetricVram').textContent = usedGb + ' / ' + totGb + ' ГБ';
+      $('#tmetricGovernor').textContent = th.throttle_active ? 'Троттлинг 🧊' : 'В норме';
+      $('#tmetricGovernorSub').textContent = th.throttle_active
+        ? ('Задержка: ' + (th.throttle_delay * 1000).toFixed(0) + ' мс/токен')
+        : 'Снижение скорости не требуется';
+      $('#thermalModalDesc').textContent = th.message || 'Датчик работает штатно.';
+      $('#gpuThermalDialog').showModal();
+    } catch (e) {
+      pushNotice('Не удалось прочитать датчики GPU: ' + e.message, 'warn');
+    }
+  };
+}
+if ($('#gpuDialogClose')) $('#gpuDialogClose').onclick = () => $('#gpuThermalDialog').close();
+if ($('#gpuDialogUnloadBtn')) {
+  $('#gpuDialogUnloadBtn').onclick = () => {
+    const dur = (Number($('#gpuCooldownDuration').value) || 3) * 60;
+    startGpuCooldown(dur, 70);
+  };
+}
+
+// Critical Warning handlers
+if ($('#gpuCriticalUnloadBtn')) {
+  $('#gpuCriticalUnloadBtn').onclick = () => {
+    const dur = (Number($('#gpuCooldownDuration').value) || 3) * 60;
+    startGpuCooldown(dur, 70);
+  };
+}
+if ($('#gpuCriticalDismissBtn')) {
+  $('#gpuCriticalDismissBtn').onclick = () => {
+    thermalSnoozeUntil = Date.now() + 120000;
+    $('#gpuCriticalDialog').close();
+    pushNotice('Предупреждение о перегреве отложено на 2 минуты', 'warn');
+  };
+}
+
+// Cooldown Modal handlers
+if ($('#gpuCooldownCancelBtn')) {
+  $('#gpuCooldownCancelBtn').onclick = async () => {
+    if (cooldownTimerId) {
+      clearInterval(cooldownTimerId);
+      cooldownTimerId = null;
+    }
+    await api('/api/thermal/cooldown/cancel');
+    $('#gpuCooldownDialog').close();
+    pushNotice('Охлаждение прервано', 'warn');
+    refreshState();
+  };
+}
+if ($('#gpuCooldownDoneBtn')) $('#gpuCooldownDoneBtn').onclick = () => $('#gpuCooldownDialog').close();
+if ($('#gpuCooldownClose')) {
+  $('#gpuCooldownClose').onclick = () => {
+    if (cooldownTimerId) {
+      clearInterval(cooldownTimerId);
+      cooldownTimerId = null;
+    }
+    $('#gpuCooldownDialog').close();
+  };
+}
+
+// Settings handlers
+if ($('#gpuThermalSaveBtn')) {
+  $('#gpuThermalSaveBtn').onclick = async () => {
+    const btn = $('#gpuThermalSaveBtn');
+    btn.disabled = true;
+    try {
+      await patchConfig('gpu_thermal_enabled', $('#gpuThermalEnabled').checked);
+      await patchConfig('gpu_temp_warn', Number($('#gpuTempWarn').value) || 80);
+      await patchConfig('gpu_temp_throttle', Number($('#gpuTempThrottle').value) || 85);
+      await patchConfig('gpu_temp_critical', Number($('#gpuTempCritical').value) || 95);
+      await patchConfig('gpu_cooldown_duration', (Number($('#gpuCooldownDuration').value) || 3) * 60);
+      btn.textContent = 'Сохранено';
+      setTimeout(() => { btn.textContent = 'Сохранить пороги'; }, 1200);
+      pushNotice('Пороги термозащиты GPU сохранены', 'ok');
+    } catch (e) {
+      alert(e.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+if ($('#gpuThermalTestWarnBtn')) {
+  $('#gpuThermalTestWarnBtn').onclick = async () => {
+    await api('/api/thermal/simulate', { temp: 88 });
+    await refreshState();
+    pushNotice('Симуляция: GPU 88°C (активен термо-троттлинг)', 'warn');
+  };
+}
+if ($('#gpuThermalTestCritBtn')) {
+  $('#gpuThermalTestCritBtn').onclick = async () => {
+    await api('/api/thermal/simulate', { temp: 102 });
+    await refreshState();
+    pushNotice('Симуляция: GPU 102°C (критический перегрев)', 'bad');
+  };
+}
+if ($('#gpuThermalResetSimBtn')) {
+  $('#gpuThermalResetSimBtn').onclick = async () => {
+    await api('/api/thermal/simulate', { temp: null });
+    await refreshState();
+    pushNotice('Симуляция выключена, опрашивается реальный датчик', 'ok');
+  };
+}
 
 (async function boot() {
   if (localStorage.getItem('lh.rail') === '1') app.classList.add('rail');

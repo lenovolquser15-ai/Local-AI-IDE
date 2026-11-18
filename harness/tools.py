@@ -1350,8 +1350,13 @@ class Toolkit:
             return {"ok": True, "computer": os.environ.get("COMPUTERNAME"), "user": os.environ.get("USERNAME"),
                     "python": sys.version.split()[0], "path_sep": os.sep}
         if action == "gpu":
-            res = self.shell(cmd="nvidia-smi --query-gpu=name,memory.total,memory.used,utilization.gpu --format=csv,noheader", timeout=15)
-            return {"ok": res.get("ok"), "nvidia_smi": res.get("stdout") or res.get("stderr")}
+            res = self.shell(cmd="nvidia-smi --query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total --format=csv,noheader", timeout=15)
+            try:
+                from . import thermal
+                th = thermal.get_thermal_status(self.cfg)
+            except Exception:
+                th = None
+            return {"ok": res.get("ok"), "nvidia_smi": res.get("stdout") or res.get("stderr"), "thermal": th}
         vm = psutil.virtual_memory()
         return {"ok": True, "cpu_pct": psutil.cpu_percent(), "cores": psutil.cpu_count(),
                 "ram_used_pct": vm.percent, "ram_total_gb": round(vm.total / 1073741824, 1),

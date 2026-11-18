@@ -18,6 +18,7 @@ from . import remote
 from . import schemas
 from . import session as session_mod
 from . import sizing as sizing_mod
+from . import thermal as thermal_mod
 from . import vision as vision_mod
 from .agent import Agent, Bridge
 from .config import (DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save, _merge,
@@ -496,11 +497,16 @@ class Handler(BaseHTTPRequestHandler):
                 "lms_loaded": lms_loaded,
                 "model_loaded": bool(lms_loaded),
                 "dns_probe": dns_probe,
+                "gpu_thermal": thermal_mod.get_thermal_status(cfg),
             })
             return
 
         if path == "/api/model/readiness":
             _json_response(self, lms_mod.readiness(load()))
+            return
+
+        if path == "/api/thermal/status":
+            _json_response(self, thermal_mod.get_thermal_status(load()))
             return
 
         if path == "/api/desktop":
@@ -702,6 +708,11 @@ class Handler(BaseHTTPRequestHandler):
             "/api/remote/start": self.handle_remote_start,
             "/api/remote/stop": self.handle_remote_stop,
             "/api/remote/rotate": self.handle_remote_rotate,
+            "/api/thermal/status": self.handle_thermal_status,
+            "/api/thermal/cooldown/start": self.handle_thermal_cooldown_start,
+            "/api/thermal/cooldown/cancel": self.handle_thermal_cooldown_cancel,
+            "/api/thermal/unload": self.handle_thermal_unload,
+            "/api/thermal/simulate": self.handle_thermal_simulate,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -1060,6 +1071,27 @@ class Handler(BaseHTTPRequestHandler):
         hw = sizing_mod.get_hardware_profile()
         estimate = sizing_mod.estimate_model_fit(target, context_length=ctx, hw=hw)
         _json_response(self, {"ok": True, "model": model_name, "estimate": estimate})
+
+    def handle_thermal_status(self, body):
+        _json_response(self, thermal_mod.get_thermal_status(load()))
+
+    def handle_thermal_cooldown_start(self, body):
+        duration = body.get("duration")
+        target_temp = body.get("target_temp")
+        unload = body.get("unload", True)
+        status = thermal_mod.start_cooldown(duration=duration, target_temp=target_temp, unload=unload, cfg=load())
+        _json_response(self, status)
+
+    def handle_thermal_cooldown_cancel(self, body):
+        _json_response(self, thermal_mod.cancel_cooldown())
+
+    def handle_thermal_unload(self, body):
+        _json_response(self, thermal_mod.unload_model(load()))
+
+    def handle_thermal_simulate(self, body):
+        temp = body.get("temp")
+        thermal_mod.set_simulated_temp(temp)
+        _json_response(self, thermal_mod.get_thermal_status(load(), force=True))
 
     def stream_events(self, sid, since):
         self.close_connection = True
