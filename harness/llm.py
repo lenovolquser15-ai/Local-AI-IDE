@@ -304,6 +304,16 @@ class LLM:
 
     def _post(self, body, stream):
         url = self.base + "/chat/completions"
+        try:
+            from . import cluster as cluster_mod
+            from . import thermal as thermal_mod
+            th = thermal_mod.get_cached_thermal(self.cfg)
+            remote_node = cluster_mod.pick_llm_node(self.cfg, th)
+            if remote_node:
+                url = remote_node["url"] + "/chat/completions"
+                body = dict(body, model=remote_node["model"])
+        except Exception:
+            pass
         meter = self.meter
         if not stream:
             resp = requests.post(url, headers=self.headers(), json=body, timeout=(15, 900))

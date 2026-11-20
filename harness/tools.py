@@ -1437,6 +1437,21 @@ class Toolkit:
         return comfyui.generate_image(self.cfg, prompt=prompt, negative_prompt=negative_prompt,
                                       width=width, height=height, steps=steps, seed=seed)
 
+    def cluster_run(self, action="status", kind="compute_bench", items=None, prompt=None, node_url=None, chunks=12, **kw):
+        from . import cluster
+        act = str(action or "status").strip().lower()
+        if act == "status":
+            return cluster.status(self.cfg)
+        if act == "bench":
+            return cluster.run_cluster_benchmark(chunks=chunks or 12)
+        if act == "map":
+            return cluster.map_tasks(kind or "compute_bench", items or [])
+        if act == "llm":
+            if not prompt:
+                return {"ok": False, "error": "нужен prompt для LAN LLM"}
+            return cluster.query_remote_llm(prompt, node_url=node_url)
+        return {"ok": False, "error": "неизвестное действие: %s (status|map|bench|llm)" % act}
+
     def call(self, name, args):
         fn = getattr(self, name, None)
         if fn is None or name.startswith("_") or name in ("call", "cfg", "jobs"):

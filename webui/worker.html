@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>LocalHarness · Wi-Fi Воркер</title>
+<style>
+  :root {
+    --bg: #0c0e14;
+    --card: rgba(255, 255, 255, .045);
+    --line: rgba(255, 255, 255, .1);
+    --text: #f3f4f6;
+    --muted: #9ca3af;
+    --ok: #22c55e;
+    --warn: #f59e0b;
+    --accent: #38bdf8;
+    --danger: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(circle at 20% 0%, rgba(56, 189, 248, .12), transparent 55%), var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    padding: 18px 14px 32px;
+    display: flex;
+    justify-content: center;
+  }
+  .wrap {
+    width: 100%;
+    max-width: 460px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+  .head {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .logo {
+    width: 42px;
+    height: 42px;
+    border-radius: 12px;
+    background: linear-gradient(135deg, #38bdf8, #818cf8);
+    display: grid;
+    place-items: center;
+    font-weight: 800;
+    color: #0b0d12;
+    font-size: 16px;
+    flex: 0 0 42px;
+  }
+  .title { font-size: 18px; font-weight: 700; margin: 0; }
+  .sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+  .pill {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 5px 10px;
+    border-radius: 999px;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid var(--line);
+    background: var(--card);
+  }
+  .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+  .pill.on .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+  .pill.busy .dot { background: var(--accent); box-shadow: 0 0 10px var(--accent); animation: pulse 1s infinite; }
+  .pill.paused .dot { background: var(--warn); }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    backdrop-filter: blur(10px);
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 8px;
+  }
+  .stat {
+    background: rgba(0, 0, 0, .25);
+    border: 1px solid rgba(255, 255, 255, .06);
+    border-radius: 12px;
+    padding: 10px;
+    text-align: center;
+  }
+  .stat-l { font-size: 10.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .4px; }
+  .stat-v { font-size: 19px; font-weight: 700; margin-top: 3px; font-family: ui-monospace, monospace; }
+
+  label.row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 13.5px;
+  }
+  input[type="text"] {
+    width: 100%;
+    height: 40px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: rgba(0, 0, 0, .3);
+    color: var(--text);
+    padding: 0 12px;
+    font-size: 14px;
+  }
+  input[type="range"] { width: 100%; accent-color: var(--accent); }
+  .hint { font-size: 12px; color: var(--muted); line-height: 1.45; }
+
+  .actions { display: flex; gap: 10px; }
+  button {
+    flex: 1;
+    height: 44px;
+    border-radius: 12px;
+    border: 1px solid var(--line);
+    background: var(--card);
+    color: var(--text);
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+  }
+  button.primary {
+    background: linear-gradient(135deg, #38bdf8, #6366f1);
+    color: #0b0d12;
+    border: none;
+  }
+  button.warn { background: rgba(245, 158, 11, .18); border-color: rgba(245, 158, 11, .45); color: #fde68a; }
+  button.danger { background: rgba(239, 68, 68, .18); border-color: rgba(239, 68, 68, .45); color: #fca5a5; }
+
+  .log {
+    background: rgba(0, 0, 0, .35);
+    border: 1px solid rgba(255, 255, 255, .07);
+    border-radius: 12px;
+    padding: 10px 12px;
+    font-family: ui-monospace, monospace;
+    font-size: 11.5px;
+    color: #cbd5e1;
+    max-height: 180px;
+    overflow-y: auto;
+    line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="head">
+    <div class="logo">LH</div>
+    <div>
+      <h1 class="title">Wi-Fi Воркер</h1>
+      <div class="sub" id="hostLabel">Кластер LocalHarness</div>
+    </div>
+    <div class="pill" id="statusPill"><span class="dot"></span><span id="statusTxt">отключён</span></div>
+  </div>
+
+  <div class="card">
+    <div class="stats">
+      <div class="stat"><div class="stat-l">Задач</div><div class="stat-v" id="stDone">0</div></div>
+      <div class="stat"><div class="stat-l">Средн. мс</div><div class="stat-v" id="stAvg">—</div></div>
+      <div class="stat"><div class="stat-l">Батарея</div><div class="stat-v" id="stBat">—</div></div>
+    </div>
+
+    <div>
+      <div class="hint" style="margin-bottom:5px;">Имя устройства в кластере</div>
+      <input type="text" id="devName" placeholder="Мой телефон">
+    </div>
+
+    <div>
+      <label class="row">
+        <span>Нагрузка (потоки CPU)</span>
+        <strong id="threadsVal">1 из 4</strong>
+      </label>
+      <input type="range" id="threadsRange" min="1" max="4" value="1">
+      <div class="hint">1 поток — щадящий режим (телефон почти не греется). Увеличивай, если устройство на зарядке.</div>
+    </div>
+
+    <label class="row">
+      <span>Пауза при заряде &lt; 20%</span>
+      <input type="checkbox" id="batGuard" checked>
+    </label>
+    <label class="row">
+      <span>Не гасить экран (Wake Lock)</span>
+      <input type="checkbox" id="wakeLockChk">
+    </label>
+
+    <div class="actions">
+      <button id="toggleBtn" class="primary" type="button">⚡ Подключиться к кластеру</button>
+      <button id="pauseBtn" class="warn" type="button" hidden>Пауза</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="hint" style="font-weight:600;color:#e5e7eb;">Журнал вычислений</div>
+    <div class="log" id="logBox">Готов к подключению к ПК в локальной Wi-Fi сети…</div>
+  </div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const cores = Math.max(1, navigator.hardwareConcurrency || 4);
+const memGb = navigator.deviceMemory || null;
+const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+const defaultName = /iPhone/i.test(navigator.userAgent) ? 'iPhone'
+  : /iPad/i.test(navigator.userAgent) ? 'iPad'
+  : /Android/i.test(navigator.userAgent) ? 'Android смартфон'
+  : 'Браузер-ПК';
+
+$('#hostLabel').textContent = 'Хост: ' + location.host;
+$('#devName').value = localStorage.getItem('lh.worker.name') || defaultName;
+$('#threadsRange').max = String(cores);
+const initThreads = Math.min(cores, Math.max(1, Number(localStorage.getItem('lh.worker.threads')) || 1));
+$('#threadsRange').value = String(initThreads);
+$('#threadsVal').textContent = initThreads + ' из ' + cores;
+
+let workerId = localStorage.getItem('lh.worker.id') || '';
+let connected = false;
+let paused = false;
+let doneCount = 0;
+let totalMs = 0;
+let activeSlots = 0;
+let batteryPct = null;
+let charging = null;
+let wakeLock = null;
+
+function log(msg) {
+  const box = $('#logBox');
+  const t = new Date().toLocaleTimeString('ru-RU', { hour12: false });
+  box.innerHTML = '[' + t + '] ' + msg + '<br>' + box.innerHTML;
+}
+
+function setStatus(cls, text) {
+  $('#statusPill').className = 'pill ' + cls;
+  $('#statusTxt').textContent = text;
+}
+
+// Inline Web Worker code for safe off-main-thread execution
+const workerCode = `
+async function sha256Hex(str) {
+  const buf = new TextEncoder().encode(String(str));
+  if (self.crypto && self.crypto.subtle) {
+    const hash = await self.crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+  let h = 2166136261;
+  for (let i = 0; i < buf.length; i++) { h ^= buf[i]; h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
+
+self.onmessage = async (e) => {
+  const { id, kind, payload } = e.data;
+  const t0 = performance.now();
+  try {
+    let result = null;
+    if (kind === 'compute_bench') {
+      const iters = Math.max(1000, Math.min(500000, Number(payload.iterations || 40000)));
+      const seed = Number(payload.seed || 1);
+      let acc = 0;
+      for (let i = 1; i <= iters; i++) {
+        acc += Math.sin(i * 0.001 + seed) * Math.cos(i * 0.002);
+      }
+      result = { checksum: Number(acc.toFixed(6)), iterations: iters, seed };
+    } else if (kind === 'hash_batch') {
+      const items = payload.items || [];
+      const hashes = [];
+      for (const item of items) hashes.push(await sha256Hex(item));
+      result = { hashes, count: hashes.length };
+    } else if (kind === 'text_search') {
+      const terms = String(payload.query || '').toLowerCase().split(/\\s+/).filter(Boolean);
+      const docs = payload.docs || [];
+      const matches = [];
+      docs.forEach((doc, idx) => {
+        const text = typeof doc === 'object' ? String(doc.text || '') : String(doc);
+        const low = text.toLowerCase();
+        let score = 0;
+        for (const term of terms) {
+          let pos = 0;
+          while ((pos = low.indexOf(term, pos)) !== -1) { score++; pos += term.length; }
+        }
+        if (score > 0) matches.push({ id: (typeof doc === 'object' && doc.id != null) ? doc.id : idx, score, preview: text.slice(0, 160) });
+      });
+      matches.sort((a, b) => b.score - a.score);
+      result = { matches: matches.slice(0, 10) };
+    } else if (kind === 'json_transform') {
+      const rows = payload.rows || [];
+      const field = payload.field;
+      const op = payload.op || 'count';
+      const vals = rows.map(r => (r && field in r) ? Number(r[field]) : NaN).filter(Number.isFinite);
+      if (op === 'sum') result = { sum: Number(vals.reduce((a, b) => a + b, 0).toFixed(4)), count: vals.length };
+      else if (op === 'avg') result = { avg: vals.length ? Number((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(4)) : 0, count: vals.length };
+      else result = { count: rows.length };
+    } else {
+      throw new Error('unsupported task kind: ' + kind);
+    }
+    self.postMessage({ id, ok: true, result, duration_ms: Math.round((performance.now() - t0) * 10) / 10 });
+  } catch (err) {
+    self.postMessage({ id, ok: false, error: String(err && err.message || err), duration_ms: Math.round((performance.now() - t0) * 10) / 10 });
+  }
+};
+`;
+const workerBlobUrl = URL.createObjectURL(new Blob([workerCode], { type: 'application/javascript' }));
+
+function runTaskInWorker(task) {
+  return new Promise((resolve) => {
+    const w = new Worker(workerBlobUrl);
+    w.onmessage = (e) => { w.terminate(); resolve(e.data); };
+    w.onerror = (err) => { w.terminate(); resolve({ id: task.id, ok: false, error: String(err.message || 'worker error'), duration_ms: 0 }); };
+    w.postMessage(task);
+  });
+}
+
+async function postJson(url, body) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {})
+  });
+  return res.json();
+}
+
+async function initBattery() {
+  if (!navigator.getBattery) return;
+  try {
+    const b = await navigator.getBattery();
+    const upd = () => {
+      batteryPct = Math.round(b.level * 100);
+      charging = b.charging;
+      $('#stBat').textContent = batteryPct + '%' + (charging ? '⚡' : '');
+      if (connected && $('#batGuard').checked && !charging && batteryPct < 20 && !paused) {
+        paused = true;
+        $('#pauseBtn').textContent = 'Продолжить';
+        setStatus('paused', 'пауза (батарея)');
+        log('Автопауза: заряд батареи ниже 20%');
+        sendHeartbeat();
+      }
+    };
+    upd();
+    b.addEventListener('levelchange', upd);
+    b.addEventListener('chargingchange', upd);
+  } catch (e) {}
+}
+
+async function syncWakeLock() {
+  if ($('#wakeLockChk').checked && connected && navigator.wakeLock) {
+    try { wakeLock = await navigator.wakeLock.request('screen'); } catch (e) {}
+  } else if (wakeLock) {
+    try { await wakeLock.release(); } catch (e) {}
+    wakeLock = null;
+  }
+}
+
+async function sendHeartbeat() {
+  if (!connected || !workerId) return;
+  try {
+    await postJson('/api/cluster/heartbeat', {
+      id: workerId,
+      name: $('#devName').value.trim() || defaultName,
+      max_threads: Number($('#threadsRange').value) || 1,
+      battery_pct: batteryPct,
+      charging: charging,
+      paused: paused
+    });
+  } catch (e) {}
+}
+
+async function pollLoop(slotIndex) {
+  while (connected) {
+    const maxT = Number($('#threadsRange').value) || 1;
+    if (paused || slotIndex >= maxT) {
+      await new Promise((r) => setTimeout(r, 800));
+      continue;
+    }
+    try {
+      const res = await fetch('/api/cluster/poll?worker_id=' + encodeURIComponent(workerId) + '&wait=2.0');
+      const data = await res.json();
+      if (!data.ok && data.error === 'worker not registered') {
+        await register();
+        continue;
+      }
+      if (data.task) {
+        activeSlots++;
+        setStatus('busy', 'считает (' + activeSlots + ')');
+        const out = await runTaskInWorker(data.task);
+        await postJson('/api/cluster/result', {
+          task_id: data.task.id,
+          worker_id: workerId,
+          ok: out.ok,
+          result: out.result,
+          error: out.error,
+          duration_ms: out.duration_ms
+        });
+        activeSlots = Math.max(0, activeSlots - 1);
+        if (out.ok) {
+          doneCount++;
+          totalMs += Number(out.duration_ms || 0);
+          $('#stDone').textContent = String(doneCount);
+          $('#stAvg').textContent = Math.round(totalMs / doneCount) + '';
+          log('✓ ' + data.task.kind + ' #' + data.task.id.slice(0, 5) + ' за ' + out.duration_ms + ' мс');
+        } else {
+          log('✗ ' + data.task.kind + ': ' + out.error);
+        }
+        if (connected && !paused && activeSlots === 0) setStatus('on', 'в кластере');
+      }
+    } catch (e) {
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+}
+
+async function register() {
+  const name = $('#devName').value.trim() || defaultName;
+  const maxThreads = Number($('#threadsRange').value) || 1;
+  localStorage.setItem('lh.worker.name', name);
+  localStorage.setItem('lh.worker.threads', String(maxThreads));
+  const res = await postJson('/api/cluster/register', {
+    id: workerId || undefined,
+    name: name,
+    device_type: isMobile ? 'mobile' : 'browser',
+    cores: cores,
+    max_threads: maxThreads,
+    memory_gb: memGb,
+    battery_pct: batteryPct,
+    charging: charging,
+    webgpu: !!navigator.gpu,
+    paused: paused
+  });
+  if (res && res.ok && res.worker) {
+    workerId = res.worker.id;
+    localStorage.setItem('lh.worker.id', workerId);
+  }
+}
+
+let hbTimer = null;
+
+$('#toggleBtn').onclick = async () => {
+  if (!connected) {
+    try {
+      await register();
+      connected = true;
+      paused = false;
+      $('#toggleBtn').textContent = 'Отключиться';
+      $('#toggleBtn').className = 'danger';
+      $('#pauseBtn').hidden = false;
+      $('#pauseBtn').textContent = 'Пауза';
+      setStatus('on', 'в кластере');
+      log('Подключён как «' + ($('#devName').value.trim() || defaultName) + '» (' + $('#threadsRange').value + ' пот.)');
+      syncWakeLock();
+      hbTimer = setInterval(sendHeartbeat, 5000);
+      for (let i = 0; i < cores; i++) pollLoop(i);
+    } catch (err) {
+      log('Ошибка подключения: ' + err.message);
+    }
+  } else {
+    connected = false;
+    if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
+    try { await postJson('/api/cluster/unregister', { id: workerId }); } catch (e) {}
+    syncWakeLock();
+    $('#toggleBtn').textContent = '⚡ Подключиться к кластеру';
+    $('#toggleBtn').className = 'primary';
+    $('#pauseBtn').hidden = true;
+    setStatus('', 'отключён');
+    log('Отключён от кластера');
+  }
+};
+
+$('#pauseBtn').onclick = () => {
+  paused = !paused;
+  $('#pauseBtn').textContent = paused ? 'Продолжить' : 'Пауза';
+  setStatus(paused ? 'paused' : 'on', paused ? 'на паузе' : 'в кластере');
+  log(paused ? 'Воркер поставлен на паузу' : 'Воркер возобновил работу');
+  sendHeartbeat();
+};
+
+$('#threadsRange').oninput = (e) => {
+  $('#threadsVal').textContent = e.target.value + ' из ' + cores;
+  localStorage.setItem('lh.worker.threads', e.target.value);
+  sendHeartbeat();
+};
+$('#wakeLockChk').onchange = syncWakeLock;
+window.addEventListener('beforeunload', () => {
+  if (connected && workerId && navigator.sendBeacon) {
+    navigator.sendBeacon('/api/cluster/unregister', JSON.stringify({ id: workerId }));
+  }
+});
+
+initBattery();
+</script>
+</body>
+</html>

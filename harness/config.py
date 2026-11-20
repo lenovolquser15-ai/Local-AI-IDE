@@ -64,6 +64,9 @@ DEFAULTS = {
     "gpu_temp_critical": 95,
     "gpu_cooldown_duration": 180,
     "gpu_target_temp": 70,
+    "cluster_enabled": True,
+    "cluster_offload_on_hot": True,
+    "cluster_llm_nodes": [],
     "remote": {
         "auto_start": False,
         "code_ttl": 28800,

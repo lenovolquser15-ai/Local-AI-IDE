@@ -21,6 +21,7 @@ from . import sizing as sizing_mod
 from . import thermal as thermal_mod
 from . import vision as vision_mod
 from . import dashboard as dashboard_mod
+from . import cluster as cluster_mod
 from .agent import Agent, Bridge
 from .config import (DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save, _merge,
                      as_int, normalize_context, MAX_TOKENS_MIN, MAX_TOKENS_MAX)
@@ -527,6 +528,20 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, dashboard_mod.get_latest())
             return
 
+        if path == "/api/cluster/status":
+            cfg = load()
+            _json_response(self, cluster_mod.status(cfg, lan_ip=get_lan_ip(), port=int(cfg.get("port", 7788))))
+            return
+
+        if path == "/api/cluster/poll":
+            wid = query.get("worker_id", [""])[0]
+            try:
+                wait = float(query.get("wait", ["2.0"])[0])
+            except (TypeError, ValueError):
+                wait = 2.0
+            _json_response(self, cluster_mod.poll_task(wid, wait=wait))
+            return
+
         if path == "/api/desktop":
             from . import desktop
             _json_response(self, desktop.status())
@@ -663,6 +678,9 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             self.serve_file("webui/index.html", "text/html")
             return
+        if path in ("/worker", "/worker.html"):
+            self.serve_file("webui/worker.html", "text/html")
+            return
         if path == "/app.js":
             self.serve_file("webui/app.js", "application/javascript")
             return
@@ -731,6 +749,16 @@ class Handler(BaseHTTPRequestHandler):
             "/api/thermal/cooldown/cancel": self.handle_thermal_cooldown_cancel,
             "/api/thermal/unload": self.handle_thermal_unload,
             "/api/thermal/simulate": self.handle_thermal_simulate,
+            "/api/cluster/register": self.handle_cluster_register,
+            "/api/cluster/heartbeat": self.handle_cluster_heartbeat,
+            "/api/cluster/unregister": self.handle_cluster_unregister,
+            "/api/cluster/result": self.handle_cluster_result,
+            "/api/cluster/benchmark": self.handle_cluster_benchmark,
+            "/api/cluster/map": self.handle_cluster_map,
+            "/api/cluster/scan": self.handle_cluster_scan,
+            "/api/cluster/node/add": self.handle_cluster_node_add,
+            "/api/cluster/node/remove": self.handle_cluster_node_remove,
+            "/api/cluster/llm_query": self.handle_cluster_llm_query,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -1115,6 +1143,75 @@ class Handler(BaseHTTPRequestHandler):
         temp = body.get("temp")
         thermal_mod.set_simulated_temp(temp)
         _json_response(self, thermal_mod.get_thermal_status(load(), force=True))
+
+    def handle_cluster_register(self, body):
+        w = cluster_mod.register_worker(body, client_ip=self.client_address[0])
+        _json_response(self, {"ok": True, "worker": w})
+
+    def handle_cluster_heartbeat(self, body):
+        wid = str(body.get("id") or body.get("worker_id") or "")
+        w = cluster_mod.heartbeat_worker(wid, body)
+        if not w:
+            _json_response(self, {"ok": False, "error": "worker not found"}, 404)
+            return
+        _json_response(self, {"ok": True, "worker": w})
+
+    def handle_cluster_unregister(self, body):
+        wid = str(body.get("id") or body.get("worker_id") or "")
+        _json_response(self, cluster_mod.unregister_worker(wid))
+
+    def handle_cluster_result(self, body):
+        _json_response(self, cluster_mod.submit_result(
+            task_id=body.get("task_id"),
+            worker_id=body.get("worker_id"),
+            ok=body.get("ok", True),
+            result=body.get("result"),
+            error=body.get("error"),
+            duration_ms=body.get("duration_ms"),
+        ))
+
+    def handle_cluster_benchmark(self, body):
+        chunks = body.get("chunks", 12)
+        iterations = body.get("iterations", 45000)
+        _json_response(self, cluster_mod.run_cluster_benchmark(chunks=chunks, iterations=iterations))
+
+    def handle_cluster_map(self, body):
+        kind = body.get("kind", "compute_bench")
+        items = body.get("items") or []
+        _json_response(self, cluster_mod.map_tasks(kind, items))
+
+    def handle_cluster_scan(self, body):
+        res = cluster_mod.scan_lan_llm_nodes(get_lan_ip())
+        if res.get("found"):
+            with CONFIG_LOCK:
+                cfg = load()
+                cfg["cluster_llm_nodes"] = cluster_mod.export_nodes_for_config()
+                save(cfg)
+        _json_response(self, res)
+
+    def handle_cluster_node_add(self, body):
+        res = cluster_mod.add_llm_node(body.get("url", ""), body.get("label", ""))
+        if res.get("ok"):
+            with CONFIG_LOCK:
+                cfg = load()
+                cfg["cluster_llm_nodes"] = cluster_mod.export_nodes_for_config()
+                save(cfg)
+        _json_response(self, res)
+
+    def handle_cluster_node_remove(self, body):
+        res = cluster_mod.remove_llm_node(body.get("url", ""))
+        with CONFIG_LOCK:
+            cfg = load()
+            cfg["cluster_llm_nodes"] = cluster_mod.export_nodes_for_config()
+            save(cfg)
+        _json_response(self, res)
+
+    def handle_cluster_llm_query(self, body):
+        _json_response(self, cluster_mod.query_remote_llm(
+            body.get("prompt", ""),
+            node_url=body.get("node_url"),
+            model=body.get("model"),
+        ))
 
     def stream_events(self, sid, since):
         self.close_connection = True

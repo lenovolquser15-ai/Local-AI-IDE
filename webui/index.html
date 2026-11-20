@@ -97,6 +97,7 @@
       <button class="view-tab" id="tabPlugins" data-view="plugins">Плагины</button>
       <button class="view-tab" id="tabLM" data-view="lm">LM Studio</button>
       <button class="view-tab" id="tabDashboard" data-view="dashboard">Дашборд</button>
+      <button class="view-tab" id="tabCluster" data-view="cluster">Кластер</button>
     </nav>
 
     <div id="modelWarning" class="model-warning" role="status" hidden></div>
@@ -476,6 +477,85 @@
             <span class="dash-peak-label">Загрузок модели:</span>
             <span class="dash-peak-val" id="dashModelLoads">0</span>
           </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="viewCluster" class="pageview" hidden>
+      <div class="page-inner cluster-page">
+        <div class="page-head">
+          <div class="page-head-text">
+            <div class="page-title">Wi-Fi Кластер устройств</div>
+            <div class="page-sub" id="clusterSub">Распределение нагрузки на телефоны, планшеты и другие ПК в одной локальной сети</div>
+          </div>
+          <span class="grow"></span>
+          <div class="page-head-tools">
+            <button id="clusterBenchBtn" class="primary" type="button">⚡ Тест нагрузки</button>
+            <button id="clusterRefreshBtn" class="ghost" type="button">Обновить</button>
+          </div>
+        </div>
+
+        <div id="clusterLanNotice" class="cluster-banner" hidden>
+          <div>
+            <strong>Wi-Fi доступ выключен</strong> — сейчас к кластеру может подключиться только этот ПК. Включи доступ по локальной сети, чтобы подключать телефоны и другие ноутбуки по QR-коду.
+          </div>
+          <button id="clusterEnableLanBtn" class="primary" type="button">Включить Wi-Fi доступ</button>
+        </div>
+
+        <div class="cluster-top-grid">
+          <div class="cluster-box">
+            <div class="plate-title">📱 Подключить телефон / устройство</div>
+            <div class="page-sub">Отсканируй QR-код с любого телефона или планшета в том же Wi-Fi — устройство станет воркером прямо в браузере (с настройкой щадящей нагрузки и защитой батареи).</div>
+            <div class="cluster-qr-row">
+              <div id="clusterQrBox" class="qr-container cluster-qr"></div>
+              <div class="cluster-qr-info">
+                <div class="urlrow">
+                  <input type="text" id="clusterWorkerUrl" class="field grow monospace" readonly>
+                  <button id="clusterCopyUrlBtn" class="ghost" type="button">Копировать</button>
+                </div>
+                <div class="cluster-qr-btns">
+                  <button id="clusterOpenWorkerBtn" class="ghost" type="button">Открыть воркер здесь ↗</button>
+                </div>
+                <div class="cluster-kpi-row">
+                  <span class="sec-chip" id="clusterWorkersChip">воркеров: 0</span>
+                  <span class="sec-chip" id="clusterThreadsChip">потоков: 0</span>
+                  <span class="sec-chip" id="clusterDoneChip">задач: 0</span>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="cluster-box">
+            <div class="plate-title">🖥️ Узлы LLM в Wi-Fi сети (Ollama / LM Studio)</div>
+            <div class="page-sub">Если в Wi-Fi есть второй ПК или Mac с Ollama / LM Studio, LocalHarness может перекидывать запросы на него.</div>
+            <label class="autostart-label" style="margin:6px 0;">
+              <input type="checkbox" id="clusterOffloadHot" checked>
+              🔥 Автопереброс LLM на узлы Wi-Fi при перегреве GPU
+            </label>
+            <div class="urlrow">
+              <input type="text" id="clusterNodeInput" class="field grow" placeholder="192.168.1.50:11434 или :1234">
+              <button id="clusterAddNodeBtn" class="ghost" type="button">Добавить</button>
+              <button id="clusterScanBtn" class="primary" type="button">🔍 Сканировать Wi-Fi</button>
+            </div>
+            <div id="clusterScanStatus" class="page-sub"></div>
+            <div id="clusterLlmList" class="cluster-list"></div>
+          </div>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title-row">
+            <div class="plate-title">Подключённые устройства-воркеры</div>
+            <span class="page-sub" id="clusterWorkersHint">открой ссылку выше на телефоне</span>
+          </div>
+          <div id="clusterWorkersList" class="cluster-workers-grid"></div>
+        </div>
+
+        <div id="clusterBenchResult" class="cluster-box" hidden>
+          <div class="plate-title-row">
+            <div class="plate-title">⚡ Результат распределённого теста</div>
+            <span class="sec-chip ok" id="clusterBenchTime">—</span>
+          </div>
+          <div id="clusterBenchBars" class="cluster-bench-bars"></div>
         </div>
       </div>
     </section>

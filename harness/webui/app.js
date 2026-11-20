@@ -692,6 +692,7 @@ function setView(name) {
   $('#viewPlugins').hidden = name !== 'plugins';
   $('#viewLM').hidden = name !== 'lm';
   if ($('#viewDashboard')) $('#viewDashboard').hidden = name !== 'dashboard';
+  if ($('#viewCluster')) $('#viewCluster').hidden = name !== 'cluster';
   const composer = document.querySelector('.composer');
   if (composer) composer.style.display = chat ? '' : 'none';
   const quick = document.querySelector('.quick-controls');
@@ -706,6 +707,8 @@ function setView(name) {
   if (name === 'lm') refreshLM();
   if (name === 'dashboard') refreshDashboard();
   else if (typeof dashTimer !== 'undefined' && dashTimer) { clearTimeout(dashTimer); dashTimer = null; }
+  if (name === 'cluster') refreshCluster();
+  else if (typeof clusterTimer !== 'undefined' && clusterTimer) { clearTimeout(clusterTimer); clusterTimer = null; }
 }
 
 /* ---------- state ---------- */
@@ -3200,6 +3203,202 @@ async function refreshDashboard() {
 
 if ($('#dashRefreshBtn')) $('#dashRefreshBtn').onclick = refreshDashboard;
 if ($('#dashWindow')) $('#dashWindow').onchange = refreshDashboard;
+
+/* ---------- Wi-Fi Cluster ---------- */
+let clusterTimer = null;
+
+async function refreshCluster() {
+  try {
+    const st = await api('/api/cluster/status');
+    if (!st || !st.ok) return;
+
+    if ($('#clusterLanNotice')) $('#clusterLanNotice').hidden = !!st.lan_access;
+    if ($('#clusterOffloadHot')) $('#clusterOffloadHot').checked = st.offload_on_hot !== false;
+
+    const wUrl = st.worker_url || (location.origin + '/worker');
+    if ($('#clusterWorkerUrl')) $('#clusterWorkerUrl').value = wUrl;
+    const qrBox = $('#clusterQrBox');
+    if (qrBox && qrBox.dataset.url !== wUrl) {
+      qrBox.dataset.url = wUrl;
+      qrBox.innerHTML = '<img src="/api/qrcode?url=' + encodeURIComponent(wUrl) + '" width="136" height="136" alt="QR Worker">';
+    }
+
+    if ($('#clusterWorkersChip')) {
+      $('#clusterWorkersChip').textContent = 'воркеров: ' + (st.workers_online || 0);
+      $('#clusterWorkersChip').className = 'sec-chip ' + (st.workers_online ? 'ok' : '');
+    }
+    if ($('#clusterThreadsChip')) $('#clusterThreadsChip').textContent = 'потоков: ' + (st.total_worker_threads || 0);
+    if ($('#clusterDoneChip')) $('#clusterDoneChip').textContent = 'задач: ' + (st.total_tasks_done || 0);
+
+    // Workers grid
+    const wList = $('#clusterWorkersList');
+    if (wList) {
+      wList.innerHTML = '';
+      const workers = st.workers || [];
+      if (!workers.length) {
+        wList.append(node('div', 'page-sub', 'Пока ни одно устройство не подключено. Отсканируй QR-код телефоном или нажми «Открыть воркер здесь ↗» для проверки.'));
+      } else {
+        workers.forEach((w) => {
+          const card = node('div', 'cworker-card');
+          const ico = w.device_type === 'mobile' ? '📱' : '💻';
+          const head = node('div', 'cworker-head');
+          head.append(node('span', null, ico + ' ' + esc(w.name || w.id)));
+          const badge = node('span', 'sec-chip ' + (w.paused ? 'warn' : 'ok'), w.paused ? 'пауза' : 'в сети');
+          badge.style.marginLeft = 'auto';
+          head.append(badge);
+          card.append(head);
+
+          const meta = node('div', 'cworker-meta');
+          meta.append(node('span', null, 'потоков: ' + (w.max_threads || 1) + '/' + (w.cores || 1)));
+          if (w.battery_pct != null) meta.append(node('span', null, 'батарея: ' + w.battery_pct + '%' + (w.charging ? '⚡' : '')));
+          meta.append(node('span', null, 'задач: ' + (w.tasks_done || 0)));
+          if (w.avg_ms) meta.append(node('span', null, '~' + w.avg_ms + ' мс'));
+          if (w.ip) meta.append(node('span', null, esc(w.ip)));
+          card.append(meta);
+          wList.append(card);
+        });
+      }
+    }
+
+    // LLM nodes list
+    const llmList = $('#clusterLlmList');
+    if (llmList) {
+      llmList.innerHTML = '';
+      const nodes = st.llm_nodes || [];
+      if (!nodes.length) {
+        llmList.append(node('div', 'page-sub', 'Удалённых LLM-узлов пока нет. Нажми «Сканировать Wi-Fi» или введи IP другого ПК.'));
+      } else {
+        nodes.forEach((n) => {
+          const row = node('div', 'cllm-row');
+          const info = node('div', 'cllm-info');
+          info.append(node('div', 'cllm-title', (n.alive ? '🟢 ' : '🔴 ') + esc(n.label || n.url)));
+          const modelsTxt = (n.models || []).length ? ('моделей: ' + n.models.length + ' (' + n.models.slice(0, 2).join(', ') + ')') : (n.error || 'нет моделей');
+          info.append(node('div', 'cllm-sub', esc(n.url) + (n.latency_ms ? ' · ' + n.latency_ms + ' мс' : '') + ' · ' + esc(modelsTxt)));
+          row.append(info);
+          const del = node('button', 'ghost small-btn', 'Удалить');
+          del.type = 'button';
+          del.onclick = async () => {
+            await api('/api/cluster/node/remove', { url: n.url });
+            refreshCluster();
+          };
+          row.append(del);
+          llmList.append(row);
+        });
+      }
+    }
+
+    if (clusterTimer) clearTimeout(clusterTimer);
+    if (currentView === 'cluster') {
+      clusterTimer = setTimeout(refreshCluster, 3000);
+    }
+  } catch (e) {
+    console.warn('cluster refresh failed:', e);
+  }
+}
+
+if ($('#clusterRefreshBtn')) $('#clusterRefreshBtn').onclick = refreshCluster;
+if ($('#clusterEnableLanBtn')) {
+  $('#clusterEnableLanBtn').onclick = async () => {
+    await patchConfig('lan_access', true);
+    refreshCluster();
+  };
+}
+if ($('#clusterCopyUrlBtn')) {
+  $('#clusterCopyUrlBtn').onclick = () => {
+    const val = ($('#clusterWorkerUrl') && $('#clusterWorkerUrl').value) || '';
+    if (val && navigator.clipboard) navigator.clipboard.writeText(val);
+    pushNotice('Ссылка воркера скопирована: ' + val, 'ok');
+  };
+}
+if ($('#clusterOpenWorkerBtn')) {
+  $('#clusterOpenWorkerBtn').onclick = () => {
+    window.open('/worker', '_blank');
+  };
+}
+if ($('#clusterOffloadHot')) {
+  $('#clusterOffloadHot').onchange = (e) => patchConfig('cluster_offload_on_hot', !!e.target.checked);
+}
+if ($('#clusterAddNodeBtn')) {
+  $('#clusterAddNodeBtn').onclick = async () => {
+    const inp = $('#clusterNodeInput');
+    const url = (inp && inp.value.trim()) || '';
+    if (!url) return;
+    const btn = $('#clusterAddNodeBtn');
+    btn.disabled = true;
+    try {
+      const res = await api('/api/cluster/node/add', { url });
+      if (res && res.ok) {
+        inp.value = '';
+        pushNotice(res.node && res.node.alive ? 'Узел добавлен и отвечает!' : 'Узел добавлен (сейчас не отвечает)', res.node && res.node.alive ? 'ok' : 'warn');
+        refreshCluster();
+      } else {
+        pushNotice((res && res.error) || 'Не удалось добавить узел', 'bad');
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+if ($('#clusterScanBtn')) {
+  $('#clusterScanBtn').onclick = async () => {
+    const btn = $('#clusterScanBtn');
+    const stEl = $('#clusterScanStatus');
+    btn.disabled = true;
+    if (stEl) stEl.textContent = 'Сканирую локальную Wi-Fi подсеть (Ollama / LM Studio / llama.cpp)…';
+    try {
+      const res = await api('/api/cluster/scan', {});
+      if (res && res.ok) {
+        const cnt = (res.found || []).length;
+        if (stEl) stEl.textContent = 'Просканировано ' + (res.subnet || 'LAN') + ' за ' + res.elapsed_ms + ' мс · найдено узлов: ' + cnt;
+        pushNotice(cnt ? ('Найдено LLM-узлов в Wi-Fi: ' + cnt) : 'Других LLM-серверов в Wi-Fi сети не найдено', cnt ? 'ok' : 'warn');
+        refreshCluster();
+      } else {
+        if (stEl) stEl.textContent = (res && res.error) || 'Ошибка сканирования';
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+if ($('#clusterBenchBtn')) {
+  $('#clusterBenchBtn').onclick = async () => {
+    const btn = $('#clusterBenchBtn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Считаем…';
+    try {
+      const res = await api('/api/cluster/benchmark', { chunks: 12, iterations: 45000 });
+      const box = $('#clusterBenchResult');
+      const bars = $('#clusterBenchBars');
+      if (box && bars && res) {
+        box.hidden = false;
+        $('#clusterBenchTime').textContent = (res.elapsed_ms || 0) + ' мс · устройств: ' + (res.workers_used || 0);
+        bars.innerHTML = '';
+        const per = res.per_worker || {};
+        const total = Math.max(1, res.chunks || 12);
+        Object.keys(per).forEach((name) => {
+          const cnt = per[name];
+          const pct = Math.round((cnt / total) * 100);
+          const row = node('div', 'cbench-row');
+          row.append(node('span', 'cbench-name', esc(name)));
+          const track = node('div', 'cbench-track');
+          const fill = node('div', 'cbench-fill');
+          fill.style.width = pct + '%';
+          track.append(fill);
+          row.append(track);
+          row.append(node('span', 'cbench-cnt', cnt + ' / ' + total + ' (' + pct + '%)'));
+          bars.append(row);
+        });
+        pushNotice('Кластерный тест завершён за ' + res.elapsed_ms + ' мс', 'ok');
+        refreshCluster();
+      }
+    } catch (e) {
+      pushNotice('Ошибка теста: ' + e.message, 'bad');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '⚡ Тест нагрузки';
+    }
+  };
+}
 
 (async function boot() {
   if (localStorage.getItem('lh.rail') === '1') app.classList.add('rail');
