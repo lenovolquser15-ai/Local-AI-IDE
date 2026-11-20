@@ -691,6 +691,7 @@ function setView(name) {
   log.hidden = !chat;
   $('#viewPlugins').hidden = name !== 'plugins';
   $('#viewLM').hidden = name !== 'lm';
+  if ($('#viewDashboard')) $('#viewDashboard').hidden = name !== 'dashboard';
   const composer = document.querySelector('.composer');
   if (composer) composer.style.display = chat ? '' : 'none';
   const quick = document.querySelector('.quick-controls');
@@ -703,6 +704,8 @@ function setView(name) {
     if (currentPlugSubtab === 'workshop') refreshWorkshop();
   }
   if (name === 'lm') refreshLM();
+  if (name === 'dashboard') refreshDashboard();
+  else if (typeof dashTimer !== 'undefined' && dashTimer) { clearTimeout(dashTimer); dashTimer = null; }
 }
 
 /* ---------- state ---------- */
@@ -2925,6 +2928,278 @@ if ($('#gpuThermalResetSimBtn')) {
     pushNotice('Симуляция выключена, опрашивается реальный датчик', 'ok');
   };
 }
+
+/* ---------- System Dashboard (Canvas Charts) ---------- */
+let dashTimer = null;
+
+function _prepCanvas(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas) return null;
+  const rect = canvas.parentElement ? canvas.parentElement.getBoundingClientRect() : { width: 520, height: 185 };
+  const w = Math.max(200, Math.floor(rect.width || 520));
+  const h = Math.max(120, Math.floor(rect.height || 185));
+  const dpr = window.devicePixelRatio || 1;
+  if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) {
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  return { ctx, w, h };
+}
+
+function _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, unit) {
+  const plotW = w - pad.l - pad.r;
+  const plotH = h - pad.t - pad.b;
+  const steps = 4;
+  ctx.save();
+  ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
+  ctx.fillStyle = 'rgba(255, 255, 255, .45)';
+  ctx.textAlign = 'right';
+  ctx.textBaseline = 'middle';
+  ctx.strokeStyle = 'rgba(255, 255, 255, .07)';
+  ctx.lineWidth = 1;
+  ctx.setLineDash([3, 4]);
+  for (let i = 0; i <= steps; i++) {
+    const frac = i / steps;
+    const y = pad.t + plotH * frac;
+    const val = Math.round(yMax - (yMax - yMin) * frac);
+    ctx.beginPath();
+    ctx.moveTo(pad.l, y);
+    ctx.lineTo(w - pad.r, y);
+    ctx.stroke();
+    ctx.fillText(val + (unit || ''), pad.l - 6, y);
+  }
+  ctx.restore();
+  return { plotW, plotH };
+}
+
+function _drawEmptyChart(ctx, w, h) {
+  ctx.save();
+  ctx.font = '12px system-ui, sans-serif';
+  ctx.fillStyle = 'rgba(255, 255, 255, .35)';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText('Сбор данных…', w / 2, h / 2);
+  ctx.restore();
+}
+
+function drawLineChart(canvasId, data, key, opts) {
+  const prep = _prepCanvas(canvasId);
+  if (!prep) return;
+  const { ctx, w, h } = prep;
+  const pad = { l: 46, r: 10, t: 10, b: 14 };
+  const yMin = opts.yMin != null ? opts.yMin : 0;
+  const yMax = opts.yMax != null ? opts.yMax : 100;
+  const { plotW, plotH } = _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, opts.unit);
+
+  const vals = (data || []).map((d) => d[key]).filter((v) => v != null && Number.isFinite(Number(v)));
+  if (!vals.length) {
+    _drawEmptyChart(ctx, w, h);
+    return;
+  }
+
+  const yOf = (v) => {
+    const clamped = Math.max(yMin, Math.min(yMax, Number(v)));
+    return pad.t + plotH * (1 - (clamped - yMin) / Math.max(1, yMax - yMin));
+  };
+
+  // Optional threshold lines
+  const drawThresh = (val, color) => {
+    if (val == null || val < yMin || val > yMax) return;
+    const y = yOf(val);
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(pad.l, y);
+    ctx.lineTo(w - pad.r, y);
+    ctx.stroke();
+    ctx.restore();
+  };
+  drawThresh(opts.warnLine, 'rgba(249, 115, 22, .55)');
+  drawThresh(opts.critLine, 'rgba(239, 68, 68, .65)');
+
+  const pts = [];
+  const n = data.length;
+  for (let i = 0; i < n; i++) {
+    const v = data[i][key];
+    if (v == null || !Number.isFinite(Number(v))) continue;
+    const x = n === 1 ? pad.l + plotW / 2 : pad.l + (i / (n - 1)) * plotW;
+    pts.push({ x, y: yOf(v) });
+  }
+  if (!pts.length) return;
+
+  if (opts.fillColor && pts.length >= 2) {
+    ctx.save();
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pad.t + plotH);
+    for (let i = 0; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+    ctx.lineTo(pts[pts.length - 1].x, pad.t + plotH);
+    ctx.closePath();
+    ctx.fillStyle = opts.fillColor;
+    ctx.fill();
+    ctx.restore();
+  }
+
+  ctx.save();
+  ctx.beginPath();
+  ctx.strokeStyle = opts.color || '#38bdf8';
+  ctx.lineWidth = 2;
+  ctx.lineJoin = 'round';
+  ctx.lineCap = 'round';
+  for (let i = 0; i < pts.length; i++) {
+    if (i === 0) ctx.moveTo(pts[i].x, pts[i].y);
+    else ctx.lineTo(pts[i].x, pts[i].y);
+  }
+  ctx.stroke();
+  // Highlight latest point
+  const last = pts[pts.length - 1];
+  ctx.beginPath();
+  ctx.arc(last.x, last.y, 3.2, 0, Math.PI * 2);
+  ctx.fillStyle = opts.color || '#38bdf8';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawAreaChart(canvasId, data, key, opts) {
+  drawLineChart(canvasId, data, key, Object.assign({
+    fillColor: opts.fillColor || 'rgba(34, 211, 238, .15)'
+  }, opts));
+}
+
+function drawDualLineChart(canvasId, data, key1, key2, opts) {
+  const prep = _prepCanvas(canvasId);
+  if (!prep) return;
+  const { ctx, w, h } = prep;
+  const pad = { l: 42, r: 10, t: 10, b: 14 };
+  const yMin = opts.yMin != null ? opts.yMin : 0;
+  const yMax = opts.yMax != null ? opts.yMax : 100;
+  const { plotW, plotH } = _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, opts.unit);
+
+  if (!data || !data.length) {
+    _drawEmptyChart(ctx, w, h);
+    return;
+  }
+
+  const yOf = (v) => {
+    const clamped = Math.max(yMin, Math.min(yMax, Number(v)));
+    return pad.t + plotH * (1 - (clamped - yMin) / Math.max(1, yMax - yMin));
+  };
+
+  const drawSeries = (key, color) => {
+    const pts = [];
+    const n = data.length;
+    for (let i = 0; i < n; i++) {
+      const v = data[i][key];
+      if (v == null || !Number.isFinite(Number(v))) continue;
+      const x = n === 1 ? pad.l + plotW / 2 : pad.l + (i / (n - 1)) * plotW;
+      pts.push({ x, y: yOf(v) });
+    }
+    if (!pts.length) return;
+    ctx.save();
+    ctx.beginPath();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 2;
+    ctx.lineJoin = 'round';
+    ctx.lineCap = 'round';
+    for (let i = 0; i < pts.length; i++) {
+      if (i === 0) ctx.moveTo(pts[i].x, pts[i].y);
+      else ctx.lineTo(pts[i].x, pts[i].y);
+    }
+    ctx.stroke();
+    const last = pts[pts.length - 1];
+    ctx.beginPath();
+    ctx.arc(last.x, last.y, 3, 0, Math.PI * 2);
+    ctx.fillStyle = color;
+    ctx.fill();
+    ctx.restore();
+  };
+
+  drawSeries(key1, opts.color1 || '#a78bfa');
+  drawSeries(key2, opts.color2 || '#34d399');
+}
+
+async function refreshDashboard() {
+  try {
+    const mins = ($('#dashWindow') && Number($('#dashWindow').value)) || 10;
+    const data = await api('/api/dashboard/history?minutes=' + encodeURIComponent(mins));
+    if (!data || !data.ok) return;
+    const history = data.history || [];
+    const summary = data.summary || {};
+    const latest = history.length ? history[history.length - 1] : {};
+
+    // Uptime
+    if (summary.uptime != null) {
+      const totalSec = Math.floor(summary.uptime);
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      $('#dashUptime').textContent = 'аптайм: ' + (h ? h + 'ч ' : '') + m + 'м ' + s + 'с';
+    }
+
+    // Cards
+    $('#dashGpuTemp').textContent = latest.gpu_temp != null ? latest.gpu_temp + '°C' : '—';
+    $('#dashGpuName').textContent = latest.gpu_name ? latest.gpu_name.replace('NVIDIA GeForce ', '') : 'нет датчика';
+
+    const vUsed = Number(latest.vram_used_mb || 0);
+    const vTot = Number(latest.vram_total_mb || 0);
+    if (vTot > 0) {
+      $('#dashVram').textContent = (vUsed / 1024).toFixed(1) + ' / ' + (vTot / 1024).toFixed(1) + ' ГБ';
+      $('#dashVramPct').textContent = Math.round((vUsed / vTot) * 100) + ' % занято';
+    } else {
+      $('#dashVram').textContent = '—';
+      $('#dashVramPct').textContent = 'нет GPU';
+    }
+
+    $('#dashRam').textContent = latest.ram_used_pct != null ? latest.ram_used_pct + ' %' : '—';
+    $('#dashRamFree').textContent = latest.ram_free_gb != null ? latest.ram_free_gb + ' ГБ свободно' : '—';
+
+    $('#dashCpu').textContent = latest.cpu_pct != null ? Math.round(latest.cpu_pct) + ' %' : '—';
+    $('#dashCpuCores').textContent = latest.cpu_cores ? latest.cpu_cores + ' потоков' : 'CPU';
+
+    $('#dashTokens').textContent = (summary.total_tokens || 0).toLocaleString('ru-RU');
+    $('#dashSessions').textContent = summary.total_sessions || 0;
+    $('#dashPeakGpu').textContent = summary.peak_gpu_temp != null ? summary.peak_gpu_temp + '°C' : '--°C';
+    $('#dashAvgGpu').textContent = summary.avg_gpu_temp != null ? Math.round(summary.avg_gpu_temp) + '°C' : '--°C';
+    $('#dashModelLoads').textContent = summary.model_loads || 0;
+
+    if ($('#chartGpuTempVal')) $('#chartGpuTempVal').textContent = latest.gpu_temp != null ? latest.gpu_temp + '°C' : '—';
+    if ($('#chartGpuUtilVal')) $('#chartGpuUtilVal').textContent = latest.gpu_util != null ? latest.gpu_util + '%' : '—';
+    if ($('#chartVramVal')) $('#chartVramVal').textContent = vTot > 0 ? Math.round(vUsed) + ' / ' + Math.round(vTot) + ' МБ' : '—';
+
+    // Charts
+    drawLineChart('chartGpuTemp', history, 'gpu_temp', {
+      color: '#f97316', fillColor: 'rgba(249, 115, 22, .12)',
+      yMin: 20, yMax: 110, unit: '°',
+      warnLine: 85, critLine: 95
+    });
+    drawLineChart('chartGpuUtil', history, 'gpu_util', {
+      color: '#818cf8', fillColor: 'rgba(129, 140, 248, .12)',
+      yMin: 0, yMax: 100, unit: '%'
+    });
+    drawAreaChart('chartVram', history, 'vram_used_mb', {
+      color: '#22d3ee', fillColor: 'rgba(34, 211, 238, .14)',
+      yMin: 0, yMax: vTot || 8192, unit: ''
+    });
+    drawDualLineChart('chartSystem', history, 'ram_used_pct', 'cpu_pct', {
+      color1: '#a78bfa', color2: '#34d399',
+      yMin: 0, yMax: 100, unit: '%'
+    });
+
+    if (dashTimer) clearTimeout(dashTimer);
+    if (currentView === 'dashboard') {
+      dashTimer = setTimeout(refreshDashboard, 3000);
+    }
+  } catch (e) {
+    console.warn('dashboard refresh failed:', e);
+  }
+}
+
+if ($('#dashRefreshBtn')) $('#dashRefreshBtn').onclick = refreshDashboard;
+if ($('#dashWindow')) $('#dashWindow').onchange = refreshDashboard;
 
 (async function boot() {
   if (localStorage.getItem('lh.rail') === '1') app.classList.add('rail');

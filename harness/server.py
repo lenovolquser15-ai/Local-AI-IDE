@@ -20,6 +20,7 @@ from . import session as session_mod
 from . import sizing as sizing_mod
 from . import thermal as thermal_mod
 from . import vision as vision_mod
+from . import dashboard as dashboard_mod
 from .agent import Agent, Bridge
 from .config import (DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save, _merge,
                      as_int, normalize_context, MAX_TOKENS_MIN, MAX_TOKENS_MAX)
@@ -509,6 +510,23 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, thermal_mod.get_thermal_status(load()))
             return
 
+        if path == "/api/dashboard/history":
+            try:
+                mins = float(query.get("minutes", ["10"])[0])
+            except (TypeError, ValueError):
+                mins = 10.0
+            mins = max(1.0, min(60.0, mins))
+            _json_response(self, {
+                "ok": True,
+                "history": dashboard_mod.get_history(minutes=mins),
+                "summary": dashboard_mod.get_summary(),
+            })
+            return
+
+        if path == "/api/dashboard/latest":
+            _json_response(self, dashboard_mod.get_latest())
+            return
+
         if path == "/api/desktop":
             from . import desktop
             _json_response(self, desktop.status())
@@ -806,12 +824,15 @@ class Handler(BaseHTTPRequestHandler):
 
         def run_agent():
             goal = {"objective": text, "criteria": criteria} if is_goal else None
+            dashboard_mod.record_session()
             try:
                 agent.run(text, history=history, goal=goal, image=image, images=images)
             except Exception as exc:
                 bridge.emit({"type": "error", "text": str(exc)})
                 bridge.emit({"type": "done", "text": "Error: %s" % exc, "steps": 0, "protocol": "json",
                              "speed": {}, "rounds": 0})
+            finally:
+                dashboard_mod.record_session_end()
 
         run.thread = threading.Thread(target=run_agent, daemon=True)
         with RUNS_LOCK:
@@ -1028,6 +1049,8 @@ class Handler(BaseHTTPRequestHandler):
                 lms_mod.invalidate()
                 break
         result = start_lms_job("load", args)
+        if result.get("ok"):
+            dashboard_mod.record_model_load()
         _json_response(self, result)
 
     def handle_lms_unload(self, body):
@@ -1175,6 +1198,10 @@ def serve(cfg):
                 remote.autostart()
             except Exception as exc:
                 print("  remote autostart: %s" % exc)
+            try:
+                dashboard_mod.start()
+            except Exception:
+                pass
             try:
                 server.serve_forever()
             except KeyboardInterrupt:

@@ -62,8 +62,15 @@ class SpeedMeter:
         return snap
 
     def finish(self):
+        snap = self.snapshot()
+        try:
+            from . import dashboard
+            if snap.get("tokens"):
+                dashboard.record_tokens(snap["tokens"])
+        except Exception:
+            pass
         if self.cb:
-            self.cb(self.snapshot())
+            self.cb(snap)
 
 
 class LLMError(Exception):

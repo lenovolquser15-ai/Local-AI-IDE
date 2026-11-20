@@ -96,6 +96,7 @@
       <button class="view-tab active" id="tabChat" data-view="chat">Чат</button>
       <button class="view-tab" id="tabPlugins" data-view="plugins">Плагины</button>
       <button class="view-tab" id="tabLM" data-view="lm">LM Studio</button>
+      <button class="view-tab" id="tabDashboard" data-view="dashboard">Дашборд</button>
     </nav>
 
     <div id="modelWarning" class="model-warning" role="status" hidden></div>
@@ -373,6 +374,108 @@
               <div class="page-sub">Добавляется к базовым правилам LocalHarness и инструментам.</div>
             </div>
           </section>
+        </div>
+      </div>
+    </section>
+
+    <section id="viewDashboard" class="pageview" hidden>
+      <div class="page-inner dash-page">
+        <div class="page-head">
+          <div class="page-head-text">
+            <div class="page-title">Дашборд системы</div>
+            <div class="page-sub" id="dashUptime">аптайм: —</div>
+          </div>
+          <span class="grow"></span>
+          <div class="page-head-tools">
+            <select id="dashWindow" class="compact" aria-label="Интервал графиков">
+              <option value="2">2 мин</option>
+              <option value="5">5 мин</option>
+              <option value="10" selected>10 мин</option>
+            </select>
+            <button id="dashRefreshBtn" class="ghost" type="button">Обновить</button>
+          </div>
+        </div>
+
+        <div class="dash-summary-row" id="dashSummary">
+          <div class="dash-card">
+            <div class="dash-card-title">GPU</div>
+            <div class="dash-card-val" id="dashGpuTemp">--°C</div>
+            <div class="dash-card-sub" id="dashGpuName">—</div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-title">VRAM</div>
+            <div class="dash-card-val" id="dashVram">-- / -- ГБ</div>
+            <div class="dash-card-sub" id="dashVramPct">— %</div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-title">RAM</div>
+            <div class="dash-card-val" id="dashRam">-- %</div>
+            <div class="dash-card-sub" id="dashRamFree">— ГБ свободно</div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-title">CPU</div>
+            <div class="dash-card-val" id="dashCpu">-- %</div>
+            <div class="dash-card-sub" id="dashCpuCores">— ядер</div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-title">Токены</div>
+            <div class="dash-card-val" id="dashTokens">0</div>
+            <div class="dash-card-sub" id="dashTokensSub">сгенерировано</div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-title">Сессии</div>
+            <div class="dash-card-val" id="dashSessions">0</div>
+            <div class="dash-card-sub" id="dashSessionsSub">запросов</div>
+          </div>
+        </div>
+
+        <div class="dash-charts-grid">
+          <div class="dash-chart-box">
+            <div class="dash-chart-head">
+              <span class="dash-chart-title">🌡️ Температура GPU (°C)</span>
+              <span class="dash-chart-badge" id="chartGpuTempVal">—</span>
+            </div>
+            <div class="dash-canvas-wrap"><canvas id="chartGpuTemp"></canvas></div>
+          </div>
+          <div class="dash-chart-box">
+            <div class="dash-chart-head">
+              <span class="dash-chart-title">📊 Загрузка GPU (%)</span>
+              <span class="dash-chart-badge" id="chartGpuUtilVal">—</span>
+            </div>
+            <div class="dash-canvas-wrap"><canvas id="chartGpuUtil"></canvas></div>
+          </div>
+          <div class="dash-chart-box">
+            <div class="dash-chart-head">
+              <span class="dash-chart-title">💾 Видеопамять VRAM (МБ)</span>
+              <span class="dash-chart-badge" id="chartVramVal">—</span>
+            </div>
+            <div class="dash-canvas-wrap"><canvas id="chartVram"></canvas></div>
+          </div>
+          <div class="dash-chart-box">
+            <div class="dash-chart-head">
+              <span class="dash-chart-title">🧠 RAM и CPU (%)</span>
+              <span class="dash-chart-legend">
+                <span class="dleg-item"><i style="background:#a78bfa"></i>RAM</span>
+                <span class="dleg-item"><i style="background:#34d399"></i>CPU</span>
+              </span>
+            </div>
+            <div class="dash-canvas-wrap"><canvas id="chartSystem"></canvas></div>
+          </div>
+        </div>
+
+        <div class="dash-peaks-row">
+          <div class="dash-peak">
+            <span class="dash-peak-label">Пик GPU:</span>
+            <span class="dash-peak-val" id="dashPeakGpu">--°C</span>
+          </div>
+          <div class="dash-peak">
+            <span class="dash-peak-label">Средняя GPU:</span>
+            <span class="dash-peak-val" id="dashAvgGpu">--°C</span>
+          </div>
+          <div class="dash-peak">
+            <span class="dash-peak-label">Загрузок модели:</span>
+            <span class="dash-peak-val" id="dashModelLoads">0</span>
+          </div>
         </div>
       </div>
     </section>
