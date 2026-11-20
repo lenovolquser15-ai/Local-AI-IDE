@@ -14,9 +14,15 @@
 
 ## Скриншоты
 
-![Чат: сессии, чеклист цели, шкала контекста (схема/диалог/ответ), траектория](docs/screenshots/ui-chat.png)
+![Чат: сессии, датчик GPU, голосовой ввод/озвучка, шкала контекста, траектория](docs/screenshots/ui-chat.png)
 
-![Настройки в шторке: параметры контекста, память, удалённый доступ, LAN](docs/screenshots/ui-settings.png)
+![Дашборд системы: живые Canvas-графики температуры GPU, загрузки, VRAM, RAM и CPU](docs/screenshots/ui-dashboard.png)
+
+![Wi-Fi Кластер: подключение телефонов по QR-коду, распределение нагрузки и LAN LLM-узлы](docs/screenshots/ui-cluster.png)
+
+![Планировщик и Автоматизации: расписание промптов агента и команд Shell](docs/screenshots/ui-schedule.png)
+
+![Настройки в шторке: термозащита GPU, Obscura stealth-поиск, .zip бэкап, память и удалённый доступ](docs/screenshots/ui-settings.png)
 
 ![Мобильный и удалённый доступ: адрес, временный код и QR](docs/screenshots/ui-lan.png)
 

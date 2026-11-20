@@ -3,7 +3,8 @@
 ; Runtime data (data/, work/, config.json) is never touched on upgrade or uninstall.
 
 #define MyAppName "LocalHarness"
-#define MyAppVersion "1.0.6"
+#define MyAppVersion "1.0.7-beta.1"
+#define MyAppFileVersion "1.0.7.0"
 #define MyAppPublisher "LocalHarness contributors"
 #define MyAppURL "https://github.com/lenovolquser15-ai/Local-AI-IDE"
 #define MyAppExeName "LocalHarness.exe"
@@ -24,7 +25,7 @@ OutputBaseFilename=LocalHarness-Setup-v{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 ArchitecturesAllowed=x64compatible
-VersionInfoVersion={#MyAppVersion}.0
+VersionInfoVersion={#MyAppFileVersion}
 VersionInfoDescription={#MyAppName} Setup
 UninstallDisplayName={#MyAppName}
 CloseApplications=no

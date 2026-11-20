@@ -3,6 +3,7 @@ import subprocess
 import sys
 import requests
 
+
 def get_token():
     p = subprocess.run(
         ["git", "credential", "fill"],
@@ -16,6 +17,7 @@ def get_token():
             return line.split("=", 1)[1].strip()
     raise RuntimeError("Could not find token in git credential fill")
 
+
 def main():
     token = get_token()
     headers = {
@@ -24,66 +26,51 @@ def main():
         "User-Agent": "LocalHarness-Release-Script",
     }
 
-    tag = "v1.0.6"
-    name = "LocalHarness v1.0.6"
+    tag = "v1.0.7-beta.1"
+    name = "LocalHarness v1.0.7-beta.1 (Pre-release)"
     body = (
-        "Обновление 1.0.6: любой GitHub-репозиторий превращается в плагин, Codex Security, "
-        "Мастерская плагинов и строгая проверка контекста.\n\n"
+        "> **Pre-release (Beta):** тестовая сборка крупного обновления `1.0.7`. "
+        "Официальный стабильный релиз `v1.0.7` выйдет примерно через 2 дня после проверки всех новых функций.\n\n"
         "**Telegram-канал:** [t.me/RemingOstai](https://t.me/RemingOstai)\n\n"
-        "**Что нового**\n"
-        "- **Конвертер репозиториев:** вкладка «Конвертер» делает из любого GitHub-репозитория рабочий "
-        "плагин — Python-библиотеку, MCP-сервер, Node-пакет или CLI-утилиту. Находит манифесты, включая "
-        "вложенные пакеты в монорепозиториях (у `openai/codex-security` — `sdk/typescript`), выбирает "
-        "имя и точку входа и генерирует инструменты `<имя>_info`, `_files`, `_read` и `_cli`. "
-        "Готовый файл проходит статический аудит и ставится в `plugins/`.\n"
-        "- **Плагин Codex Security:** `plugins/codex_security.py` оборачивает CLI "
-        "[openai/codex-security](https://github.com/openai/codex-security) — статус, скан путей/diff/deep, "
-        "история сканов и прямой CLI. Если не хватает Node.js 22.13+ или `cs login`, инструменты честно "
-        "объясняют, что доустановить.\n"
-        "- **Мастерская и Конструктор:** вкладка «Плагины» теперь с четырьмя подвкладками — установленные, "
-        "каталог сообщества, конвертер и конструктор. Публикация плагина в Мастерскую, установка в один "
-        "клик, редактирование кода прямо в интерфейсе и тестовый вызов инструмента в песочнице "
-        "(`harness/plugin_sandbox.py`).\n"
-        "- **Аудит плагинов:** перед установкой и публикацией код проходит AST-скан (опасные "
-        "`os.system`/`subprocess`/`eval`, сеть, ввод с клавиатуры) и получает бейдж «аудит кода: чисто». "
-        "При заданном ключе VirusTotal дополнительно проверяется SHA-256 файла.\n"
-        "- **Валидация контекстного окна:** интерфейс, сервер и агент зажимают `context_tokens` "
-        "в 512–262144, а `max_tokens` — в 64–32768. Мусор и числа вне диапазона больше не проходят, "
-        "предупреждение показывает фактически применённое значение.\n"
-        "- **Удобная раскладка не-чатных вкладок:** плагины, конвертер и LM Studio занимают всю ширину "
-        "окна — карточки не обрезаются, длинный заголовок сессии не ломает шапку.\n\n"
+        "**Что нового в 1.0.7-beta.1**\n"
+        "- **🔥 Термозащита GPU и автоохлаждение:** мониторинг температуры видеокарты в реальном времени (`❄️ 42°C` → `⚠️ 88°C` → `🔥 101°C`), "
+        "плавный термо-троттлинг скорости токенов при нагреве, а при экстремальной температуре (95–100°C+) — аварийное окно "
+        "с выгрузкой модели из VRAM (LM Studio / Ollama) и таймером охлаждения на 2–N минут. В Настройках есть настройка порогов и кнопки симуляции.\n"
+        "- **📊 Дашборд системы:** новая вкладка «Дашборд» с 6 карточками сводки и 4 живыми графиками на чистом HTML5 Canvas "
+        "(температура GPU с линиями порогов, загрузка GPU, VRAM, RAM и CPU) за последние 2 / 5 / 10 минут.\n"
+        "- **📱 Wi-Fi Кластер устройств:** новая вкладка «Кластер» позволяет подключать телефоны, планшеты и другие ПК в одной Wi-Fi сети "
+        "по QR-коду (`/worker`, без установки приложений) с ползунком щадящей нагрузки (`1..N` потоков) и защитой батареи `< 20%`. "
+        "Также умеет сканировать Wi-Fi подсеть на другие ПК с Ollama / LM Studio / llama.cpp и автоматически перебрасывать на них LLM-запросы при перегреве GPU!\n"
+        "- **🕵️ Браузер Obscura (Rust stealth CDP) для поиска:** встроенная поддержка легковесного Rust headless-браузера "
+        "[Obscura](https://github.com/h4ckf0r0day/obscura) (`--stealth`, 30–130 МБ RAM) как приоритетного или резервного stealth-движка "
+        "в `web_search` и `browser` (настраивается в Настройки → Поиск).\n"
+        "- **🎤 Голосовой режим (STT + TTS):** кнопка микрофона для диктовки запросов прямо в чат и кнопка озвучки ответов модели вслух.\n"
+        "- **⏰ Планировщик и Автоматизации:** новая вкладка «Расписание» — запуск промптов агента и Shell-команд каждые N минут или ежедневно по времени `HH:MM` с историей запусков.\n"
+        "- **📦 Экспорт / Импорт профиля (`.zip` бэкап):** полный перенос настроек, плагинов, памяти, расписаний и сессий на другой ПК в один клик (в Настройках).\n\n"
         "**Тесты**\n"
-        "- `tests/test_converter_v2.py` — вложенные манифесты, выход за корень, опасные аргументы; "
-        "`tests/test_workshop_and_converter.py` — Мастерская, аудит и установка. Полный прогон pytest "
-        "и живой тест конвертера на `openai/codex-security` пройдены на собранном exe.\n\n"
+        "- Все **195 автоматических тестов** (`pytest tests/`) пройдены без ошибок (включая `test_thermal.py`, `test_dashboard.py`, `test_cluster.py`, `test_obscura.py`, `test_backup_and_scheduler.py`).\n\n"
         "**Скриншоты**\n"
-        "![Чат: сессии, чеклист цели, шкала контекста, траектория]"
+        "![Дашборд системы: живые Canvas-графики GPU, VRAM, RAM и CPU]"
+        "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-dashboard.png)\n"
+        "![Wi-Fi Кластер: подключение телефонов по QR-коду и LAN LLM-узлы]"
+        "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-cluster.png)\n"
+        "![Планировщик и Автоматизации: задачи по расписанию и журнал запусков]"
+        "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-schedule.png)\n"
+        "![Чат: индикатор температуры GPU и голосовой режим]"
         "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-chat.png)\n"
-        "![Настройки в шторке: память, удалённый доступ, LAN]"
-        "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-settings.png)\n"
-        "![Мобильный и удалённый доступ: адрес, временный код и QR]"
-        "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-lan.png)\n"
-        "![Вкладка плагинов: установленные, включая Codex Security, мастерская и каталог]"
-        "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-plugins.png)\n"
-        "![Конвертер: любой GitHub-репозиторий в плагин с живыми инструментами]"
-        "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-converter.png)\n\n"
-        "Скриншоты версии 1.0.5 сохранены в архиве: "
-        "[docs/screenshots/v1.0.5](https://github.com/lenovolquser15-ai/Local-AI-IDE/tree/main/docs/screenshots/v1.0.5).\n\n"
+        "![Настройки: термозащита GPU, Obscura stealth-поиск и .zip бэкап]"
+        "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-settings.png)\n\n"
         "**Установка (Windows)**\n"
-        "- **Вариант A — установщик:** запустить `LocalHarness-Setup-v1.0.6.exe`. Без прав администратора, "
-        "ярлык на рабочем столе создаётся по умолчанию. Автозапуск — только если отметить галочку. "
-        "Обновление и удаление не трогают `data`, `work` и `config.json`.\n"
-        "- **Вариант B — portable:** распаковать `LocalHarness-v1.0.6-windows.zip` в папку без кириллицы "
-        "в пути и запустить `LocalHarness.exe`.\n\n"
-        "Нужен LM Studio с загруженной моделью (или Ollama); Python не требуется. "
-        "Интерфейс откроется на http://127.0.0.1:7788.\n\n"
-        "Сборка чистая: без личных данных, истории и конфига. Данные создаются рядом с exe при первом запуске.\n"
+        "- **Вариант A — установщик:** запустить `LocalHarness-Setup-v1.0.7-beta.1.exe` (без прав администратора; "
+        "обновление не трогает `data`, `work` и `config.json`).\n"
+        "- **Вариант B — portable:** распаковать `LocalHarness-v1.0.7-beta.1-windows.zip` и запустить `LocalHarness.exe`.\n\n"
+        "Интерфейс откроется на http://127.0.0.1:7788.\n"
     )
 
     repo = "lenovolquser15-ai/Local-AI-IDE"
     url = f"https://api.github.com/repos/{repo}/releases"
 
-    print(f"Creating release {tag} on {repo}...")
+    print(f"Creating pre-release {tag} on {repo}...")
     r = requests.post(
         url,
         headers=headers,
@@ -93,7 +80,7 @@ def main():
             "name": name,
             "body": body,
             "draft": False,
-            "prerelease": False,
+            "prerelease": True,
         },
         timeout=30,
     )
@@ -103,16 +90,19 @@ def main():
 
     rel = r.json()
     rel_url = rel.get("html_url")
-    print(f"Release created successfully: {rel_url}")
+    print(f"Pre-release created successfully: {rel_url}")
 
     base_upload = rel["upload_url"].split("{")[0]
 
     assets = [
-        ("LocalHarness-Setup-v1.0.6.exe", "dist/LocalHarness-Setup-v1.0.6.exe", "application/octet-stream"),
-        ("LocalHarness-v1.0.6-windows.zip", "dist/LocalHarness-v1.0.6-windows.zip", "application/zip"),
+        (f"LocalHarness-Setup-{tag}.exe", f"dist/LocalHarness-Setup-{tag}.exe", "application/octet-stream"),
+        (f"LocalHarness-{tag}-windows.zip", f"dist/LocalHarness-{tag}-windows.zip", "application/zip"),
     ]
 
     for fname, fpath, ctype in assets:
+        if not os.path.exists(fpath):
+            print(f"Skipping missing asset: {fpath}")
+            continue
         sz = os.path.getsize(fpath)
         print(f"Uploading {fname} ({sz:,} bytes)...")
         with open(fpath, "rb") as fh:
@@ -124,15 +114,15 @@ def main():
                     "User-Agent": "LocalHarness-Release-Script",
                 },
                 data=fh,
-                timeout=180,
+                timeout=600,
             )
         if up_resp.status_code not in (200, 201):
-            print(f"Failed to upload {fname}: {up_resp.status_code} {up_resp.text}")
+            print(f"Upload failed for {fname}:", up_resp.status_code, up_resp.text)
             sys.exit(1)
-        dl_url = up_resp.json().get("browser_download_url")
-        print(f"Uploaded {fname} -> {dl_url}")
+        print(f"Uploaded {fname}: {up_resp.json().get('browser_download_url')}")
 
-    print("\nRelease completed successfully!")
+    print("ALL DONE!")
+
 
 if __name__ == "__main__":
     main()
