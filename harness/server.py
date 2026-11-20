@@ -23,6 +23,8 @@ from . import vision as vision_mod
 from . import dashboard as dashboard_mod
 from . import cluster as cluster_mod
 from . import obscura_browser as obscura_mod
+from . import backup as backup_mod
+from . import scheduler as scheduler_mod
 
 
 def _obscura_status_safe(cfg):
@@ -554,6 +556,27 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, cluster_mod.poll_task(wid, wait=wait))
             return
 
+        if path == "/api/backup/export":
+            inc_sess = query.get("sessions", ["1"])[0] != "0"
+            inc_plug = query.get("plugins", ["1"])[0] != "0"
+            inc_mem = query.get("memory", ["1"])[0] != "0"
+            payload = backup_mod.export_profile(
+                include_sessions=inc_sess, include_plugins=inc_plug, include_memory=inc_mem
+            )
+            stamp = time.strftime("%Y%m%d-%H%M")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/zip")
+            self.send_header("Content-Disposition", 'attachment; filename="localharness-backup-%s.zip"' % stamp)
+            self.send_header("Content-Length", str(len(payload)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        if path == "/api/scheduler/list":
+            _json_response(self, scheduler_mod.list_tasks())
+            return
+
         if path == "/api/desktop":
             from . import desktop
             _json_response(self, desktop.status())
@@ -772,6 +795,11 @@ class Handler(BaseHTTPRequestHandler):
             "/api/cluster/node/remove": self.handle_cluster_node_remove,
             "/api/cluster/llm_query": self.handle_cluster_llm_query,
             "/api/obscura/test": self.handle_obscura_test,
+            "/api/backup/import": self.handle_backup_import,
+            "/api/scheduler/add": self.handle_scheduler_add,
+            "/api/scheduler/toggle": self.handle_scheduler_toggle,
+            "/api/scheduler/delete": self.handle_scheduler_delete,
+            "/api/scheduler/run": self.handle_scheduler_run,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -1251,6 +1279,37 @@ class Handler(BaseHTTPRequestHandler):
             "error": "Бинарник obscura не найден. Скачайте с github.com/h4ckf0r0day/obscura и укажите путь или добавьте в PATH.",
         })
 
+    def handle_backup_import(self, body):
+        res = backup_mod.import_profile_b64(
+            body.get("data_b64", ""),
+            restore_config=body.get("restore_config", True),
+            restore_memory=body.get("restore_memory", True),
+            restore_sessions=body.get("restore_sessions", True),
+            restore_plugins=body.get("restore_plugins", True),
+        )
+        _json_response(self, res)
+
+    def handle_scheduler_add(self, body):
+        res = scheduler_mod.add_task(
+            name=body.get("name"),
+            payload=body.get("payload"),
+            kind=body.get("kind", "prompt"),
+            schedule_type=body.get("schedule_type", "interval"),
+            interval_min=body.get("interval_min", 60),
+            daily_time=body.get("daily_time", "09:00"),
+            enabled=body.get("enabled", True),
+        )
+        _json_response(self, res)
+
+    def handle_scheduler_toggle(self, body):
+        _json_response(self, scheduler_mod.toggle_task(body.get("id"), body.get("enabled", True)))
+
+    def handle_scheduler_delete(self, body):
+        _json_response(self, scheduler_mod.delete_task(body.get("id")))
+
+    def handle_scheduler_run(self, body):
+        _json_response(self, scheduler_mod.run_now(body.get("id"), sync=bool(body.get("sync", False))))
+
     def stream_events(self, sid, since):
         self.close_connection = True
         self.send_response(200)
@@ -1335,6 +1394,7 @@ def serve(cfg):
                 print("  remote autostart: %s" % exc)
             try:
                 dashboard_mod.start()
+                scheduler_mod.start()
             except Exception:
                 pass
             try:

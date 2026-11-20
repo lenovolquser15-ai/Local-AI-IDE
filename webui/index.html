@@ -98,6 +98,7 @@
       <button class="view-tab" id="tabLM" data-view="lm">LM Studio</button>
       <button class="view-tab" id="tabDashboard" data-view="dashboard">Дашборд</button>
       <button class="view-tab" id="tabCluster" data-view="cluster">Кластер</button>
+      <button class="view-tab" id="tabSchedule" data-view="schedule">Расписание</button>
     </nav>
 
     <div id="modelWarning" class="model-warning" role="status" hidden></div>
@@ -560,6 +561,50 @@
       </div>
     </section>
 
+    <section id="viewSchedule" class="pageview" hidden>
+      <div class="page-inner sched-page">
+        <div class="page-head">
+          <div class="page-head-text">
+            <div class="page-title">Планировщик и Автоматизации</div>
+            <div class="page-sub">Запуск промптов агента и команд по расписанию (интервал или ежедневно по времени)</div>
+          </div>
+          <span class="grow"></span>
+          <button id="schedRefreshBtn" class="ghost" type="button">Обновить</button>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title">➕ Новая автозадача</div>
+          <div class="sched-form-grid">
+            <input type="text" id="schedName" class="field" placeholder="Название (напр. Утренний дайджест)">
+            <select id="schedKind" class="compact">
+              <option value="prompt">🤖 Промпт агенту</option>
+              <option value="shell">💻 Команда Shell</option>
+            </select>
+            <select id="schedType" class="compact">
+              <option value="interval">Каждые N минут</option>
+              <option value="daily">Ежедневно в HH:MM</option>
+            </select>
+            <input type="number" id="schedInterval" class="field" min="1" max="10080" value="60" placeholder="Минут">
+            <input type="time" id="schedDailyTime" class="field" value="09:00" hidden>
+          </div>
+          <textarea id="schedPayload" class="settings-text" rows="2" placeholder="Что выполнить? Например: Проверь новости ИИ и сделай краткую сводку из 5 пунктов…"></textarea>
+          <div class="thermal-action-row">
+            <button id="schedAddBtn" class="primary" type="button">➕ Добавить в расписание</button>
+          </div>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title">Активные задачи</div>
+          <div id="schedTasksList" class="cluster-list"></div>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title">История запусков</div>
+          <div id="schedHistoryList" class="cluster-list"></div>
+        </div>
+      </div>
+    </section>
+
     <footer class="composer">
       <div class="band warn-band" id="approveBand" hidden></div>
       <div class="band goal-band" id="goalBand" hidden>
@@ -581,6 +626,8 @@
           </button>
           <div class="composer-actions">
             <span class="hint" id="modeHint"></span>
+            <button id="voiceTtsBtn" class="composer-icon" type="button" title="Озвучка ответов модели (TTS)" aria-pressed="false">🔊</button>
+            <button id="voiceMicBtn" class="composer-icon" type="button" title="Голосовой ввод (микрофон)" aria-pressed="false">🎤</button>
             <button id="attachBtn" class="composer-icon" type="button" title="Прикрепить картинки (или Ctrl+V / перетащи в поле)">
               <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="4.5" width="17" height="15" rx="3" fill="none" stroke="currentColor" stroke-width="1.7"/><circle cx="8.8" cy="9.6" r="1.5" fill="currentColor"/><path d="M4.5 16.5l4.2-4 3.3 3 2.6-2.2 4.9 4.2" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
@@ -806,6 +853,20 @@
         <button id="vtApiKeySave" class="ghost" type="button">Сохранить</button>
       </div>
       <div class="page-sub">Ключ с virustotal.com (профиль → API key). Даёт сверку SHA-256 с базой 70+ антивирусов. Без ключа плагины проверяет локальный аудит кода — файлы никуда не отправляются.</div>
+    </div>
+    <div class="settings-block" id="backupBlock">
+      <div class="plate-title">Резервная копия и перенос профиля (.zip)</div>
+      <div class="page-sub">Сохрани все настройки, плагины, память, расписания и сессии в один .zip архив, чтобы перенести LocalHarness на другой ПК или быстро восстановиться.</div>
+      <div class="thermal-action-row">
+        <label class="check-pill"><input type="checkbox" id="bkSessions" checked><span>Сессии</span></label>
+        <label class="check-pill"><input type="checkbox" id="bkPlugins" checked><span>Плагины</span></label>
+        <label class="check-pill"><input type="checkbox" id="bkMemory" checked><span>Память</span></label>
+      </div>
+      <div class="thermal-action-row">
+        <button id="bkExportBtn" class="primary" type="button">📦 Скачать бэкап (.zip)</button>
+        <label class="ghost file-pick" style="cursor:pointer;">📥 Восстановить из .zip<input type="file" id="bkImportFile" accept=".zip,application/zip" hidden></label>
+      </div>
+      <div id="bkStatus" class="page-sub"></div>
     </div>
     <div class="settings-block">
       <div class="plate-title">Помощь</div>

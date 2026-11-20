@@ -531,6 +531,7 @@ function render(ev, replayed) {
     case 'done':
       dropDive();
       finishAnswer(md(ev.text), 'модель · ' + (ev.protocol === 'json' ? 'json-инструменты' : 'native'));
+      if (!replayed && typeof speakAnswer === 'function' && ev.text) speakAnswer(ev.text);
       finishRun(ev);
       break;
     default: break;
@@ -693,6 +694,7 @@ function setView(name) {
   $('#viewLM').hidden = name !== 'lm';
   if ($('#viewDashboard')) $('#viewDashboard').hidden = name !== 'dashboard';
   if ($('#viewCluster')) $('#viewCluster').hidden = name !== 'cluster';
+  if ($('#viewSchedule')) $('#viewSchedule').hidden = name !== 'schedule';
   const composer = document.querySelector('.composer');
   if (composer) composer.style.display = chat ? '' : 'none';
   const quick = document.querySelector('.quick-controls');
@@ -709,6 +711,7 @@ function setView(name) {
   else if (typeof dashTimer !== 'undefined' && dashTimer) { clearTimeout(dashTimer); dashTimer = null; }
   if (name === 'cluster') refreshCluster();
   else if (typeof clusterTimer !== 'undefined' && clusterTimer) { clearTimeout(clusterTimer); clusterTimer = null; }
+  if (name === 'schedule') refreshSchedule();
 }
 
 /* ---------- state ---------- */
@@ -3435,6 +3438,267 @@ if ($('#clusterBenchBtn')) {
     } finally {
       btn.disabled = false;
       btn.textContent = '⚡ Тест нагрузки';
+    }
+  };
+}
+
+/* ---------- Voice Mode (STT Microphone + TTS Speech) ---------- */
+let voiceTtsEnabled = localStorage.getItem('lh.voice.tts') === '1';
+let voiceRecognition = null;
+let voiceRecording = false;
+let voiceLastWasMic = false;
+
+function syncVoiceButtons() {
+  const ttsBtn = $('#voiceTtsBtn');
+  if (ttsBtn) {
+    ttsBtn.classList.toggle('active', voiceTtsEnabled);
+    ttsBtn.setAttribute('aria-pressed', voiceTtsEnabled ? 'true' : 'false');
+    ttsBtn.title = voiceTtsEnabled ? 'Озвучка ответов включена (нажми чтобы выключить)' : 'Включить озвучку ответов (TTS)';
+  }
+}
+syncVoiceButtons();
+
+function speakAnswer(rawText) {
+  if (!voiceTtsEnabled || !('speechSynthesis' in window)) return;
+  try {
+    window.speechSynthesis.cancel();
+    const cleaned = String(rawText || '')
+      .replace(/```[\s\S]*?```/g, ' код пропущен. ')
+      .replace(/`[^`]+`/g, ' ')
+      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+      .replace(/[#*_~>|]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 1200);
+    if (!cleaned) return;
+    const utter = new SpeechSynthesisUtterance(cleaned);
+    utter.lang = 'ru-RU';
+    utter.rate = 1.05;
+    const voices = window.speechSynthesis.getVoices() || [];
+    const ru = voices.find((v) => /ru/i.test(v.lang));
+    if (ru) utter.voice = ru;
+    window.speechSynthesis.speak(utter);
+  } catch (e) {}
+}
+
+if ($('#voiceTtsBtn')) {
+  $('#voiceTtsBtn').onclick = () => {
+    voiceTtsEnabled = !voiceTtsEnabled;
+    localStorage.setItem('lh.voice.tts', voiceTtsEnabled ? '1' : '0');
+    if (!voiceTtsEnabled && 'speechSynthesis' in window) window.speechSynthesis.cancel();
+    syncVoiceButtons();
+    pushNotice(voiceTtsEnabled ? '🔊 Озвучка ответов модели включена' : '🔇 Озвучка ответов выключена', 'ok');
+  };
+}
+
+if ($('#voiceMicBtn')) {
+  $('#voiceMicBtn').onclick = () => {
+    const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRec) {
+      pushNotice('Голосовой ввод не поддерживается в этом браузере (открой в Chrome/Edge)', 'warn');
+      return;
+    }
+    if (voiceRecording && voiceRecognition) {
+      voiceRecognition.stop();
+      return;
+    }
+    const rec = new SpeechRec();
+    rec.lang = 'ru-RU';
+    rec.interimResults = true;
+    rec.continuous = false;
+    const baseText = ($('#input').value || '').trim();
+    voiceRecognition = rec;
+    voiceRecording = true;
+    $('#voiceMicBtn').classList.add('recording');
+    $('#voiceMicBtn').setAttribute('aria-pressed', 'true');
+    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+
+    rec.onresult = (ev) => {
+      let transcript = '';
+      for (let i = 0; i < ev.results.length; i++) {
+        transcript += ev.results[i][0].transcript;
+      }
+      $('#input').value = (baseText ? baseText + ' ' : '') + transcript.trim();
+    };
+    rec.onerror = (ev) => {
+      pushNotice('Микрофон: ' + (ev.error || 'ошибка распознавания'), 'warn');
+    };
+    rec.onend = () => {
+      voiceRecording = false;
+      $('#voiceMicBtn').classList.remove('recording');
+      $('#voiceMicBtn').setAttribute('aria-pressed', 'false');
+      const finalVal = ($('#input').value || '').trim();
+      if (finalVal && finalVal !== baseText) {
+        voiceLastWasMic = true;
+        $('#input').focus();
+      }
+    };
+    rec.start();
+  };
+}
+
+/* ---------- Scheduler & Automations ---------- */
+async function refreshSchedule() {
+  try {
+    const data = await api('/api/scheduler/list');
+    if (!data || !data.ok) return;
+    const tList = $('#schedTasksList');
+    if (tList) {
+      tList.innerHTML = '';
+      const tasks = data.tasks || [];
+      if (!tasks.length) {
+        tList.append(node('div', 'page-sub', 'Запланированных задач пока нет. Создай первую выше!'));
+      } else {
+        tasks.forEach((t) => {
+          const row = node('div', 'cllm-row');
+          const info = node('div', 'cllm-info');
+          const ico = t.kind === 'shell' ? '💻' : '🤖';
+          const when = t.schedule_type === 'daily' ? ('ежедневно в ' + t.daily_time) : ('каждые ' + t.interval_min + ' мин');
+          const nxt = t.next_run_at ? new Date(t.next_run_at * 1000).toLocaleTimeString('ru-RU', { hour: '2-digit', minute: '2-digit' }) : '—';
+          info.append(node('div', 'cllm-title', ico + ' ' + esc(t.name) + (t.enabled ? '' : ' (выкл.)')));
+          info.append(node('div', 'cllm-sub', when + ' · след. ' + nxt + ' · запусков: ' + (t.runs_count || 0) + ' · ' + esc((t.payload || '').slice(0, 70))));
+          row.append(info);
+
+          const acts = node('div', 'sched-actions');
+          const runBtn = node('button', 'ghost small-btn', t.running ? '⏳' : '▶ Сейчас');
+          runBtn.type = 'button';
+          runBtn.disabled = !!t.running;
+          runBtn.onclick = async () => {
+            await api('/api/scheduler/run', { id: t.id });
+            pushNotice('Задача «' + t.name + '» запущена', 'ok');
+            setTimeout(refreshSchedule, 1200);
+          };
+          const togBtn = node('button', 'ghost small-btn', t.enabled ? 'Пауза' : 'Включить');
+          togBtn.type = 'button';
+          togBtn.onclick = async () => {
+            await api('/api/scheduler/toggle', { id: t.id, enabled: !t.enabled });
+            refreshSchedule();
+          };
+          const delBtn = node('button', 'ghost small-btn danger-text', '✕');
+          delBtn.type = 'button';
+          delBtn.onclick = async () => {
+            await api('/api/scheduler/delete', { id: t.id });
+            refreshSchedule();
+          };
+          acts.append(runBtn, togBtn, delBtn);
+          row.append(acts);
+          tList.append(row);
+        });
+      }
+    }
+
+    const hList = $('#schedHistoryList');
+    if (hList) {
+      hList.innerHTML = '';
+      const hist = data.history || [];
+      if (!hist.length) {
+        hList.append(node('div', 'page-sub', 'История запусков пуста.'));
+      } else {
+        hist.slice(0, 15).forEach((h) => {
+          const row = node('div', 'cllm-row');
+          const info = node('div', 'cllm-info');
+          const ts = h.ran_at ? new Date(h.ran_at * 1000).toLocaleString('ru-RU') : '';
+          info.append(node('div', 'cllm-title', (h.ok ? '✅ ' : '❌ ') + esc(h.task_name || 'Задача') + ' · ' + ts + ' (' + (h.elapsed_s || 0) + 'с)'));
+          info.append(node('div', 'cllm-sub', esc((h.output || '').slice(0, 180))));
+          row.append(info);
+          if (h.session_id) {
+            const openBtn = node('button', 'ghost small-btn', 'Открыть чат');
+            openBtn.type = 'button';
+            openBtn.onclick = async () => {
+              await openSession(h.session_id);
+              setView('chat');
+            };
+            row.append(openBtn);
+          }
+          hList.append(row);
+        });
+      }
+    }
+  } catch (e) {
+    console.warn('schedule refresh failed:', e);
+  }
+}
+
+if ($('#schedType')) {
+  $('#schedType').onchange = (e) => {
+    const daily = e.target.value === 'daily';
+    if ($('#schedInterval')) $('#schedInterval').hidden = daily;
+    if ($('#schedDailyTime')) $('#schedDailyTime').hidden = !daily;
+  };
+}
+if ($('#schedRefreshBtn')) $('#schedRefreshBtn').onclick = refreshSchedule;
+if ($('#schedAddBtn')) {
+  $('#schedAddBtn').onclick = async () => {
+    const name = ($('#schedName') && $('#schedName').value.trim()) || 'Автозадача';
+    const kind = ($('#schedKind') && $('#schedKind').value) || 'prompt';
+    const stype = ($('#schedType') && $('#schedType').value) || 'interval';
+    const intervalMin = Number($('#schedInterval') && $('#schedInterval').value) || 60;
+    const dailyTime = ($('#schedDailyTime') && $('#schedDailyTime').value) || '09:00';
+    const payload = ($('#schedPayload') && $('#schedPayload').value.trim()) || '';
+    if (!payload) { pushNotice('Введи текст промпта или команду', 'warn'); return; }
+    const res = await api('/api/scheduler/add', {
+      name, kind, schedule_type: stype, interval_min: intervalMin, daily_time: dailyTime, payload
+    });
+    if (res && res.ok) {
+      $('#schedName').value = '';
+      $('#schedPayload').value = '';
+      pushNotice('Задача добавлена в расписание', 'ok');
+      refreshSchedule();
+    } else {
+      pushNotice((res && res.error) || 'Не удалось добавить задачу', 'bad');
+    }
+  };
+}
+
+/* ---------- Profile Backup Export / Import (.zip) ---------- */
+if ($('#bkExportBtn')) {
+  $('#bkExportBtn').onclick = () => {
+    const s = ($('#bkSessions') && $('#bkSessions').checked) ? '1' : '0';
+    const p = ($('#bkPlugins') && $('#bkPlugins').checked) ? '1' : '0';
+    const m = ($('#bkMemory') && $('#bkMemory').checked) ? '1' : '0';
+    window.location.href = '/api/backup/export?sessions=' + s + '&plugins=' + p + '&memory=' + m;
+    pushNotice('Скачивание резервной копии профиля (.zip)…', 'ok');
+  };
+}
+if ($('#bkImportFile')) {
+  $('#bkImportFile').onchange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const stEl = $('#bkStatus');
+    if (stEl) stEl.textContent = 'Восстановление из ' + file.name + '…';
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) {
+        bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      }
+      const data_b64 = btoa(bin);
+      const res = await api('/api/backup/import', {
+        data_b64,
+        restore_config: true,
+        restore_memory: $('#bkMemory') ? $('#bkMemory').checked : true,
+        restore_sessions: $('#bkSessions') ? $('#bkSessions').checked : true,
+        restore_plugins: $('#bkPlugins') ? $('#bkPlugins').checked : true
+      });
+      if (res && res.ok) {
+        const r = res.restored || {};
+        const msg = '✅ Восстановлено: конфиг=' + (r.config ? 'да' : 'нет')
+          + ', сессий=' + (r.sessions || 0)
+          + ', плагинов=' + (r.plugins || 0)
+          + ', память=' + (r.memory ? 'да' : 'нет');
+        if (stEl) stEl.textContent = msg;
+        pushNotice(msg, 'ok');
+        await refreshState();
+      } else {
+        const err = (res && res.error) || 'Ошибка импорта';
+        if (stEl) stEl.textContent = '❌ ' + err;
+        pushNotice(err, 'bad');
+      }
+    } catch (err) {
+      if (stEl) stEl.textContent = '❌ ' + err.message;
+    } finally {
+      e.target.value = '';
     }
   };
 }
