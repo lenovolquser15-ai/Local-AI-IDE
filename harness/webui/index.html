@@ -671,6 +671,20 @@
         <input type="text" id="searxngUrl" class="field grow" placeholder="http://127.0.0.1:8080">
       </div>
       <div class="page-sub">Нужен свой SearXNG (например, Docker searxng/searxng) с JSON-выдачей: в settings.yml — search.formats: [html, json]. Включённый инстанс опрашивается первым; DuckDuckGo, Bing и остальные остаются запасными.</div>
+      <div style="margin-top:12px;padding-top:10px;border-top:1px solid var(--l0);">
+        <div class="plate-title-row">
+          <label class="autostart-label" style="margin:0;"><input id="obscuraEnabled" type="checkbox"> Obscura — быстрый Rust stealth-браузер для поиска</label>
+          <span class="sec-chip" id="obscuraStatusChip">не найден</span>
+        </div>
+        <div class="urlrow" style="margin-top:6px;">
+          <input type="text" id="obscuraPath" class="field grow" placeholder="Путь к obscura.exe (пусто = автопоиск в PATH)">
+        </div>
+        <div class="urlrow" style="margin-top:6px;">
+          <input type="text" id="obscuraCdp" class="field grow" placeholder="http://127.0.0.1:9223">
+          <button id="obscuraTestBtn" class="ghost" type="button">Проверить</button>
+        </div>
+        <div id="obscuraHint" class="page-sub">Легковесный headless-браузер на Rust (30–130 МБ RAM, CDP + <code>--stealth</code>). При включении опрашивается приоритетно в поиске и обходит антибот-проверки.</div>
+      </div>
     </div>
     <div class="settings-block">
       <div class="plate-title">Долговременная память</div>

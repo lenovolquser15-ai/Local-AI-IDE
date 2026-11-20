@@ -401,6 +401,68 @@ def camoufox(query, count=8, timeout=DEFAULT_TIMEOUT):
     return results
 
 
+OBSCURA_BING_JS = """(() => {
+    const out = [];
+    for (const el of document.querySelectorAll('li.b_algo')) {
+        const a = el.querySelector('h2 a');
+        if (!a) continue;
+        const p = el.querySelector('.b_caption p, p');
+        out.push({
+            title: (a.textContent || '').trim(),
+            url: a.getAttribute('href') || '',
+            snippet: p ? (p.textContent || '').trim() : ''
+        });
+    }
+    return out;
+})()"""
+
+
+def obscura(query, count=8, timeout=DEFAULT_TIMEOUT, cfg=None):
+    """Легковесный Rust stealth-браузер Obscura (CDP, --stealth): мгновенный старт,
+    рандомизация отпечатков и обход блокировок без тяжелого Chromium/Firefox."""
+    from . import obscura_browser
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query, "kl": "wt-wt"})
+    session = obscura_browser.get_session()
+    session.open(url, cfg=cfg or {})
+    raw = session.evaluate(CAMOUFOX_JS, cfg=cfg or {}) or {}
+    rows = raw.get("result") if isinstance(raw, dict) else raw
+    results = []
+    if isinstance(rows, list):
+        for row in rows:
+            target = _ddg_target(str(row.get("url") or ""))
+            if target.startswith("http"):
+                results.append(_item(row.get("title") or "", target,
+                                     row.get("snippet") or "", "obscura"))
+            if len(results) >= count:
+                break
+
+    if not results:
+        # Резервный проход через Bing внутри того же stealth-инстанса Obscura
+        bing_url = "https://www.bing.com/search?" + urllib.parse.urlencode({"q": query, "count": count})
+        session.open(bing_url, cfg=cfg or {})
+        raw_b = session.evaluate(OBSCURA_BING_JS, cfg=cfg or {}) or {}
+        rows_b = raw_b.get("result") if isinstance(raw_b, dict) else raw_b
+        if isinstance(rows_b, list):
+            for row in rows_b:
+                target = _bing_url(str(row.get("url") or ""))
+                if target.startswith("http"):
+                    results.append(_item(row.get("title") or "", target,
+                                         row.get("snippet") or "", "obscura"))
+                if len(results) >= count:
+                    break
+
+    if not results:
+        raise RuntimeError("obscura: выдача пустая (капча или блокировка)")
+    return results
+
+
+def _obscura_engine(cfg):
+    def _obscura(query, count=8, timeout=DEFAULT_TIMEOUT):
+        return obscura(query, count=count, timeout=timeout, cfg=cfg)
+    _obscura.__name__ = "obscura"
+    return _obscura
+
+
 def searxng(query, count=8, timeout=DEFAULT_TIMEOUT, base_url="http://127.0.0.1:8080"):
     """Свой инстанс SearXNG: агрегирует десятки движков с твоего IP, без общих лимитов.
     Включается галочкой в настройках; инстанс должен отдавать JSON (search.formats)."""
@@ -638,9 +700,10 @@ def hackernews(query, count=5, timeout=DEFAULT_TIMEOUT):
 
 
 GENERAL = [duckduckgo, ddg_lite, bing, rightdao]
-# Camoufox запускает браузер, поэтому он не в параллельной группе общих движков:
-# идёт отдельным запасным проходом, только когда обычная выдача пустая.
-STEALTH = [camoufox]
+# Obscura (Rust CDP stealth) и Camoufox (Firefox stealth) запускают браузер,
+# поэтому идут отдельным запасным проходом, когда обычная выдача пустая
+# (либо приоритетно, если включён search_obscura в настройках).
+STEALTH = [obscura, camoufox]
 VERTICALS = [ddg_ia, versions, habr, wikipedia, stackexchange, github, hackernews, arxiv, npm, pypi]
 ENGINES = {fn.__name__: fn for fn in GENERAL + STEALTH + VERTICALS}
 ALIASES = {"ddg": "duckduckgo", "duckduckgo_html": "duckduckgo", "lite": "ddg_lite",
@@ -649,6 +712,7 @@ ALIASES = {"ddg": "duckduckgo", "duckduckgo_html": "duckduckgo", "lite": "ddg_li
            "github": "github", "arxiv": "arxiv", "bing": "bing", "rightdao": "rightdao",
            "ddg_ia": "ddg_ia", "ia": "ddg_ia", "versions": "versions", "eol": "versions",
            "version": "versions", "habr": "habr", "хабр": "habr", "habrahabr": "habr",
+           "obscura": "obscura", "обскура": "obscura", "rustbrowser": "obscura",
            "camoufox": "camoufox", "stealth": "camoufox", "firefox": "camoufox",
            "камофокс": "camoufox"}
 
@@ -740,9 +804,10 @@ def _groups(plan):
     return groups
 
 
-def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=None):
+def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=None, obscura_cfg=None):
     """Ищет по нескольким источникам. engine='auto' — параллельно с RRF-слиянием.
-    searxng_url — включённый в настройках свой инстанс; опрашивается первым."""
+    searxng_url — включённый в настройках свой инстанс; опрашивается первым.
+    obscura_cfg — конфиг Obscura; при search_obscura=True опрашивается приоритетно."""
     orig_query = (query or "").strip()
     if not orig_query:
         return {"query": "", "engine": engine, "results": [], "sources": [], "errors": {}}
@@ -755,7 +820,14 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
         name = ALIASES_NORM.get(name, name)
 
     general = list(GENERAL)
+    stealth = list(STEALTH)
     engines_norm = dict(ENGINES_NORM)
+    if obscura_cfg:
+        obscura_fn = _obscura_engine(obscura_cfg)
+        engines_norm["obscura"] = obscura_fn
+        stealth = [obscura_fn if fn.__name__ == "obscura" else fn for fn in stealth]
+        if obscura_cfg.get("search_obscura"):
+            general.insert(0, obscura_fn)
     if searxng_url:
         searxng_fn = _searxng_engine(searxng_url)
         general.insert(0, searxng_fn)
@@ -770,7 +842,8 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
         return {"query": orig_query, "engine": raw_name, "results": [], "sources": [],
                 "errors": {raw_name: err}}
 
-    key = (query.lower(), count, name, searxng_url or "")
+    obscura_flag = bool(obscura_cfg and obscura_cfg.get("search_obscura"))
+    key = (query.lower(), count, name, searxng_url or "", obscura_flag)
     cached = _cache_get(key)
     if cached is not None:
         cached["cached"] = True
@@ -781,7 +854,7 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
     if name != "auto":
         fn = engines_norm[name]
         lists = _run_group([fn], query, count, timeout, errors,
-                           relevance=fn.__name__ in general_names or fn.__name__ == "camoufox",
+                           relevance=fn.__name__ in general_names or fn.__name__ in ("camoufox", "obscura"),
                            respect_cooldown=False)
         results = _rrf(lists)
         sources = [n for n, items in lists if items]
@@ -802,8 +875,8 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
                     results.append(item)
         general_hit = any(name in general_names for name, _ in lists)
         if not results or (not general_hit and len(results) < count):
-            # Поисковики упёрлись в капчу/403: настоящий Firefox (Camoufox) добирает выдачу.
-            slists = _run_group(STEALTH, query, count, timeout, errors, relevance=True)
+            # Поисковики упёрлись в капчу/403: stealth-браузеры (Obscura / Camoufox) добирают выдачу.
+            slists = _run_group(stealth, query, count, timeout, errors, relevance=True)
             sources += [n for n, items in slists if items]
             stealth_items = _rrf(slists)
             seen = {_norm_url(item.get("url") or "") for item in stealth_items}
@@ -820,7 +893,8 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
         relaxed = re.sub(r'["\'«»“”\+]', ' ', orig_query).strip()
         relaxed = re.sub(r'\s+', ' ', relaxed)
         if relaxed and relaxed.lower() != orig_query.lower() and relaxed.lower() != query.lower():
-            retry_res = search(relaxed, count=count, engine=raw_name, timeout=timeout, searxng_url=searxng_url)
+            retry_res = search(relaxed, count=count, engine=raw_name, timeout=timeout,
+                               searxng_url=searxng_url, obscura_cfg=obscura_cfg)
             if retry_res.get("results"):
                 retry_res["query"] = orig_query
                 return retry_res

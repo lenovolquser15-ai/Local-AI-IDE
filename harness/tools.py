@@ -1132,7 +1132,8 @@ class Toolkit:
                 searxng_url = (self.cfg.get("search_searxng_url") or "").strip() or "http://127.0.0.1:8080"
             res = search_mod.search(query or "", count=int(count or 8),
                                     engine=engine or self.cfg.get("search_engine", "auto"),
-                                    searxng_url=searxng_url)
+                                    searxng_url=searxng_url,
+                                    obscura_cfg=self.cfg)
             if not res["results"]:
                 res["note"] = ("пусто; попробуй другой запрос, другой engine или web_fetch по прямому URL. "
                                "Ошибки источников: %s" % (res.get("errors") or "нет"))
@@ -1162,6 +1163,8 @@ class Toolkit:
 
     def browser(self, action="tabs", url=None, selector=None, value=None, tab_id=None, engine=None, **kw):
         engine = str(engine or kw.get("engine") or "auto").lower()
+        if engine == "obscura":
+            return self._obscura_browser(action=action, url=url, selector=selector, value=value, **kw)
         if engine == "camoufox":
             return self._camoufox_browser(action=action, url=url, selector=selector, value=value, **kw)
 
@@ -1184,7 +1187,16 @@ class Toolkit:
         except Exception as exc:
             message = str(exc)
             if "9222" in (cdp or "") or "Connection refused" in message or "NewConnectionError" in message or "Failed to establish" in message:
-                # Try fallback to Camoufox stealth browser
+                # Try fallback to Obscura Rust stealth browser first, then Camoufox
+                try:
+                    from . import obscura_browser
+                    if obscura_browser.status(self.cfg).get("available"):
+                        res = self._obscura_browser(action=action, url=url, selector=selector, value=value, **kw)
+                        if res.get("ok"):
+                            res["note"] = "Chrome CDP порт закрыт, действие выполнено через Obscura stealth"
+                            return res
+                except Exception:
+                    pass
                 try:
                     res = self._camoufox_browser(action=action, url=url, selector=selector, value=value, **kw)
                     if res.get("ok"):
@@ -1225,6 +1237,32 @@ class Toolkit:
         if action == "tabs":
             return session.tabs(cfg=self.cfg)
         return {"ok": False, "error": f"Camoufox: неизвестное действие {action}"}
+
+    def _obscura_browser(self, action="read", url=None, selector=None, value=None, **kw):
+        from . import obscura_browser
+        session = obscura_browser.get_session()
+        if action == "open":
+            return session.open(url or "", cfg=self.cfg)
+        if action == "read":
+            if url:
+                session.open(url, cfg=self.cfg)
+            res = session.read(cfg=self.cfg)
+            res["text"] = truncate(res.get("text", ""), MAX_OUT)[0]
+            return res
+        if action == "click":
+            return session.click(selector or "", cfg=self.cfg)
+        if action == "fill":
+            return session.fill(selector or "", value or "", cfg=self.cfg)
+        if action == "screenshot":
+            return session.screenshot(path=kw.get("path"), full_page=kw.get("full_page", False), cfg=self.cfg)
+        if action == "scroll":
+            return session.scroll(amount=kw.get("amount", 600), cfg=self.cfg)
+        if action == "evaluate":
+            return session.evaluate(kw.get("expression") or value or "", cfg=self.cfg)
+        if action == "tabs":
+            cdp = session.ensure_started(self.cfg)
+            return {"ok": True, "engine": "obscura", "tabs": browser.tabs(cdp)}
+        return {"ok": False, "error": f"Obscura: неизвестное действие {action}"}
 
     # ---------- desktop ----------
     def screenshot(self, region="screen", title=None, hwnd=None, x=None, y=None, w=None, h=None,

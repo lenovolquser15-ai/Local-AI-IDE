@@ -802,6 +802,15 @@ async function refreshState() {
   if (document.activeElement !== $('#systemPrompt')) $('#systemPrompt').value = st.system_prompt || '';
   $('#searxngEnabled').checked = !!st.search_searxng;
   if (document.activeElement !== $('#searxngUrl')) $('#searxngUrl').value = st.search_searxng_url || 'http://127.0.0.1:8080';
+  if ($('#obscuraEnabled')) $('#obscuraEnabled').checked = !!st.search_obscura;
+  if ($('#obscuraPath') && document.activeElement !== $('#obscuraPath')) $('#obscuraPath').value = st.obscura_path || '';
+  if ($('#obscuraCdp') && document.activeElement !== $('#obscuraCdp')) $('#obscuraCdp').value = st.obscura_cdp || 'http://127.0.0.1:9223';
+  const obsChip = $('#obscuraStatusChip');
+  if (obsChip && st.obscura_status) {
+    const ost = st.obscura_status;
+    obsChip.className = 'sec-chip ' + (ost.running ? 'ok' : (ost.installed ? 'warn' : ''));
+    obsChip.textContent = ost.running ? 'запущен (CDP)' : (ost.installed ? 'установлен' : 'не найден');
+  }
   $('#memoryEnabled').checked = !!st.memory_enabled;
   $('#memorySection').hidden = !st.memory_enabled;
   if (st.memory_enabled) refreshMemory();
@@ -2446,6 +2455,36 @@ $('#lmContext').onchange = async (e) => {
 $('#lmTtl').onchange = (e) => patchConfig('lms_ttl', Number(e.target.value) || 0);
 $('#searxngEnabled').onchange = (e) => patchConfig('search_searxng', e.target.checked);
 $('#searxngUrl').onchange = (e) => patchConfig('search_searxng_url', e.target.value.trim() || 'http://127.0.0.1:8080');
+if ($('#obscuraEnabled')) $('#obscuraEnabled').onchange = (e) => patchConfig('search_obscura', e.target.checked);
+if ($('#obscuraPath')) $('#obscuraPath').onchange = (e) => patchConfig('obscura_path', e.target.value.trim());
+if ($('#obscuraCdp')) $('#obscuraCdp').onchange = (e) => patchConfig('obscura_cdp', e.target.value.trim() || 'http://127.0.0.1:9223');
+if ($('#obscuraTestBtn')) {
+  $('#obscuraTestBtn').onclick = async () => {
+    const btn = $('#obscuraTestBtn');
+    const hint = $('#obscuraHint');
+    btn.disabled = true;
+    btn.textContent = 'Проверка…';
+    try {
+      const res = await api('/api/obscura/test', {
+        obscura_path: ($('#obscuraPath') && $('#obscuraPath').value.trim()) || '',
+        obscura_cdp: ($('#obscuraCdp') && $('#obscuraCdp').value.trim()) || 'http://127.0.0.1:9223'
+      });
+      if (res && res.ok) {
+        if (hint) hint.textContent = '✅ ' + (res.message || 'Obscura готов к работе');
+        pushNotice(res.message || 'Obscura готов', 'ok');
+      } else {
+        if (hint) hint.textContent = '⚠️ ' + ((res && res.error) || 'Obscura не найден');
+        pushNotice((res && res.error) || 'Obscura не найден', 'warn');
+      }
+      refreshState();
+    } catch (err) {
+      if (hint) hint.textContent = 'Ошибка: ' + err.message;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = 'Проверить';
+    }
+  };
+}
 
 async function refreshMemory() {
   try {

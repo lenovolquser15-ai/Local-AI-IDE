@@ -22,6 +22,14 @@ from . import thermal as thermal_mod
 from . import vision as vision_mod
 from . import dashboard as dashboard_mod
 from . import cluster as cluster_mod
+from . import obscura_browser as obscura_mod
+
+
+def _obscura_status_safe(cfg):
+    try:
+        return obscura_mod.status(cfg)
+    except Exception:
+        return {"available": False, "installed": False, "running": False, "exe": "", "cdp_url": "http://127.0.0.1:9223"}
 from .agent import Agent, Bridge
 from .config import (DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save, _merge,
                      as_int, normalize_context, MAX_TOKENS_MIN, MAX_TOKENS_MAX)
@@ -483,6 +491,10 @@ class Handler(BaseHTTPRequestHandler):
                 "system_prompt": cfg.get("system_prompt", ""),
                 "search_searxng": cfg.get("search_searxng", False),
                 "search_searxng_url": cfg.get("search_searxng_url", "http://127.0.0.1:8080"),
+                "search_obscura": cfg.get("search_obscura", False),
+                "obscura_path": cfg.get("obscura_path", ""),
+                "obscura_cdp": cfg.get("obscura_cdp", "http://127.0.0.1:9223"),
+                "obscura_status": _obscura_status_safe(cfg),
                 "memory_enabled": cfg.get("memory_enabled", False),
                 "memory_facts_count": len(mem_mod.list_facts()),
                 "image_gen_enabled": cfg.get("image_gen_enabled", False),
@@ -759,6 +771,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/cluster/node/add": self.handle_cluster_node_add,
             "/api/cluster/node/remove": self.handle_cluster_node_remove,
             "/api/cluster/llm_query": self.handle_cluster_llm_query,
+            "/api/obscura/test": self.handle_obscura_test,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -1212,6 +1225,31 @@ class Handler(BaseHTTPRequestHandler):
             node_url=body.get("node_url"),
             model=body.get("model"),
         ))
+
+    def handle_obscura_test(self, body):
+        cfg = load()
+        if body.get("obscura_path") is not None:
+            cfg["obscura_path"] = str(body.get("obscura_path") or "").strip()
+        if body.get("obscura_cdp") is not None:
+            cfg["obscura_cdp"] = str(body.get("obscura_cdp") or "").strip() or "http://127.0.0.1:9223"
+        st = obscura_mod.status(cfg)
+        if st.get("running"):
+            _json_response(self, {"ok": True, "status": st, "message": "Obscura CDP отвечает на %s" % st["cdp_url"]})
+            return
+        if st.get("installed"):
+            try:
+                cdp = obscura_mod.get_session().ensure_started(cfg)
+                st = obscura_mod.status(cfg)
+                _json_response(self, {"ok": True, "status": st, "message": "Obscura запущен на %s (--stealth)" % cdp})
+                return
+            except Exception as exc:
+                _json_response(self, {"ok": False, "status": st, "error": str(exc)})
+                return
+        _json_response(self, {
+            "ok": False,
+            "status": st,
+            "error": "Бинарник obscura не найден. Скачайте с github.com/h4ckf0r0day/obscura и укажите путь или добавьте в PATH.",
+        })
 
     def stream_events(self, sid, since):
         self.close_connection = True

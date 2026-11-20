@@ -115,6 +115,37 @@ def tabs(cdp=DEFAULT_CDP):
             for t in items if t.get("type") == "page"]
 
 
+def cdp_call(tab_id, method, params=None, cdp=DEFAULT_CDP, timeout=20.0):
+    """Send an arbitrary CDP method call to the selected page tab."""
+    items = requests.get(cdp.rstrip("/") + "/json/list", timeout=5).json()
+    pages = [t for t in items if t.get("type") == "page"]
+    if not pages:
+        raise BrowserError("в браузере нет ни одной вкладки")
+    tab = pages[0]
+    if tab_id:
+        tab = next((t for t in pages if t.get("id") == tab_id), tab)
+    sock, frame = _connect(tab["webSocketDebuggerUrl"])
+    try:
+        _send(sock, json.dumps({"id": 1, "method": method, "params": params or {}}))
+        while True:
+            raw = frame.read_frame(timeout)
+            if not raw:
+                continue
+            try:
+                msg = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                continue
+            if msg.get("id") == 1:
+                if msg.get("error"):
+                    raise BrowserError(msg["error"].get("message", "CDP error"))
+                return msg.get("result") or {}
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
 def evaluate(expression, tab_id=None, cdp=DEFAULT_CDP, timeout=20.0):
     items = requests.get(cdp.rstrip("/") + "/json/list", timeout=5).json()
     pages = [t for t in items if t.get("type") == "page"]
