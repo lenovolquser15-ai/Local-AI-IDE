@@ -242,6 +242,13 @@ class _Runtime:
         finally:
             self.server_module.register_restarter(None)
             try:
+                from . import dashboard as dashboard_mod
+                from . import scheduler as scheduler_mod
+                dashboard_mod.stop()
+                scheduler_mod.stop()
+            except Exception:
+                pass
+            try:
                 if self._http_thread is not None:
                     if self._http_thread.is_alive():
                         self.httpd.shutdown()
@@ -268,6 +275,13 @@ class _Runtime:
                 remote.autostart()
             except Exception:
                 logging.exception("remote autostart failed")
+            try:
+                from . import dashboard as dashboard_mod
+                from . import scheduler as scheduler_mod
+                dashboard_mod.start()
+                scheduler_mod.start()
+            except Exception:
+                logging.exception("dashboard/scheduler autostart failed")
             self.icon.run(setup=self._setup)
             if self._startup_error is not None:
                 raise RuntimeError("Could not start the desktop tray") from self._startup_error

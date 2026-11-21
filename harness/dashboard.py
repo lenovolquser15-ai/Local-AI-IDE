@@ -115,7 +115,11 @@ def stop():
 
 
 def get_history(minutes=10):
-    """Return snapshots within the given time window."""
+    """Return snapshots within the given time window, collecting once if buffer is empty."""
+    with _LOCK:
+        empty = not _HISTORY
+    if empty:
+        _collect_once()
     cutoff = time.time() - minutes * 60
     with _LOCK:
         return [s for s in _HISTORY if s["ts"] >= cutoff]

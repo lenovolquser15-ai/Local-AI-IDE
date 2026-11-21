@@ -364,7 +364,10 @@
               <label>TTL, сек <input id="lmTtl" class="small-field" type="number" min="0" step="60" placeholder="0 = выкл."></label>
             </div>
             <div class="page-sub">Контекст: 512–262144 токенов, кратно 512. Больше реального контекста модели выставлять нельзя — LM Studio откажет или загрузит модель не влезающей в память.</div>
-            <button id="lmDownload" class="primary">Скачать</button>
+            <div class="urlrow">
+              <input type="text" id="lmQuery" class="field grow" placeholder="Поиск и скачивание GGUF модели (напр. qwen2.5-7b-instruct)">
+              <button id="lmDownload" class="primary">Скачать</button>
+            </div>
             <pre id="lmJobLog" class="joblog" hidden></pre>
              <div class="urlrow vision-row"><label class="file-pick">Изображение для vision<input type="file" id="visionFile" accept="image/png,image/jpeg,image/webp,image/gif" multiple></label><span class="page-sub" id="visionName">не выбрано</span><button id="visionClear" class="ghost" type="button">очистить</button></div>
              <div class="urlrow import-row"><input type="text" id="lmImportPath" class="field grow" placeholder="C:\\Models\\model.gguf — локальный файл с Hugging Face"><select id="lmImportMode" class="compact"><option value="copy">копировать</option><option value="hard-link">hard-link</option><option value="symbolic-link">symlink</option><option value="move">переместить</option></select><button id="lmImport" class="primary">Импортировать</button></div>

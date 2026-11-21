@@ -286,5 +286,76 @@ class CliPathTests(unittest.TestCase):
         self.assertIsNone(lms.cli_path({}))
 
 
+class HttpModelsLoadedOnlyTests(unittest.TestCase):
+    def test_http_models_v0_ignores_not_loaded_models(self):
+        import io
+        import json
+
+        fake_v0 = {
+            "data": [
+                {"id": "qwen2.5-7b-instruct", "type": "llm", "state": "not-loaded", "max_context_length": 32768},
+                {"id": "mistral-7b-instruct", "type": "llm", "state": "not-loaded", "max_context_length": 8192},
+            ]
+        }
+
+        class FakeResp:
+            def __init__(self, payload):
+                self._buf = io.BytesIO(json.dumps(payload).encode("utf-8"))
+            def read(self):
+                return self._buf.read()
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        def fake_urlopen(req, timeout=1.5):
+            url = req.full_url
+            if url.endswith("/api/v1/models"):
+                raise OSError("404")
+            if url.endswith("/api/v0/models"):
+                return FakeResp(fake_v0)
+            raise AssertionError("Should not fall back to /v1/models when /api/v0/models succeeded: %s" % url)
+
+        cfg = {"provider": "lmstudio", "model": "qwen2.5-7b-instruct",
+               "providers": {"lmstudio": {"base_url": "http://127.0.0.1:1234/v1"}}}
+        with patch.object(lms, "disk_models", return_value=([], "")), \
+                patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            res = lms._http_models(cfg)
+            self.assertEqual(res, [])
+
+    def test_http_models_v1_detects_loaded_instances(self):
+        import io
+        import json
+
+        fake_v1 = {
+            "models": [
+                {"key": "qwen2.5-7b", "type": "llm", "loaded_instances": []},
+                {"key": "ministral-8b", "type": "llm", "loaded_instances": [
+                    {"id": "ministral-8b:1", "config": {"context_length": 16384}}
+                ]},
+            ]
+        }
+
+        class FakeResp:
+            def __init__(self, payload):
+                self._buf = io.BytesIO(json.dumps(payload).encode("utf-8"))
+            def read(self):
+                return self._buf.read()
+            def __enter__(self):
+                return self
+            def __exit__(self, *args):
+                pass
+
+        cfg = {"provider": "lmstudio", "model": "qwen2.5-7b",
+               "providers": {"lmstudio": {"base_url": "http://127.0.0.1:1234/v1"}}}
+        with patch.object(lms, "disk_models", return_value=([], "")), \
+                patch("urllib.request.urlopen", return_value=FakeResp(fake_v1)):
+            res = lms._http_models(cfg)
+            self.assertEqual(len(res), 1)
+            self.assertEqual(res[0]["modelKey"], "ministral-8b")
+            self.assertEqual(res[0]["identifier"], "ministral-8b:1")
+            self.assertEqual(res[0]["contextLength"], 16384)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -103,6 +103,30 @@ def test_scheduler_daily_next_run():
     assert nxt <= now + 86400 + 5
 
 
+def test_scheduler_prompt_persists_session_events(monkeypatch):
+    from harness import session as session_mod
+    from harness.agent import Agent
+
+    def fake_run(self, user_text, history=None, **kw):
+        session_mod.message(self.sid, "user", user_text)
+        self.bridge.emit({"type": "user", "text": user_text, "images": 0})
+        session_mod.message(self.sid, "assistant", "Готовый дайджест")
+        self.bridge.emit({"type": "done", "text": "Готовый дайджест", "steps": 1, "protocol": "native", "speed": {}, "rounds": 0})
+        return {"answer": "Готовый дайджест", "steps": 1}
+
+    monkeypatch.setattr(Agent, "run", fake_run)
+    added = scheduler_mod.add_task(name="Дайджест", kind="prompt", payload="Сделай сводку")
+    tid = added["task"]["id"]
+    ran = scheduler_mod.run_now(tid, sync=True)
+    assert ran["ok"] is True
+    sid = ran["entry"]["session_id"]
+    loaded = session_mod.load(sid)
+    assert loaded is not None
+    ev_types = [e.get("type") for e in loaded.get("events", [])]
+    assert "user" in ev_types
+    assert "done" in ev_types
+
+
 def test_server_backup_and_scheduler_endpoints(monkeypatch):
     monkeypatch.setattr(server_mod.dnsfix, "resolve", lambda host: "1.1.1.1")
     monkeypatch.setattr(server_mod, "cached_provider_status", lambda cfg: {"alive": True, "label": "test", "models": []})

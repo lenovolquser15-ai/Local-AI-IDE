@@ -24,10 +24,16 @@ def _path(sid):
 
 
 def create(title=""):
-    sid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:4]
-    with LOCK, open(_path(sid), "x", encoding="utf-8") as fh:
-        fh.write(json.dumps({"t": "meta", "id": sid, "created": time.time(), "title": title}, ensure_ascii=False) + "\n")
-    return sid
+    with LOCK:
+        for _ in range(16):
+            sid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+            try:
+                with open(_path(sid), "x", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"t": "meta", "id": sid, "created": time.time(), "title": title}, ensure_ascii=False) + "\n")
+                return sid
+            except FileExistsError:
+                continue
+    raise RuntimeError("failed to allocate unique session id")
 
 
 def append(sid, record):

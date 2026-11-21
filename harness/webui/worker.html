@@ -227,6 +227,7 @@ $('#threadsVal').textContent = initThreads + ' из ' + cores;
 
 let workerId = localStorage.getItem('lh.worker.id') || '';
 let connected = false;
+let sessionToken = 0;
 let paused = false;
 let doneCount = 0;
 let totalMs = 0;
@@ -238,7 +239,10 @@ let wakeLock = null;
 function log(msg) {
   const box = $('#logBox');
   const t = new Date().toLocaleTimeString('ru-RU', { hour12: false });
-  box.innerHTML = '[' + t + '] ' + msg + '<br>' + box.innerHTML;
+  const row = document.createElement('div');
+  row.textContent = '[' + t + '] ' + String(msg || '');
+  box.prepend(row);
+  while (box.children.length > 80) box.removeChild(box.lastChild);
 }
 
 function setStatus(cls, text) {
@@ -375,8 +379,8 @@ async function sendHeartbeat() {
   } catch (e) {}
 }
 
-async function pollLoop(slotIndex) {
-  while (connected) {
+async function pollLoop(slotIndex, myToken) {
+  while (connected && myToken === sessionToken) {
     const maxT = Number($('#threadsRange').value) || 1;
     if (paused || slotIndex >= maxT) {
       await new Promise((r) => setTimeout(r, 800));
@@ -384,6 +388,7 @@ async function pollLoop(slotIndex) {
     }
     try {
       const res = await fetch('/api/cluster/poll?worker_id=' + encodeURIComponent(workerId) + '&wait=2.0');
+      if (!connected || myToken !== sessionToken) break;
       const data = await res.json();
       if (!data.ok && data.error === 'worker not registered') {
         await register();
@@ -449,6 +454,8 @@ $('#toggleBtn').onclick = async () => {
     try {
       await register();
       connected = true;
+      sessionToken++;
+      const myToken = sessionToken;
       paused = false;
       $('#toggleBtn').textContent = 'Отключиться';
       $('#toggleBtn').className = 'danger';
@@ -458,12 +465,13 @@ $('#toggleBtn').onclick = async () => {
       log('Подключён как «' + ($('#devName').value.trim() || defaultName) + '» (' + $('#threadsRange').value + ' пот.)');
       syncWakeLock();
       hbTimer = setInterval(sendHeartbeat, 5000);
-      for (let i = 0; i < cores; i++) pollLoop(i);
+      for (let i = 0; i < cores; i++) pollLoop(i, myToken);
     } catch (err) {
       log('Ошибка подключения: ' + err.message);
     }
   } else {
     connected = false;
+    sessionToken++;
     if (hbTimer) { clearInterval(hbTimer); hbTimer = null; }
     try { await postJson('/api/cluster/unregister', { id: workerId }); } catch (e) {}
     syncWakeLock();

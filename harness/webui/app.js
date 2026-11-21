@@ -712,6 +712,7 @@ function setView(name) {
   if (name === 'cluster') refreshCluster();
   else if (typeof clusterTimer !== 'undefined' && clusterTimer) { clearTimeout(clusterTimer); clusterTimer = null; }
   if (name === 'schedule') refreshSchedule();
+  else if (typeof schedTimer !== 'undefined' && schedTimer) { clearTimeout(schedTimer); schedTimer = null; }
 }
 
 /* ---------- state ---------- */
@@ -885,7 +886,7 @@ async function refreshState() {
           await refreshState();
           if (currentView === 'lm') refreshLM();
         } catch (err) { alert(err.message); }
-        finally { headUnload.disabled = false; headUnload.textContent = '⏏ Выгрузить модель'; }
+        finally { headUnload.disabled = false; headUnload.textContent = '⏏ Выгрузить'; }
       };
     }
   }
@@ -2082,14 +2083,17 @@ function renderLM(data) {
     (data.alive ? 'живой' : 'молчит') + ' · моделей на диске: ' + (data.disk || []).length + hwSummary;
   const loaded = $('#lmLoaded');
   loaded.innerHTML = '';
-  if (!(data.loaded || []).length) loaded.append(node('div', 'empty-note', 'в памяти пусто — загрузи модель с диска'));
+  const hasAnyLoaded = !!(data.loaded && data.loaded.length);
+  if ($('#lmsUnloadAll')) $('#lmsUnloadAll').disabled = !hasAnyLoaded;
+  if ($('#lmsUnloadPlateBtn')) $('#lmsUnloadPlateBtn').hidden = !hasAnyLoaded;
+  if (!hasAnyLoaded) loaded.append(node('div', 'empty-note', 'в памяти пусто — загрузи модель с диска'));
   (data.loaded || []).forEach((m) => {
     const actions = [node('button', 'ghost', 'выгрузить')];
     actions[0].onclick = async () => {
       actions[0].disabled = true;
       actions[0].textContent = 'выгружается…';
       try {
-        await api('/api/lms/unload', { model: m.modelKey || m.path || m.identifier });
+        await api('/api/lms/unload', { model: m.identifier || m.modelKey || m.path });
         pushNotice('Модель выгружена из памяти', 'ok');
         await refreshLM();
         await refreshState();
@@ -2114,12 +2118,15 @@ function renderLM(data) {
   const disk = $('#lmDisk');
   disk.innerHTML = '';
   if (!(data.disk || []).length) disk.append(node('div', 'empty-note', 'на диске моделей нет — скачай из каталога ниже'));
+  const normKey = (v) => String(v || '').replace(/\\/g, '/').trim();
   const loadedKeys = new Set(
-    (data.loaded || []).flatMap((m) => [m.modelKey, m.path, m.identifier, m.displayName].filter(Boolean))
+    (data.loaded || []).flatMap((m) => [m.modelKey, m.path, m.identifier, m.displayName, m.indexedModelIdentifier].map(normKey).filter(Boolean))
   );
   (data.disk || []).forEach((m) => {
     const isLlm = m.type !== 'embedding';
-    const isLoaded = loadedKeys.has(m.modelKey) || loadedKeys.has(m.path) || loadedKeys.has(m.identifier);
+    const isLoaded = [m.modelKey, m.path, m.identifier, m.displayName, m.indexedModelIdentifier]
+      .map(normKey)
+      .some((k) => k && loadedKeys.has(k));
     const actions = [];
     if (isLoaded) {
       const unloadBtn = node('button', 'ghost', 'Выгрузить');
@@ -2127,11 +2134,15 @@ function renderLM(data) {
         unloadBtn.disabled = true;
         unloadBtn.textContent = 'выгружается…';
         try {
-          await api('/api/lms/unload', { model: m.modelKey || m.path || m.identifier });
+          await api('/api/lms/unload', { model: m.identifier || m.modelKey || m.path });
           pushNotice('Модель выгружена из памяти', 'ok');
           await refreshLM();
           await refreshState();
-        } catch (err) { alert(err.message); }
+        } catch (err) {
+          alert(err.message);
+          unloadBtn.disabled = false;
+          unloadBtn.textContent = 'Выгрузить';
+        }
       };
       actions.push(unloadBtn);
     }
@@ -2139,8 +2150,15 @@ function renderLM(data) {
     loadBtn.onclick = async () => {
       loadBtn.disabled = true;
       loadBtn.textContent = 'грузится…';
-      try { await api('/api/lms/load', { model: m.modelKey || m.path, context_length: clampContext($('#lmContext').value, 8192), ttl: Number($('#lmTtl').value) || 0 }); refreshLM(); }
-      catch (err) { alert(err.message); loadBtn.disabled = false; loadBtn.textContent = isLoaded ? 'Перезагрузить' : 'Загрузить'; }
+      try {
+        await api('/api/lms/load', { model: m.modelKey || m.path, context_length: clampContext($('#lmContext').value, 8192), ttl: Number($('#lmTtl').value) || 0 });
+        await refreshLM();
+        await refreshState();
+      } catch (err) {
+        alert(err.message);
+        loadBtn.disabled = false;
+        loadBtn.textContent = isLoaded ? 'Перезагрузить' : 'Загрузить';
+      }
     };
     actions.push(loadBtn);
     const est = m.estimate || {};
@@ -2168,14 +2186,25 @@ function renderJob(job) {
   box.textContent = (job.kind || 'job') + ' ' + (job.status || '') + '\n' + (job.lines || []).join('\n');
 }
 
+let lmJobWasRunning = false;
 async function refreshLM() {
   try {
     const data = await api('/api/lms/state');
     renderLM(data);
     const job = await api('/api/lms/job');
     renderJob(job);
-    if (job && job.running && !lmJobTimer) {
-      lmJobTimer = setTimeout(async () => { lmJobTimer = null; refreshLM(); }, 2000);
+    const isRunning = !!(job && job.running);
+    if (lmJobWasRunning && !isRunning) {
+      lmJobWasRunning = false;
+      const freshData = await api('/api/lms/state');
+      renderLM(freshData);
+      await refreshState();
+    }
+    if (isRunning) {
+      lmJobWasRunning = true;
+      if (!lmJobTimer) {
+        lmJobTimer = setTimeout(async () => { lmJobTimer = null; refreshLM(); }, 1500);
+      }
     }
   } catch (err) {
     $('#lmBase').textContent = 'сервер: ошибка ' + err.message;
@@ -2183,8 +2212,12 @@ async function refreshLM() {
 }
 
 async function startDownload() {
-  const q = $('#lmQuery').value.trim();
-  if (!q) return;
+  const qEl = $('#lmQuery');
+  const q = qEl ? qEl.value.trim() : '';
+  if (!q) {
+    if (qEl) qEl.focus();
+    return;
+  }
   $('#lmDownload').disabled = true;
   try {
     await api('/api/lms/download', { query: q });
@@ -2194,6 +2227,11 @@ async function startDownload() {
   } catch (err) { alert(err.message); }
   $('#lmDownload').disabled = false;
 }
+
+if ($('#lmDownload')) $('#lmDownload').onclick = startDownload;
+$('#lmQuery')?.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') { e.preventDefault(); startDownload(); }
+});
 
 /* ---------- wiring ---------- */
 $('#visionFile').onchange = (e) => {
@@ -2532,7 +2570,7 @@ $('#memoryNewInput').addEventListener('keydown', (e) => {
 });
 $('#memoryClearBtn').onclick = async () => {
   if (confirm('Очистить все сохранённые факты памяти?')) {
-    await api('/api/memory/clear');
+    await api('/api/memory/clear', {});
     refreshMemory();
   }
 };
@@ -2914,7 +2952,7 @@ if ($('#gpuCooldownCancelBtn')) {
       clearInterval(cooldownTimerId);
       cooldownTimerId = null;
     }
-    await api('/api/thermal/cooldown/cancel');
+    await api('/api/thermal/cooldown/cancel', {});
     $('#gpuCooldownDialog').close();
     pushNotice('Охлаждение прервано', 'warn');
     refreshState();
@@ -2976,13 +3014,17 @@ if ($('#gpuThermalResetSimBtn')) {
 
 /* ---------- System Dashboard (Canvas Charts) ---------- */
 let dashTimer = null;
+let lastDashData = null;
 
 function _prepCanvas(canvasId) {
   const canvas = document.getElementById(canvasId);
   if (!canvas) return null;
-  const rect = canvas.parentElement ? canvas.parentElement.getBoundingClientRect() : { width: 520, height: 185 };
-  const w = Math.max(200, Math.floor(rect.width || 520));
-  const h = Math.max(120, Math.floor(rect.height || 185));
+  const parent = canvas.parentElement;
+  const rect = parent ? parent.getBoundingClientRect() : { width: 520, height: 185 };
+  const rawW = rect.width || (parent ? parent.clientWidth : 0) || 520;
+  const rawH = rect.height || (parent ? parent.clientHeight : 0) || 185;
+  const w = Math.max(200, Math.floor(rawW));
+  const h = Math.max(120, Math.floor(rawH));
   const dpr = window.devicePixelRatio || 1;
   if (canvas.width !== Math.floor(w * dpr) || canvas.height !== Math.floor(h * dpr)) {
     canvas.width = Math.floor(w * dpr);
@@ -3216,23 +3258,31 @@ async function refreshDashboard() {
     if ($('#chartVramVal')) $('#chartVramVal').textContent = vTot > 0 ? Math.round(vUsed) + ' / ' + Math.round(vTot) + ' МБ' : '—';
 
     // Charts
-    drawLineChart('chartGpuTemp', history, 'gpu_temp', {
-      color: '#f97316', fillColor: 'rgba(249, 115, 22, .12)',
-      yMin: 20, yMax: 110, unit: '°',
-      warnLine: 85, critLine: 95
-    });
-    drawLineChart('chartGpuUtil', history, 'gpu_util', {
-      color: '#818cf8', fillColor: 'rgba(129, 140, 248, .12)',
-      yMin: 0, yMax: 100, unit: '%'
-    });
-    drawAreaChart('chartVram', history, 'vram_used_mb', {
-      color: '#22d3ee', fillColor: 'rgba(34, 211, 238, .14)',
-      yMin: 0, yMax: vTot || 8192, unit: ''
-    });
-    drawDualLineChart('chartSystem', history, 'ram_used_pct', 'cpu_pct', {
-      color1: '#a78bfa', color2: '#34d399',
-      yMin: 0, yMax: 100, unit: '%'
-    });
+    lastDashData = { history, vTot };
+    const drawAllDashCharts = () => {
+      if (!lastDashData) return;
+      const hData = lastDashData.history;
+      const vt = lastDashData.vTot;
+      drawLineChart('chartGpuTemp', hData, 'gpu_temp', {
+        color: '#f97316', fillColor: 'rgba(249, 115, 22, .12)',
+        yMin: 20, yMax: 110, unit: '°',
+        warnLine: 85, critLine: 95
+      });
+      drawLineChart('chartGpuUtil', hData, 'gpu_util', {
+        color: '#818cf8', fillColor: 'rgba(129, 140, 248, .12)',
+        yMin: 0, yMax: 100, unit: '%'
+      });
+      drawAreaChart('chartVram', hData, 'vram_used_mb', {
+        color: '#22d3ee', fillColor: 'rgba(34, 211, 238, .14)',
+        yMin: 0, yMax: vt || 8192, unit: ''
+      });
+      drawDualLineChart('chartSystem', hData, 'ram_used_pct', 'cpu_pct', {
+        color1: '#a78bfa', color2: '#34d399',
+        yMin: 0, yMax: 100, unit: '%'
+      });
+    };
+    drawAllDashCharts();
+    window._drawAllDashCharts = drawAllDashCharts;
 
     if (dashTimer) clearTimeout(dashTimer);
     if (currentView === 'dashboard') {
@@ -3242,6 +3292,12 @@ async function refreshDashboard() {
     console.warn('dashboard refresh failed:', e);
   }
 }
+
+window.addEventListener('resize', () => {
+  if (currentView === 'dashboard' && typeof window._drawAllDashCharts === 'function') {
+    window._drawAllDashCharts();
+  }
+});
 
 if ($('#dashRefreshBtn')) $('#dashRefreshBtn').onclick = refreshDashboard;
 if ($('#dashWindow')) $('#dashWindow').onchange = refreshDashboard;
@@ -3538,14 +3594,24 @@ if ($('#voiceMicBtn')) {
 }
 
 /* ---------- Scheduler & Automations ---------- */
+let schedTimer = null;
+let schedHadRunning = false;
+
 async function refreshSchedule() {
   try {
     const data = await api('/api/scheduler/list');
     if (!data || !data.ok) return;
+    const tasks = data.tasks || [];
+    const anyRunning = tasks.some((t) => !!t.running);
+    if (schedHadRunning && !anyRunning) {
+      schedHadRunning = false;
+      refreshState();
+    }
+    if (anyRunning) schedHadRunning = true;
+
     const tList = $('#schedTasksList');
     if (tList) {
       tList.innerHTML = '';
-      const tasks = data.tasks || [];
       if (!tasks.length) {
         tList.append(node('div', 'page-sub', 'Запланированных задач пока нет. Создай первую выше!'));
       } else {
@@ -3564,9 +3630,18 @@ async function refreshSchedule() {
           runBtn.type = 'button';
           runBtn.disabled = !!t.running;
           runBtn.onclick = async () => {
-            await api('/api/scheduler/run', { id: t.id });
-            pushNotice('Задача «' + t.name + '» запущена', 'ok');
-            setTimeout(refreshSchedule, 1200);
+            runBtn.disabled = true;
+            runBtn.textContent = '⏳';
+            try {
+              await api('/api/scheduler/run', { id: t.id });
+              pushNotice('Задача «' + t.name + '» запущена', 'ok');
+              schedHadRunning = true;
+              setTimeout(refreshSchedule, 800);
+            } catch (err) {
+              pushNotice(err.message, 'bad');
+              runBtn.disabled = false;
+              runBtn.textContent = '▶ Сейчас';
+            }
           };
           const togBtn = node('button', 'ghost small-btn', t.enabled ? 'Пауза' : 'Включить');
           togBtn.type = 'button';
@@ -3613,6 +3688,10 @@ async function refreshSchedule() {
           hList.append(row);
         });
       }
+    }
+    if (schedTimer) clearTimeout(schedTimer);
+    if (currentView === 'schedule') {
+      schedTimer = setTimeout(refreshSchedule, anyRunning ? 1500 : 5000);
     }
   } catch (e) {
     console.warn('schedule refresh failed:', e);

@@ -1105,15 +1105,15 @@ class Handler(BaseHTTPRequestHandler):
         context_length = normalize_context(
             body.get("context_length"), cfg.get("lms_context_length") or cfg.get("context_tokens") or 8192)
         ttl = body.get("ttl", cfg.get("lms_ttl", 0))
-        args = ["load", model, "--context-length", str(context_length)]
+        args = ["load", model, "--context-length", str(context_length), "-y"]
         try:
             if int(ttl) >= 1:
                 args += ["--ttl", str(int(ttl))]
         except (TypeError, ValueError):
             pass
-        loaded, _ = lms_mod.loaded_models(cfg)
+        loaded, _ = lms_mod.loaded_models(cfg, force=True)
         for m in loaded:
-            if model in (m.get("identifier"), lms_mod.model_key(m), m.get("path")):
+            if any(lms_mod._match_alias(m.get(k), model) for k in ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")):
                 lms_mod.run_cli(["unload", str(m.get("identifier") or model)], cfg, timeout=30)
                 lms_mod.invalidate()
                 break
@@ -1123,10 +1123,26 @@ class Handler(BaseHTTPRequestHandler):
         _json_response(self, result)
 
     def handle_lms_unload(self, body):
-        model = body.get("model")
-        args = ["unload", model] if (model and model != "all") else ["unload", "--all"]
+        cfg = load()
+        model = str(body.get("model") or "").strip()
+        if model and model != "all":
+            loaded, _ = lms_mod.loaded_models(cfg, force=True)
+            target_id = model
+            for m in (loaded or []):
+                if any(lms_mod._match_alias(m.get(k), model) for k in ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")):
+                    target_id = str(m.get("identifier") or m.get("modelKey") or model)
+                    break
+            args = ["unload", target_id]
+        else:
+            args = ["unload", "--all"]
+        out, err = lms_mod.run_cli(args, cfg, timeout=30)
         lms_mod.invalidate()
-        _json_response(self, start_lms_job("unload", args))
+        with _PROBE["lock"]:
+            _PROBE["at"] = 0.0
+        if err:
+            _json_response(self, {"ok": False, "error": err}, 400)
+            return
+        _json_response(self, {"ok": True, "unloaded": model or "all", "output": (out or "").strip()})
 
     def handle_lms_download(self, body):
         query = str(body.get("query") or "").strip()

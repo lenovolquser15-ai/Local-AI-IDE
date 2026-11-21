@@ -46,11 +46,11 @@ def export_profile(include_sessions=True, include_plugins=True, include_memory=T
             zf.write(sched_path, "data/schedules.json")
             counts["schedules"] = 1
 
-        # 4. Sessions
+        # 4. Sessions (.jsonl and legacy .json)
         sess_dir = os.path.join(config_mod.DATA_DIR, "sessions")
         if include_sessions and os.path.isdir(sess_dir):
             for fname in sorted(os.listdir(sess_dir)):
-                if not fname.endswith(".json") or not _SAFE_NAME.match(fname):
+                if not fname.endswith((".jsonl", ".json")) or not _SAFE_NAME.match(fname):
                     continue
                 full = os.path.join(sess_dir, fname)
                 if os.path.isfile(full):
@@ -103,7 +103,7 @@ def inspect_backup(raw_bytes):
             "has_config": "config.json" in names,
             "has_memory": "data/memory.json" in names,
             "has_schedules": "data/schedules.json" in names,
-            "sessions": sum(1 for n in names if n.startswith("data/sessions/") and n.endswith(".json")),
+            "sessions": sum(1 for n in names if n.startswith("data/sessions/") and n.endswith((".jsonl", ".json"))),
             "plugins": sum(1 for n in names if n.startswith("plugins/") and n.endswith(".py")),
             "manifest": manifest,
         }
@@ -160,14 +160,20 @@ def import_profile(raw_bytes, restore_config=True, restore_memory=True,
             sess_dir = os.path.join(config_mod.DATA_DIR, "sessions")
             os.makedirs(sess_dir, exist_ok=True)
             for n in sorted(names):
-                if not n.startswith("data/sessions/") or not n.endswith(".json"):
+                if not n.startswith("data/sessions/") or not n.endswith((".jsonl", ".json")):
                     continue
                 fname = n[len("data/sessions/"):]
                 if not _SAFE_NAME.match(fname):
                     continue
                 try:
                     data = zf.read(n)
-                    json.loads(data.decode("utf-8", "replace"))
+                    text = data.decode("utf-8", "replace")
+                    if fname.endswith(".jsonl"):
+                        for ln in text.splitlines():
+                            if ln.strip():
+                                json.loads(ln)
+                    else:
+                        json.loads(text)
                     with open(os.path.join(sess_dir, fname), "wb") as fh:
                         fh.write(data)
                     restored["sessions"] += 1

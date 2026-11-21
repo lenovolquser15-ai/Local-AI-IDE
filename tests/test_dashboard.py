@@ -84,6 +84,12 @@ def test_get_history_time_filter():
     assert len(last_15) == 3
 
 
+def test_get_history_collects_when_empty():
+    hist = dashboard_mod.get_history(minutes=10)
+    assert len(hist) == 1
+    assert "ts" in hist[0]
+
+
 def test_get_latest_returns_dict():
     latest = dashboard_mod.get_latest()
     assert isinstance(latest, dict)

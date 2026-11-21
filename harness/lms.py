@@ -143,82 +143,72 @@ def _http_models(cfg=None):
         root_url = root_url[:-3].rstrip("/")
 
     import urllib.request
-    try:
-        req = urllib.request.Request(root_url + "/api/v0/models", headers={"User-Agent": "LocalHarness"})
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            raw = data.get("data") or []
-            loaded_items = []
-            all_served = []
-            try:
-                disk, _ = disk_models(cfg)
-                disk_map = {}
-                for d in (disk or []):
-                    for k in ("modelKey", "path", "identifier", "indexedModelIdentifier"):
-                        if d.get(k):
-                            disk_map[str(d[k])] = d
-            except Exception:
-                disk_map = {}
+    # Prefer native LM Studio REST API (/api/v1/models or /api/v0/models) which reports
+    # exact load state; /v1/models lists all disk models even when JIT-unloaded.
+    for ep in ("/api/v1/models", "/api/v0/models"):
+        try:
+            req = urllib.request.Request(root_url + ep, headers={"User-Agent": "LocalHarness"})
+            with urllib.request.urlopen(req, timeout=1.5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                raw = data.get("models") if isinstance(data.get("models"), list) else (data.get("data") or [])
+                loaded_items = []
+                try:
+                    disk, _ = disk_models(cfg)
+                    disk_map = {}
+                    for d in (disk or []):
+                        for k in ("modelKey", "path", "identifier", "indexedModelIdentifier"):
+                            if d.get(k):
+                                disk_map[str(d[k])] = d
+                except Exception:
+                    disk_map = {}
 
-            for m in raw:
-                mid = m.get("id")
-                if not mid or m.get("type") == "embeddings" or "embedding" in mid.lower():
-                    continue
-                is_loaded = m.get("state") == "loaded"
-                d_meta = disk_map.get(mid) or {}
-                item = {
-                    "type": "llm",
-                    "identifier": mid,
-                    "modelKey": d_meta.get("modelKey") or mid,
-                    "path": d_meta.get("path") or mid,
-                    "displayName": d_meta.get("displayName") or m.get("name") or mid,
-                    "architecture": m.get("arch") or d_meta.get("architecture") or "",
-                    "quantization": d_meta.get("quantization") or {"name": m.get("quantization") or ""},
-                    "sizeBytes": d_meta.get("sizeBytes") or 0,
-                    "paramsString": d_meta.get("paramsString") or "",
-                    "contextLength": m.get("loaded_context_length") or d_meta.get("maxContextLength") or m.get("max_context_length"),
-                    "maxContextLength": d_meta.get("maxContextLength") or m.get("max_context_length"),
-                    "status": "loaded" if is_loaded else "ready",
-                    "vision": m.get("type") == "vlm" or d_meta.get("vision") or "vision" in mid.lower(),
-                    "trainedForToolUse": "tool_use" in (m.get("capabilities") or []) or d_meta.get("trainedForToolUse"),
-                }
-                if is_loaded:
+                for m in raw:
+                    if not isinstance(m, dict):
+                        continue
+                    mid = m.get("id") or m.get("key") or m.get("modelKey")
+                    mtype = str(m.get("type") or "").lower()
+                    if not mid or mtype in ("embedding", "embeddings") or "embedding" in str(mid).lower():
+                        continue
+                    loaded_inst = m.get("loaded_instances")
+                    if isinstance(loaded_inst, list):
+                        is_loaded = len(loaded_inst) > 0
+                    else:
+                        is_loaded = m.get("state") == "loaded"
+                    if not is_loaded:
+                        continue
+                    d_meta = disk_map.get(mid) or {}
+                    inst_cfg = (loaded_inst[0].get("config") or {}) if (isinstance(loaded_inst, list) and loaded_inst and isinstance(loaded_inst[0], dict)) else {}
+                    inst_id = (loaded_inst[0].get("id") if (isinstance(loaded_inst, list) and loaded_inst and isinstance(loaded_inst[0], dict)) else None) or mid
+                    ctx_len = (m.get("loaded_context_length")
+                               or inst_cfg.get("context_length")
+                               or inst_cfg.get("contextLength")
+                               or d_meta.get("maxContextLength")
+                               or m.get("max_context_length"))
+                    quant = d_meta.get("quantization") or m.get("quantization")
+                    if not isinstance(quant, dict):
+                        quant = {"name": str(quant or "")}
+                    item = {
+                        "type": "llm",
+                        "identifier": inst_id,
+                        "modelKey": d_meta.get("modelKey") or mid,
+                        "path": d_meta.get("path") or mid,
+                        "displayName": d_meta.get("displayName") or m.get("display_name") or m.get("name") or mid,
+                        "architecture": m.get("arch") or m.get("architecture") or d_meta.get("architecture") or "",
+                        "quantization": quant,
+                        "sizeBytes": d_meta.get("sizeBytes") or m.get("size_bytes") or 0,
+                        "paramsString": d_meta.get("paramsString") or m.get("params_string") or "",
+                        "contextLength": ctx_len,
+                        "maxContextLength": d_meta.get("maxContextLength") or m.get("max_context_length"),
+                        "status": "loaded",
+                        "vision": mtype == "vlm" or bool(m.get("vision")) or bool(d_meta.get("vision")) or "vision" in str(mid).lower(),
+                        "trainedForToolUse": ("tool_use" in (m.get("capabilities") or [])
+                                              or bool(m.get("trained_for_tool_use"))
+                                              or bool(d_meta.get("trainedForToolUse"))),
+                    }
                     loaded_items.append(item)
-                all_served.append(item)
-            if loaded_items:
                 return loaded_items
-            sel = (cfg or {}).get("model")
-            if sel:
-                matched = [it for it in all_served if it["identifier"] == sel]
-                if matched:
-                    return matched
-            return all_served
-    except Exception:
-        pass
-
-    try:
-        req = urllib.request.Request(base_url.rstrip("/") + "/models", headers={"User-Agent": "LocalHarness"})
-        with urllib.request.urlopen(req, timeout=1.5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            raw = data.get("data") or []
-            models = []
-            for m in raw:
-                mid = m.get("id")
-                if not mid or "embedding" in mid.lower():
-                    continue
-                models.append({
-                    "type": "llm",
-                    "identifier": mid,
-                    "modelKey": mid,
-                    "path": mid,
-                    "displayName": mid,
-                    "contextLength": 8192,
-                    "status": "loaded",
-                })
-            if models:
-                return models
-    except Exception:
-        pass
+        except Exception:
+            pass
 
     return []
 

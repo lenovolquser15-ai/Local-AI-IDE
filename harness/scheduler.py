@@ -142,6 +142,20 @@ def delete_task(task_id):
         return {"ok": True}
 
 
+def _decode_out(raw):
+    if not raw:
+        return ""
+    for enc in ("utf-8", "cp866", "cp1251", "latin-1"):
+        try:
+            return raw.decode(enc)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", "replace")
+
+
+_TRANSIENT_EVENTS = {"delta", "reason", "speed", "tool_start"}
+
+
 def _execute_task_sync(task):
     """Execute a single scheduled task (prompt via Agent or shell command)."""
     t0 = time.time()
@@ -158,19 +172,43 @@ def _execute_task_sync(task):
                 timeout=120,
                 creationflags=NO_WINDOW,
             )
-            out = (proc.stdout or b"").decode("utf-8", "replace").strip()
-            err = (proc.stderr or b"").decode("utf-8", "replace").strip()
+            out = _decode_out(proc.stdout).strip()
+            err = _decode_out(proc.stderr).strip()
             ok = proc.returncode == 0
             output = (out or err or ("exit code %d" % proc.returncode))[:2000]
         else:
             from .agent import Agent, Bridge
+            from . import dashboard as dashboard_mod
+
+            class ScheduledBridge(Bridge):
+                def __init__(self, session_id):
+                    Bridge.__init__(self)
+                    self.sid = session_id
+
+                def emit(self, event):
+                    if isinstance(event, dict) and event.get("type") not in _TRANSIENT_EVENTS:
+                        try:
+                            session_mod.event(self.sid, event)
+                        except Exception:
+                            pass
+
+                def ask(self, kind, payload, timeout=None):
+                    if kind == "approve":
+                        return {"allow": False}
+                    return {"text": "Фоновая автозадача по расписанию: продолжай самостоятельно без участия пользователя."}
+
             cfg = config_mod.load()
             sid = session_mod.create("⏰ " + task.get("name", "Автозадача"))
-            bridge = Bridge()
+            bridge = ScheduledBridge(sid)
             agent = Agent(cfg, bridge, sid)
-            res = agent.run(task["payload"], history=[])
-            ok = True
-            output = str((res or {}).get("answer") or "выполнено")[:2000]
+            dashboard_mod.record_session()
+            try:
+                res = agent.run(task["payload"], history=[])
+            finally:
+                dashboard_mod.record_session_end()
+            ans = str((res or {}).get("answer") or "выполнено")
+            ok = not ans.startswith("Модель не ответила:")
+            output = ans[:2000]
     except Exception as exc:
         ok = False
         output = "Ошибка: %s" % exc
