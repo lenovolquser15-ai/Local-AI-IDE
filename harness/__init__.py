@@ -1,2 +1,2 @@
-LOCALHARNESS = "1.0.7-beta.1"
+LOCALHARNESS = "1.0.7"
 

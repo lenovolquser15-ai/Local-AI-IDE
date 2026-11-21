@@ -26,13 +26,11 @@ def main():
         "User-Agent": "LocalHarness-Release-Script",
     }
 
-    tag = "v1.0.7-beta.1"
-    name = "LocalHarness v1.0.7-beta.1 (Pre-release)"
+    tag = "v1.0.7"
+    name = "LocalHarness v1.0.7"
     body = (
-        "> **Pre-release (Beta):** тестовая сборка крупного обновления `1.0.7`. "
-        "Официальный стабильный релиз `v1.0.7` выйдет примерно через 2 дня после проверки всех новых функций.\n\n"
         "**Telegram-канал:** [t.me/RemingOstai](https://t.me/RemingOstai)\n\n"
-        "**Что нового в 1.0.7-beta.1**\n"
+        "**Что нового в 1.0.7**\n"
         "- **🔥 Термозащита GPU и автоохлаждение:** мониторинг температуры видеокарты в реальном времени (`❄️ 42°C` → `⚠️ 88°C` → `🔥 101°C`), "
         "плавный термо-троттлинг скорости токенов при нагреве, а при экстремальной температуре (95–100°C+) — аварийное окно "
         "с выгрузкой модели из VRAM (LM Studio / Ollama) и таймером охлаждения на 2–N минут. В Настройках есть настройка порогов и кнопки симуляции.\n"
@@ -45,10 +43,15 @@ def main():
         "[Obscura](https://github.com/h4ckf0r0day/obscura) (`--stealth`, 30–130 МБ RAM) как приоритетного или резервного stealth-движка "
         "в `web_search` и `browser` (настраивается в Настройки → Поиск).\n"
         "- **🎤 Голосовой режим (STT + TTS):** кнопка микрофона для диктовки запросов прямо в чат и кнопка озвучки ответов модели вслух.\n"
-        "- **⏰ Планировщик и Автоматизации:** новая вкладка «Расписание» — запуск промптов агента и Shell-команд каждые N минут или ежедневно по времени `HH:MM` с историей запусков.\n"
-        "- **📦 Экспорт / Импорт профиля (`.zip` бэкап):** полный перенос настроек, плагинов, памяти, расписаний и сессий на другой ПК в один клик (в Настройках).\n\n"
+        "- **⏰ Планировщик и Автоматизации:** новая вкладка «Расписание» — запуск промптов агента и Shell-команд каждые N минут или ежедневно по времени `HH:MM` с историей запусков и просмотром чата.\n"
+        "- **📦 Экспорт / Импорт профиля (`.zip` бэкап):** полный перенос настроек, плагинов, памяти, расписаний и сессий (`.jsonl`) на другой ПК в один клик (в Настройках).\n\n"
+        "**Исправления после beta.1**\n"
+        "- Точное определение загруженных в память моделей LM Studio (`/api/v1/models` и `/api/v0/models` — не показывает «Выгрузить», когда модель не загружена).\n"
+        "- Синхронная выгрузка моделей по `identifier`, флаг `-y` при загрузке и поле поиска моделей на вкладке LM Studio.\n"
+        "- Автозапуск сбора метрик дашборда и планировщика в режиме трея Windows (`desktop.py`) и перерисовка графиков при ресайзе.\n"
+        "- Исправлены `POST`-запросы для очистки памяти и отмены охлаждения GPU, поддержка `.jsonl` в `.zip`-бэкапах, коллизии ID сессий и сохранение истории чата в фоновых задачах планировщика.\n\n"
         "**Тесты**\n"
-        "- Все **195 автоматических тестов** (`pytest tests/`) пройдены без ошибок (включая `test_thermal.py`, `test_dashboard.py`, `test_cluster.py`, `test_obscura.py`, `test_backup_and_scheduler.py`).\n\n"
+        "- Все **199 автоматических тестов** (и 92 подтеста, `pytest tests/`) пройдены без ошибок.\n\n"
         "**Скриншоты**\n"
         "![Дашборд системы: живые Canvas-графики GPU, VRAM, RAM и CPU]"
         "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-dashboard.png)\n"
@@ -61,16 +64,16 @@ def main():
         "![Настройки: термозащита GPU, Obscura stealth-поиск и .zip бэкап]"
         "(https://raw.githubusercontent.com/lenovolquser15-ai/Local-AI-IDE/main/docs/screenshots/ui-settings.png)\n\n"
         "**Установка (Windows)**\n"
-        "- **Вариант A — установщик:** запустить `LocalHarness-Setup-v1.0.7-beta.1.exe` (без прав администратора; "
+        "- **Вариант A — установщик:** запустить `LocalHarness-Setup-v1.0.7.exe` (без прав администратора; "
         "обновление не трогает `data`, `work` и `config.json`).\n"
-        "- **Вариант B — portable:** распаковать `LocalHarness-v1.0.7-beta.1-windows.zip` и запустить `LocalHarness.exe`.\n\n"
+        "- **Вариант B — portable:** распаковать `LocalHarness-v1.0.7-windows.zip` и запустить `LocalHarness.exe`.\n\n"
         "Интерфейс откроется на http://127.0.0.1:7788.\n"
     )
 
     repo = "lenovolquser15-ai/Local-AI-IDE"
     url = f"https://api.github.com/repos/{repo}/releases"
 
-    print(f"Creating pre-release {tag} on {repo}...")
+    print(f"Creating release {tag} on {repo}...")
     r = requests.post(
         url,
         headers=headers,
@@ -80,7 +83,7 @@ def main():
             "name": name,
             "body": body,
             "draft": False,
-            "prerelease": True,
+            "prerelease": False,
         },
         timeout=30,
     )
