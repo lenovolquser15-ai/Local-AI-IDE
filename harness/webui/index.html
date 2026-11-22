@@ -68,6 +68,16 @@
         <span class="head-title" id="sessionTitle">новая сессия</span>
       </div>
       <span class="grow"></span>
+      <select id="personaSelect" class="compact persona-select" title="Роль / Персона агента" aria-label="Персона агента">
+        <option value="default">🤖 Универсальный агент</option>
+        <option value="coder">💻 Senior Разработчик</option>
+        <option value="security">🛡️ Кибербезопасность</option>
+        <option value="analyst">📊 Аналитик &amp; RAG</option>
+        <option value="writer">✍️ Технический писатель</option>
+        <option value="voice">🎙️ Голосовой собеседник</option>
+      </select>
+      <button id="voiceCallBtn" class="ghost small-btn call-open-btn" type="button" title="Голосовой созвон (XTTS v2)">📞 Созвон</button>
+      <button id="themeToggleBtn" class="icon theme-toggle" type="button" title="Переключить тему (Тёмная / Светлая)" aria-label="Переключить тему">☀️</button>
       <button id="headUnloadBtn" class="ghost small-btn" title="Выгрузить модель из памяти LM Studio" hidden>⏏ Выгрузить</button>
       <button id="gpuThermalPill" class="gpu-pill small-btn" type="button" title="Температура видеокарты" hidden>
         <span class="gpu-pill-ico" id="gpuPillIco">❄️</span>
@@ -617,7 +627,7 @@
       </div>
       <div class="input-shell">
         <div class="attach-strip" id="attachStrip" hidden></div>
-        <textarea id="input" rows="2" placeholder="Что сделать на компе? Enter — отправить, Shift+Enter — перенос"></textarea>
+        <textarea id="input" rows="2" placeholder="Что сделать на компе? Напиши «поставь цель: …» для режима цели · Enter — отправить"></textarea>
         <div class="composer-row">
           <button id="modelChip" class="model-chip" type="button" aria-haspopup="dialog" aria-expanded="false" title="Модель и режим">
             <span class="model-chip-dot" id="modelChipDot"></span>
@@ -701,11 +711,96 @@
       <button id="drawerClose" class="icon" type="button" title="Закрыть">✕</button>
     </div>
     <div class="settings-block">
-      <div class="plate-title">Внешний вид</div>
+      <div class="plate-title">Внешний вид и уведомления</div>
+      <label class="check-pill"><input type="checkbox" id="lightThemeToggle"><span>☀️ Светлая тема</span></label>
       <label class="check-pill"><input type="checkbox" id="showReasoning" checked><span>⌁ Показывать раздумья</span></label>
       <label class="check-pill"><input type="checkbox" id="expandReasoning"><span>Разворачивать раздумья</span></label>
       <label class="check-pill"><input type="checkbox" id="autoCompress" checked><span>Сжимать контекст</span></label>
       <label class="check-pill"><input type="checkbox" id="goalChecklistToggle" checked><span>Показывать галочки в цели</span></label>
+      <label class="check-pill"><input type="checkbox" id="toastNotifToggle" checked><span>🔔 Windows Toast уведомления</span></label>
+      <div class="thermal-action-row" style="margin-top:8px;">
+        <button id="toastTestBtn" class="ghost small-btn" type="button">Тест уведомления</button>
+      </div>
+    </div>
+    <div class="settings-block" id="updateBlock">
+      <div class="plate-title-row">
+        <div class="plate-title">Автообновление LocalHarness</div>
+        <span class="sec-chip" id="updateVerChip">v1.0.8</span>
+      </div>
+      <div id="updateStatusText" class="page-sub">Проверка новых релизов на GitHub Releases.</div>
+      <div class="thermal-action-row" style="margin-top:8px;">
+        <button id="updateCheckBtn" class="ghost" type="button">🔄 Проверить обновления</button>
+        <button id="updateDownloadBtn" class="primary" type="button" hidden>⬇️ Скачать и установить</button>
+      </div>
+    </div>
+    <div class="settings-block" id="ragBlock">
+      <div class="plate-title-row">
+        <div class="plate-title">Локальная база знаний (RAG)</div>
+        <span class="sec-chip" id="ragCountChip">0 файлов · 0 чанков</span>
+      </div>
+      <div class="page-sub">Индексируй папки с документами (MD, TXT, PDF, DOCX, код) — агент найдёт нужное через <code>rag_search</code>.</div>
+      <div class="urlrow" style="margin-top:8px;">
+        <input type="text" id="ragPathInput" class="field grow" placeholder="Путь к папке или файлу (напр. C:\Docs)">
+        <button id="ragIndexBtn" class="ghost" type="button">Индексировать</button>
+      </div>
+      <div class="urlrow" style="margin-top:6px;">
+        <input type="text" id="ragQueryInput" class="field grow" placeholder="Проверить поиск по базе знаний…">
+        <button id="ragSearchBtn" class="ghost" type="button">Найти</button>
+      </div>
+      <div id="ragFoldersList" class="memory-list" style="margin-top:6px;"></div>
+      <div id="ragSearchOut" class="page-sub" style="margin-top:6px;"></div>
+      <div class="thermal-action-row" style="margin-top:6px;">
+        <button id="ragClearBtn" class="ghost danger-text small-btn" type="button">Очистить индекс</button>
+      </div>
+    </div>
+    <div class="settings-block" id="mcpBlock">
+      <div class="plate-title-row">
+        <div class="plate-title">MCP-серверы (Model Context Protocol)</div>
+        <span class="sec-chip" id="mcpCountChip">0 серверов</span>
+      </div>
+      <div class="page-sub">Подключай внешние stdio MCP-серверы (filesystem, github, postgres, memory и др.) — их инструменты появятся у агента автоматически.</div>
+      <div id="mcpServerList" class="memory-list" style="margin-top:8px;"></div>
+      <div class="urlrow" style="margin-top:8px;">
+        <input type="text" id="mcpNameInput" class="field" style="min-width:95px;max-width:120px;" placeholder="Имя (fs)">
+        <input type="text" id="mcpCmdInput" class="field grow" placeholder="Команда (npx / python)">
+      </div>
+      <div class="urlrow" style="margin-top:6px;">
+        <input type="text" id="mcpArgsInput" class="field grow" placeholder="Аргументы (напр. -y @modelcontextprotocol/server-filesystem C:\work)">
+        <button id="mcpAddBtn" class="ghost" type="button">➕ Добавить</button>
+      </div>
+      <div id="mcpStatusMsg" class="page-sub" style="margin-top:4px;"></div>
+    </div>
+    <div class="settings-block" id="voiceSettingsBlock">
+      <div class="plate-title-row">
+        <div class="plate-title">Голосовой движок (XTTS v2 / Созвон)</div>
+        <span class="sec-chip" id="voiceEngineChip">auto</span>
+      </div>
+      <div class="page-sub">Поддерживает локальный Coqui XTTS v2 (клонирование голоса по WAV) и встроенный офлайн Windows SAPI5.</div>
+      <div class="urlrow" style="margin-top:8px;">
+        <select id="voiceEngineSelect" class="compact">
+          <option value="auto">Авто (XTTS v2 → SAPI5)</option>
+          <option value="xtts">XTTS v2 сервер</option>
+          <option value="sapi">Windows SAPI5 (офлайн)</option>
+        </select>
+        <select id="voiceLangSelect" class="compact">
+          <option value="ru">Русский (ru)</option>
+          <option value="en">English (en)</option>
+        </select>
+      </div>
+      <div class="urlrow" style="margin-top:6px;">
+        <input type="text" id="voiceXttsUrl" class="field grow" placeholder="http://127.0.0.1:8020">
+        <button id="voiceSaveBtn" class="ghost" type="button">Сохранить</button>
+      </div>
+      <div class="urlrow" style="margin-top:6px;">
+        <select id="voicePresetSelect" class="compact grow"></select>
+        <button id="voiceTestSpeakBtn" class="ghost" type="button">🔊 Тест</button>
+      </div>
+      <div class="urlrow" style="margin-top:6px;">
+        <input type="text" id="voiceCloneName" class="field" style="min-width:110px;max-width:140px;" placeholder="Имя клона">
+        <label class="ghost file-pick small-btn" style="cursor:pointer;">🎙️ Загрузить WAV<input type="file" id="voiceCloneFile" accept=".wav,audio/wav" hidden></label>
+        <button id="voiceOpenCallFromDrawer" class="primary small-btn" type="button">📞 Созвон</button>
+      </div>
+      <div id="voiceSettingsStatus" class="page-sub" style="margin-top:4px;"></div>
     </div>
     <div class="settings-block" id="loadedModelBlock">
       <div class="plate-title">Модель в памяти</div>
@@ -987,6 +1082,58 @@
     <div class="cooldown-actions-row">
       <button id="gpuCooldownCancelBtn" class="ghost" type="button">Прервать охлаждение</button>
       <button id="gpuCooldownDoneBtn" class="primary" type="button" hidden>Готово, продолжить работу</button>
+    </div>
+  </div>
+</dialog>
+<dialog id="voiceCallDialog" class="code-modal voice-call-modal" aria-label="Голосовой созвон">
+  <div class="modal-head">
+    <div class="modal-head-text">
+      <span class="modal-title">📞 Голосовой созвон с агентом</span>
+      <span class="modal-meta" id="callEngineMeta">XTTS v2 / Windows SAPI5 · Все инструменты активны</span>
+    </div>
+    <span class="grow"></span>
+    <span class="sec-chip" id="callTimer">00:00</span>
+    <button id="callCloseBtn" class="icon" type="button" title="Закрыть">✕</button>
+  </div>
+  <div class="modal-body call-body">
+    <div class="call-stage">
+      <div class="call-orb" id="callOrb">
+        <div class="call-orb-ring"></div>
+        <div class="call-orb-core" id="callOrbCore">🎙️</div>
+      </div>
+      <div class="call-state-label" id="callStateLabel">Готов к разговору</div>
+      <div class="call-tool-pill" id="callToolPill" hidden></div>
+    </div>
+    <div class="call-settings-bar">
+      <select id="callVoiceSelect" class="compact grow" title="Голос собеседника (XTTS v2 / SAPI5)"></select>
+      <select id="callPersonaSelect" class="compact" title="Персона агента в звонке"></select>
+      <label class="check-pill" title="Автоматически слушать после ответа агента">
+        <input type="checkbox" id="callHandsFree" checked>
+        <span>Hands-Free</span>
+      </label>
+    </div>
+    <div class="call-quick-bar">
+      <label class="check-pill small-pill" title="Включить режим цели для следующего голосового запроса (или просто скажи «поставь цель …»)">
+        <input type="checkbox" id="callGoalToggle">
+        <span>🎯 Цель</span>
+      </label>
+      <button id="callScreenBtn" class="ghost small-btn" type="button" title="Попросить агента посмотреть, что сейчас на экране">📸 Экран</button>
+      <button id="callAttachBtn" class="ghost small-btn" type="button" title="Прикрепить картинку к следующему запросу">🖼️ Фото</button>
+      <button id="callStopAgentBtn" class="ghost small-btn danger-text" type="button" title="Остановить выполнение агента" disabled>🛑 Стоп</button>
+    </div>
+    <div id="callAskBand" class="call-ask-band" hidden></div>
+    <div class="call-subtitles" id="callSubtitles">
+      <div class="call-sub-line call-sub-sys">Все инструменты агента (поиск, файлы, код, браузер, RAG, MCP, цель) доступны прямо в звонке. Нажми 🎤 и говори.</div>
+    </div>
+    <div class="call-text-row">
+      <input type="text" id="callTextInput" class="field grow" placeholder="Или напиши команду / URL / путь прямо в звонке…">
+      <button id="callTextSendBtn" class="ghost small-btn" type="button" title="Отправить текстом в звонок">➤</button>
+    </div>
+    <div class="call-controls">
+      <button id="callMicBtn" class="call-btn-round call-btn-mic" type="button" title="Говорить / Остановить запись">🎤</button>
+      <button id="callMuteBtn" class="call-btn-round" type="button" title="Выключить звук агента (Mute)">🔊</button>
+      <button id="callInterruptBtn" class="call-btn-round" type="button" title="Прервать текущую речь">⏹️</button>
+      <button id="callEndBtn" class="call-btn-round call-btn-end" type="button" title="Завершить звонок">📵</button>
     </div>
   </div>
 </dialog>

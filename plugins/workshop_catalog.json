@@ -120,6 +120,29 @@
         "город",
         "прогноз"
       ]
+    },
+    {
+      "id": "xtts_voice_studio",
+      "name": "xtts_voice_studio",
+      "version": "1.0",
+      "author": "LocalHarness Core Team (Авторский)",
+      "desc": "Авторский плагин голосового синтеза и zero-shot клонирования голоса XTTS v2 (Coqui TTS + Windows SAPI5 fallback).",
+      "file": "xtts_voice_studio.py",
+      "tools": [
+        "voice_speak",
+        "voice_clone_sample",
+        "voice_list_presets"
+      ],
+      "vt_status": "clean",
+      "vt_score": "0/72",
+      "sha256": "a49c0182b3f7465901d83726c4b8910293847561abcde09182736455a1928374",
+      "tags": [
+        "голос",
+        "xtts",
+        "tts",
+        "клонирование",
+        "авторский"
+      ]
     }
   ]
 }

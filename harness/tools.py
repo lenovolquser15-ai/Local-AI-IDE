@@ -1490,9 +1490,22 @@ class Toolkit:
             return cluster.query_remote_llm(prompt, node_url=node_url)
         return {"ok": False, "error": "неизвестное действие: %s (status|map|bench|llm)" % act}
 
+    def rag_search(self, query=None, top_k=5, **kw):
+        from . import rag as rag_mod
+        return rag_mod.search(query, top_k=top_k, cfg=self.cfg)
+
+    def rag_index(self, path=None, **kw):
+        from . import rag as rag_mod
+        return rag_mod.index_path(path, cfg=self.cfg)
+
     def call(self, name, args):
         fn = getattr(self, name, None)
         if fn is None or name.startswith("_") or name in ("call", "cfg", "jobs"):
+            if str(name).startswith("mcp__"):
+                from . import mcp_client
+                mcp_res = mcp_client.call_tool(name, args)
+                if mcp_res is not None:
+                    return mcp_res
             from . import plugins
             external = plugins.call(name, self.cfg, args)
             if external is not None:

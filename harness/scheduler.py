@@ -20,7 +20,7 @@ _HISTORY_MAX = 50
 
 
 def _store_path():
-    return os.path.join(config_mod.DATA_DIR, "schedules.json")
+    return os.path.join(config_mod.data_dir(), "schedules.json")
 
 
 def _load_store():
@@ -238,6 +238,16 @@ def _execute_task_sync(task):
         store["history"].insert(0, entry)
         store["history"] = store["history"][:_HISTORY_MAX]
         _save_store(store)
+    try:
+        from . import notify as notify_mod
+        status_label = "выполнена" if ok else "ошибка"
+        notify_mod.send(
+            "⏰ %s (%s)" % (task.get("name", "Автозадача"), status_label),
+            output[:200],
+            cfg=config_mod.load(),
+        )
+    except Exception:
+        pass
     return entry
 
 

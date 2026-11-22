@@ -30,6 +30,48 @@ FAIL_STREAK_HINT = 3         # столько подряд упавших выз
 REPEAT_SEARCH_AT = 3         # столько одинаковых успешных web_search — подсказка сменить запрос или источник
 FORMAT_RETRIES = 2            # столько попыток переспросить ответ в правильном формате, прежде чем сдаться
 
+_GOAL_TRIGGERS = (
+    re.compile(r"^\s*/goal\b[\s:—\-]*", re.I),
+    re.compile(r"^\s*(?:поставь(?:\s+себе)?|задай|установи|создай|добавь|новая)\s+цель\b[\s:—\-,]*", re.I),
+    re.compile(r"^\s*(?:включи|запусти|перейди\s+в|работай\s+в)\s+режим[е]?\s+цел[иь]\b[\s:—\-,]*", re.I),
+    re.compile(r"^\s*(?:режим\s+цели|цель)\s*[:—\-]\s*", re.I),
+    re.compile(r"^\s*(?:set\s+(?:a\s+)?goal|goal\s+mode|goal)\s*[:—\-]\s*", re.I),
+)
+_GOAL_INLINE_RE = re.compile(
+    r"(?:\bпоставь(?:\s+себе)?\s+цель\b|\bзадай\s+цель\b|\bустанови\s+цель\b|"
+    r"\bвключи\s+режим\s+цели\b|\bв\s+режиме\s+цели\b|\bрежим\s+цели\b|\bset\s+a?\s*goal\b)",
+    re.I,
+)
+_CRITERIA_RE = re.compile(r"(?:\n|\.\s*|;\s*)(?:критерий(?:\s+готовности)?|критерии|criteria)\s*[:—\-]\s*(.+)$", re.I | re.S)
+
+
+def detect_goal_intent(text):
+    """Распознаёт естественный запрос на включение режима цели прямо из сообщения пользователя.
+    Возвращает {'is_goal': bool, 'objective': str, 'criteria': str}."""
+    raw = str(text or "").strip()
+    if not raw:
+        return {"is_goal": False, "objective": "", "criteria": ""}
+    matched = False
+    objective = raw
+    for pat in _GOAL_TRIGGERS:
+        m = pat.match(raw)
+        if m:
+            matched = True
+            rest = raw[m.end():].strip()
+            objective = rest if rest else raw
+            break
+    if not matched and _GOAL_INLINE_RE.search(raw):
+        matched = True
+        objective = raw
+    if not matched:
+        return {"is_goal": False, "objective": raw, "criteria": ""}
+    criteria = ""
+    cm = _CRITERIA_RE.search(objective)
+    if cm:
+        criteria = cm.group(1).strip()
+        objective = objective[:cm.start()].strip() or raw
+    return {"is_goal": True, "objective": objective, "criteria": criteria}
+
 
 class Bridge:
     """Transport for events and blocking questions. SSE server and CLI subclass it."""
@@ -1035,6 +1077,13 @@ class Agent:
         try:
             if self.cfg.get("provider") == "lmstudio":
                 lms_mod.invalidate()
+        except Exception:
+            pass
+        try:
+            if self.goal or total_steps >= 4:
+                from . import notify as notify_mod
+                title = "LocalHarness — Цель выполнена" if (self.goal and self.goal_state and self.goal_state.get("achieved")) else "LocalHarness — Задача завершена"
+                notify_mod.send(title, answer[:220], cfg=self.cfg)
         except Exception:
             pass
         self.bridge.emit(done)

@@ -25,6 +25,11 @@ from . import cluster as cluster_mod
 from . import obscura_browser as obscura_mod
 from . import backup as backup_mod
 from . import scheduler as scheduler_mod
+from . import updater as updater_mod
+from . import notify as notify_mod
+from . import rag as rag_mod
+from . import mcp_client as mcp_mod
+from . import voice as voice_mod
 
 
 def _obscura_status_safe(cfg):
@@ -514,6 +519,21 @@ class Handler(BaseHTTPRequestHandler):
                 "model_loaded": bool(lms_loaded),
                 "dns_probe": dns_probe,
                 "gpu_thermal": thermal_mod.get_thermal_status(cfg),
+                "theme": cfg.get("theme", "dark"),
+                "persona": cfg.get("persona", "default"),
+                "personas": schemas.PERSONAS,
+                "toast_notifications": cfg.get("toast_notifications", True),
+                "rag": rag_mod.status(),
+                "mcp_servers": mcp_mod.list_servers(cfg).get("servers", []),
+                "voice": {
+                    "engine": cfg.get("voice_engine", "auto"),
+                    "xtts_url": cfg.get("voice_xtts_url", "http://127.0.0.1:8020"),
+                    "voice_preset": cfg.get("voice_preset", "ru_female_warm"),
+                    "voice_language": cfg.get("voice_language", "ru"),
+                    "voice_speed": cfg.get("voice_speed", 1.0),
+                    "voice_auto_speak": cfg.get("voice_auto_speak", False),
+                    "presets": voice_mod.list_presets(cfg),
+                },
             })
             return
 
@@ -522,7 +542,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/thermal/status":
-            _json_response(self, thermal_mod.get_thermal_status(load()))
+            force = query.get("force", ["1"])[0] not in ("0", "false", "no")
+            _json_response(self, thermal_mod.get_thermal_status(load(), force=force))
             return
 
         if path == "/api/dashboard/history":
@@ -575,6 +596,35 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/scheduler/list":
             _json_response(self, scheduler_mod.list_tasks())
+            return
+
+        if path == "/api/update/check":
+            force = query.get("force", ["0"])[0] in ("1", "true", "yes")
+            _json_response(self, updater_mod.check_update(force=force))
+            return
+
+        if path == "/api/update/status":
+            _json_response(self, updater_mod.download_status())
+            return
+
+        if path == "/api/notify/recent":
+            _json_response(self, {"ok": True, "notifications": notify_mod.recent()})
+            return
+
+        if path == "/api/rag/status":
+            _json_response(self, rag_mod.status())
+            return
+
+        if path == "/api/mcp/list":
+            _json_response(self, mcp_mod.list_servers(load()))
+            return
+
+        if path == "/api/voice/status":
+            _json_response(self, voice_mod.status(load()))
+            return
+
+        if path == "/api/voice/presets":
+            _json_response(self, {"ok": True, "presets": voice_mod.list_presets(load())})
             return
 
         if path == "/api/desktop":
@@ -800,6 +850,22 @@ class Handler(BaseHTTPRequestHandler):
             "/api/scheduler/toggle": self.handle_scheduler_toggle,
             "/api/scheduler/delete": self.handle_scheduler_delete,
             "/api/scheduler/run": self.handle_scheduler_run,
+            "/api/update/download": self.handle_update_download,
+            "/api/notify/test": self.handle_notify_test,
+            "/api/rag/index": self.handle_rag_index,
+            "/api/rag/search": self.handle_rag_search,
+            "/api/rag/remove": self.handle_rag_remove,
+            "/api/rag/clear": self.handle_rag_clear,
+            "/api/mcp/add": self.handle_mcp_add,
+            "/api/mcp/remove": self.handle_mcp_remove,
+            "/api/mcp/toggle": self.handle_mcp_toggle,
+            "/api/mcp/connect": self.handle_mcp_connect,
+            "/api/voice/speak": self.handle_voice_speak,
+            "/api/voice/sample/upload": self.handle_voice_sample_upload,
+            "/api/voice/sample/delete": self.handle_voice_sample_delete,
+            "/api/session/truncate": self.handle_session_truncate,
+            "/api/chat/edit": self.handle_chat_edit,
+            "/api/chat/regenerate": self.handle_chat_regenerate,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -889,10 +955,23 @@ class Handler(BaseHTTPRequestHandler):
         run.bridge = bridge
         agent = Agent(cfg, bridge, sid)
         is_goal = body.get("mode") == "goal"
-        criteria = body.get("criteria", "")
+        criteria = str(body.get("criteria") or "")
+        goal_objective = text
+        auto_goal_triggered = False
+        if not is_goal:
+            from .agent import detect_goal_intent
+            detected = detect_goal_intent(text)
+            if detected["is_goal"]:
+                is_goal = True
+                auto_goal_triggered = True
+                goal_objective = detected["objective"] or text
+                if not criteria and detected.get("criteria"):
+                    criteria = detected["criteria"]
 
         def run_agent():
-            goal = {"objective": text, "criteria": criteria} if is_goal else None
+            if auto_goal_triggered:
+                bridge.emit({"type": "notice", "text": "🎯 Режим цели активирован автоматически по вашему сообщению."})
+            goal = {"objective": goal_objective, "criteria": criteria} if is_goal else None
             dashboard_mod.record_session()
             try:
                 agent.run(text, history=history, goal=goal, image=image, images=images)
@@ -1325,6 +1404,121 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_scheduler_run(self, body):
         _json_response(self, scheduler_mod.run_now(body.get("id"), sync=bool(body.get("sync", False))))
+
+    def handle_update_download(self, body):
+        _json_response(self, updater_mod.download_and_launch(
+            installer_url=body.get("installer_url"),
+            installer_name=body.get("installer_name"),
+            launch=bool(body.get("launch", True)),
+        ))
+
+    def handle_notify_test(self, body):
+        title = str(body.get("title") or "LocalHarness")
+        message = str(body.get("message") or "Тестовое Windows Toast уведомление работает!")
+        ok = notify_mod.send(title, message, cfg=load())
+        _json_response(self, {"ok": bool(ok), "title": title, "message": message})
+
+    def handle_rag_index(self, body):
+        _json_response(self, rag_mod.index_path(
+            body.get("path", ""),
+            cfg=load(),
+            use_embeddings=bool(body.get("use_embeddings", False)),
+        ))
+
+    def handle_rag_search(self, body):
+        _json_response(self, rag_mod.search(
+            body.get("query", ""),
+            top_k=body.get("top_k", 5),
+            cfg=load(),
+        ))
+
+    def handle_rag_remove(self, body):
+        _json_response(self, rag_mod.remove_folder(body.get("path", "")))
+
+    def handle_rag_clear(self, body):
+        _json_response(self, rag_mod.clear())
+
+    def handle_mcp_add(self, body):
+        _json_response(self, mcp_mod.add_server(
+            name=body.get("name", ""),
+            command=body.get("command", ""),
+            args=body.get("args"),
+            env=body.get("env"),
+            connect=bool(body.get("connect", True)),
+        ))
+
+    def handle_mcp_remove(self, body):
+        _json_response(self, mcp_mod.remove_server(body.get("name", "")))
+
+    def handle_mcp_toggle(self, body):
+        _json_response(self, mcp_mod.toggle_server(body.get("name", ""), body.get("enabled", True)))
+
+    def handle_mcp_connect(self, body):
+        _json_response(self, mcp_mod.connect_server(body.get("name", ""), cfg=load()))
+
+    def handle_voice_speak(self, body):
+        _json_response(self, voice_mod.synthesize(
+            text=body.get("text", ""),
+            cfg=load(),
+            voice=body.get("voice"),
+            language=body.get("language"),
+            speed=body.get("speed"),
+            engine=body.get("engine"),
+            save_file=bool(body.get("save_file", False)),
+        ))
+
+    def handle_voice_sample_upload(self, body):
+        _json_response(self, voice_mod.save_sample(body.get("name", ""), body.get("data_b64", "")))
+
+    def handle_voice_sample_delete(self, body):
+        _json_response(self, voice_mod.delete_sample(body.get("id") or body.get("file", "")))
+
+    def handle_session_truncate(self, body):
+        sid = str(body.get("session") or "")
+        with RUNS_LOCK:
+            run = RUNS.get(sid)
+            if run and not run.finished:
+                _json_response(self, {"ok": False, "error": "сессия выполняется — сначала остановите прогон"}, 409)
+                return
+        res = session_mod.truncate_from_user_turn(sid, body.get("turn_index", -1))
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_chat_edit(self, body):
+        sid = str(body.get("session") or "")
+        new_text = str(body.get("text") or "").strip()
+        if not sid or not new_text:
+            _json_response(self, {"ok": False, "error": "нужны session и text"}, 400)
+            return
+        with RUNS_LOCK:
+            run = RUNS.get(sid)
+            if run and not run.finished:
+                _json_response(self, {"ok": False, "error": "сессия выполняется — сначала остановите прогон"}, 409)
+                return
+        trunc = session_mod.truncate_from_user_turn(sid, body.get("turn_index", -1))
+        if not trunc.get("ok"):
+            _json_response(self, trunc, 400)
+            return
+        self.handle_chat({"session": sid, "text": new_text, "mode": body.get("mode", "chat")})
+
+    def handle_chat_regenerate(self, body):
+        sid = str(body.get("session") or "")
+        if not sid:
+            _json_response(self, {"ok": False, "error": "нужна session"}, 400)
+            return
+        with RUNS_LOCK:
+            run = RUNS.get(sid)
+            if run and not run.finished:
+                _json_response(self, {"ok": False, "error": "сессия выполняется — сначала остановите прогон"}, 409)
+                return
+        trunc = session_mod.truncate_from_user_turn(sid, body.get("turn_index", -1))
+        if not trunc.get("ok"):
+            _json_response(self, trunc, 400)
+            return
+        prompt_text = str(body.get("text") or trunc.get("removed_text") or "").strip()
+        if not prompt_text:
+            _json_response(self, {"ok": False, "error": "не удалось определить исходный текст запроса"}, 400)
+            return
+        self.handle_chat({"session": sid, "text": prompt_text, "mode": body.get("mode", "chat")})
 
     def stream_events(self, sid, since):
         self.close_connection = True

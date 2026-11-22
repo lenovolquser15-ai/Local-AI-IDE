@@ -7,9 +7,16 @@ import threading
 import time
 import uuid
 
+from . import config as config_mod
 from .config import SESSION_DIR
 
 LOCK = threading.RLock()
+
+
+def _session_dir():
+    if SESSION_DIR != os.path.join(config_mod.ROOT, "data", "sessions"):
+        return SESSION_DIR
+    return config_mod.session_dir()
 
 
 def valid_id(sid):
@@ -19,8 +26,9 @@ def valid_id(sid):
 def _path(sid):
     if not valid_id(sid):
         raise ValueError("invalid session id")
-    os.makedirs(SESSION_DIR, exist_ok=True)
-    return os.path.join(SESSION_DIR, "%s.jsonl" % sid)
+    sdir = _session_dir()
+    os.makedirs(sdir, exist_ok=True)
+    return os.path.join(sdir, "%s.jsonl" % sid)
 
 
 def create(title=""):
@@ -95,7 +103,7 @@ def set_title(sid, title):
         meta["title"] = title
         tmp = None
         try:
-            with tempfile.NamedTemporaryFile(dir=SESSION_DIR, delete=False) as fh:
+            with tempfile.NamedTemporaryFile(dir=_session_dir(), delete=False) as fh:
                 tmp = fh.name
                 fh.write((json.dumps(meta, ensure_ascii=False) + "\n").encode("utf-8"))
                 fh.write(rest)
@@ -126,17 +134,80 @@ def delete(sid):
         return True
 
 
+def truncate_from_user_turn(sid, user_turn_index=-1):
+    """Truncate a session starting at the specified user turn (0-based among user turns, or -1 for last).
+    Returns {'ok': True, 'removed_text': str, 'remaining_messages': list} or {'ok': False, ...}."""
+    if not valid_id(sid):
+        return {"ok": False, "error": "invalid session id"}
+    with LOCK:
+        path = _path(sid)
+        if not os.path.isfile(path):
+            return {"ok": False, "error": "no such session"}
+        records = []
+        with open(path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    records.append(json.loads(line))
+                except ValueError:
+                    continue
+
+        user_msg_positions = []
+        user_ui_positions = []
+        for idx, rec in enumerate(records):
+            if rec.get("t") == "msg" and (rec.get("msg") or {}).get("role") == "user":
+                user_msg_positions.append(idx)
+            elif rec.get("t") == "ui" and (rec.get("event") or {}).get("type") == "user":
+                user_ui_positions.append(idx)
+
+        if not user_msg_positions:
+            return {"ok": False, "error": "в сессии нет сообщений пользователя"}
+
+        t_idx = int(user_turn_index if user_turn_index is not None else -1)
+        if t_idx < 0:
+            t_idx = len(user_msg_positions) + t_idx
+        t_idx = max(0, min(len(user_msg_positions) - 1, t_idx))
+
+        cut_msg_pos = user_msg_positions[t_idx]
+        removed_msg = records[cut_msg_pos].get("msg") or {}
+        removed_content = removed_msg.get("content") or ""
+        if isinstance(removed_content, list):
+            removed_text = "\n".join(p.get("text", "") for p in removed_content if isinstance(p, dict) and p.get("type") == "text")
+        else:
+            removed_text = str(removed_content)
+
+        if t_idx < len(user_ui_positions):
+            cut_pos = min(cut_msg_pos, user_ui_positions[t_idx])
+        else:
+            cut_pos = cut_msg_pos
+
+        kept = [r for i, r in enumerate(records) if r.get("t") == "meta" or i < cut_pos]
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            for r in kept:
+                fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+
+        remaining_msgs = [r["msg"] for r in kept if r.get("t") == "msg"]
+        return {
+            "ok": True,
+            "turn_index": t_idx,
+            "removed_text": removed_text,
+            "remaining_messages": remaining_msgs,
+        }
+
+
 def list_sessions(limit=None, query=""):
     rows = []
     query = query.strip().casefold()
     with LOCK:
-        if not os.path.isdir(SESSION_DIR):
+        sdir = _session_dir()
+        if not os.path.isdir(sdir):
             return rows
-        for name in os.listdir(SESSION_DIR):
+        for name in os.listdir(sdir):
             if not name.endswith(".jsonl") or not valid_id(name[:-6]):
                 continue
             sid = name[:-6]
-            path = os.path.join(SESSION_DIR, name)
+            path = os.path.join(sdir, name)
             try:
                 with open(path, "r", encoding="utf-8") as fh:
                     first = json.loads(fh.readline())

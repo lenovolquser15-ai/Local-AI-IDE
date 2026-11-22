@@ -71,6 +71,19 @@ DEFAULTS = {
     "cluster_enabled": True,
     "cluster_offload_on_hot": True,
     "cluster_llm_nodes": [],
+    "theme": "dark",
+    "persona": "default",
+    "toast_notifications": True,
+    "rag_auto_context": True,
+    "rag_embedding_model": "",
+    "mcp_servers": [],
+    "voice_engine": "auto",
+    "voice_xtts_url": "http://127.0.0.1:8020",
+    "voice_preset": "ru_female_warm",
+    "voice_speaker_wav": "",
+    "voice_language": "ru",
+    "voice_speed": 1.0,
+    "voice_auto_speak": False,
     "remote": {
         "auto_start": False,
         "code_ttl": 28800,
@@ -115,6 +128,28 @@ def app_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 ROOT = app_root()
+
+
+def data_dir():
+    if DATA_DIR != os.path.join(ROOT, 'data'):
+        return DATA_DIR
+    return os.environ.get('LH_DATA') or DATA_DIR
+
+
+def session_dir():
+    if SESSION_DIR != os.path.join(ROOT, 'data', 'sessions'):
+        return SESSION_DIR
+    if os.environ.get('LH_DATA'):
+        return os.path.join(os.environ['LH_DATA'], 'sessions')
+    return SESSION_DIR
+
+
+def config_path():
+    if CONFIG_PATH != os.path.join(ROOT, 'config.json'):
+        return CONFIG_PATH
+    return os.environ.get('LH_CONFIG') or CONFIG_PATH
+
+
 DATA_DIR = os.environ.get('LH_DATA') or os.path.join(ROOT, 'data')
 SESSION_DIR = os.path.join(DATA_DIR, 'sessions')
 CONFIG_PATH = os.environ.get('LH_CONFIG') or os.path.join(ROOT, 'config.json')
@@ -129,12 +164,15 @@ def _merge(base, override):
     return out
 
 def load():
-    os.makedirs(DATA_DIR, exist_ok=True)
-    os.makedirs(SESSION_DIR, exist_ok=True)
+    d_dir = data_dir()
+    s_dir = session_dir()
+    c_path = config_path()
+    os.makedirs(d_dir, exist_ok=True)
+    os.makedirs(s_dir, exist_ok=True)
     raw = {}
-    if os.path.exists(CONFIG_PATH):
+    if os.path.exists(c_path):
         try:
-            with open(CONFIG_PATH, 'r', encoding='utf-8') as fh:
+            with open(c_path, 'r', encoding='utf-8') as fh:
                 raw = json.load(fh)
         except Exception:
             raw = {}
@@ -148,7 +186,9 @@ def load():
     return cfg
 
 def save(cfg):
+    c_path = config_path()
+    os.makedirs(os.path.dirname(os.path.abspath(c_path)), exist_ok=True)
     with LOCK:
-        with open(CONFIG_PATH, 'w', encoding='utf-8') as fh:
+        with open(c_path, 'w', encoding='utf-8') as fh:
             json.dump(cfg, fh, ensure_ascii=False, indent=2)
 

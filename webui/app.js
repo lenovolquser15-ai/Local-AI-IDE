@@ -75,11 +75,23 @@ function esc(text) {
     .replace(/"/g, '&quot;');
 }
 
+let userTurnCount = 0;
+
 function md(text) {
   let html = esc(text);
   const fences = [];
   html = html.replace(/```([\w-]*)\n?([\s\S]*?)```/g, (m, lang, code) => {
-    fences.push('<pre>' + code.replace(/\n$/, '') + '</pre>');
+    const cleanLang = (lang || 'code').trim();
+    const cleanCode = code.replace(/\n$/, '');
+    fences.push(
+      '<div class="code-wrap">' +
+        '<div class="code-head">' +
+          '<span class="code-lang">' + esc(cleanLang) + '</span>' +
+          '<button class="code-copy-btn" type="button">📋 Копировать</button>' +
+        '</div>' +
+        '<pre><code>' + cleanCode + '</code></pre>' +
+      '</div>'
+    );
     return '\u0000' + (fences.length - 1) + '\u0000';
   });
   html = html.replace(/`([^`\n]+)`/g, (m, code) => '<code>' + code + '</code>');
@@ -89,6 +101,28 @@ function md(text) {
   html = html.replace(/\n/g, '<br>');
   html = html.replace(/\u0000(\d+)\u0000/g, (m, i) => fences[+i]);
   return html;
+}
+
+if (thread) {
+  thread.addEventListener('click', async (e) => {
+    const copyBtn = e.target.closest('.code-copy-btn');
+    if (!copyBtn) return;
+    const wrap = copyBtn.closest('.code-wrap');
+    const pre = wrap && wrap.querySelector('pre');
+    if (!pre) return;
+    try {
+      await navigator.clipboard.writeText(pre.textContent || '');
+      const old = copyBtn.textContent;
+      copyBtn.textContent = '✓ Скопировано';
+      copyBtn.classList.add('copied');
+      setTimeout(() => {
+        copyBtn.textContent = old;
+        copyBtn.classList.remove('copied');
+      }, 1500);
+    } catch (err) {
+      pushNotice('Не удалось скопировать код: ' + err.message, 'warn');
+    }
+  });
 }
 
 async function api(path, body) {
@@ -168,10 +202,129 @@ function renderWelcome() {
 function pushUser(text, images) {
   dropWelcome();
   ensureTurn();
+  const turnIdx = userTurnCount++;
   const box = node('div', 'msg user');
-  box.appendChild(node('div', 'body', md(text)));
+  box.dataset.turnIndex = String(turnIdx);
+  const bodyEl = node('div', 'body', md(text));
+  box.appendChild(bodyEl);
   if (images) box.appendChild(node('div', 'attach', 'прикреплено изображений: ' + images));
+
+  const acts = node('div', 'msg-actions');
+  const editBtn = node('button', 'msg-act-btn', '✏️ Изменить');
+  editBtn.type = 'button';
+  editBtn.onclick = () => {
+    if (running) { pushNotice('Дождись завершения ответа или нажми Стоп', 'warn'); return; }
+    if (box.querySelector('.msg-edit-box')) return;
+    bodyEl.hidden = true;
+    acts.hidden = true;
+    const editor = node('div', 'msg-edit-box');
+    const ta = document.createElement('textarea');
+    ta.className = 'msg-edit-area';
+    ta.value = text || '';
+    const bar = node('div', 'msg-edit-bar');
+    const cancelBtn = node('button', 'ghost small-btn', 'Отмена');
+    cancelBtn.type = 'button';
+    cancelBtn.onclick = () => {
+      editor.remove();
+      bodyEl.hidden = false;
+      acts.hidden = false;
+    };
+    const saveBtn = node('button', 'primary small-btn', 'Сохранить и отправить');
+    saveBtn.type = 'button';
+    saveBtn.onclick = async () => {
+      const updated = (ta.value || '').trim();
+      if (!updated) return;
+      await editAndResend(turnIdx, updated);
+    };
+    bar.append(cancelBtn, saveBtn);
+    editor.append(ta, bar);
+    box.appendChild(editor);
+    ta.focus();
+  };
+  acts.appendChild(editBtn);
+  box.appendChild(acts);
   add(box);
+}
+
+async function editAndResend(turnIdx, newText) {
+  if (!sessionId || running) return;
+  try {
+    running = true;
+    $('#send').disabled = true;
+    $('#stopBtn').disabled = false;
+    $('#stat').textContent = 'перезапуск…';
+    const mode = $('#goalMode') && $('#goalMode').checked ? 'goal' : 'chat';
+    await api('/api/chat/edit', { session: sessionId, turn_index: turnIdx, text: newText, mode });
+    await reloadAndStreamSession(sessionId);
+  } catch (err) {
+    running = false;
+    $('#send').disabled = false;
+    $('#stopBtn').disabled = true;
+    pushNotice('Ошибка редактирования: ' + err.message, 'bad');
+  }
+}
+
+async function regenerateTurn(turnIdx) {
+  if (!sessionId || running) return;
+  try {
+    running = true;
+    $('#send').disabled = true;
+    $('#stopBtn').disabled = false;
+    $('#stat').textContent = 'перегенерация…';
+    const mode = $('#goalMode') && $('#goalMode').checked ? 'goal' : 'chat';
+    await api('/api/chat/regenerate', { session: sessionId, turn_index: turnIdx, mode });
+    await reloadAndStreamSession(sessionId);
+  } catch (err) {
+    running = false;
+    $('#send').disabled = false;
+    $('#stopBtn').disabled = true;
+    pushNotice('Ошибка перегенерации: ' + err.message, 'bad');
+  }
+}
+
+async function reloadAndStreamSession(id) {
+  if (streamAbort) streamAbort.abort();
+  since = 0;
+  userTurnCount = 0;
+  turn = null; resetStream(); dropDive(); closeBand();
+  thread.innerHTML = '';
+  $('#trace').innerHTML = '';
+  const data = await api('/api/history?session=' + encodeURIComponent(id));
+  replaying = true;
+  (data.events || []).forEach((ev) => render(ev, true));
+  replaying = false;
+  running = true;
+  $('#send').disabled = true;
+  $('#stopBtn').disabled = false;
+  stream(id);
+}
+
+function attachAssistantActions(box, rawText, turnIdx) {
+  if (!box || box.querySelector('.msg-actions')) return;
+  const acts = node('div', 'msg-actions');
+  const regenBtn = node('button', 'msg-act-btn', '🔄 Перегенерировать');
+  regenBtn.type = 'button';
+  regenBtn.onclick = () => regenerateTurn(turnIdx);
+
+  const copyBtn = node('button', 'msg-act-btn', '📋 Копировать');
+  copyBtn.type = 'button';
+  copyBtn.onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(rawText || box.querySelector('.body').textContent || '');
+      copyBtn.textContent = '✓ Скопировано';
+      setTimeout(() => { copyBtn.textContent = '📋 Копировать'; }, 1500);
+    } catch (e) {}
+  };
+
+  const speakBtn = node('button', 'msg-act-btn', '🔊 Озвучить');
+  speakBtn.type = 'button';
+  speakBtn.onclick = () => {
+    if (typeof speakWithServer === 'function') speakWithServer(rawText || '');
+    else if (typeof speakAnswer === 'function') speakAnswer(rawText || '');
+  };
+
+  acts.append(regenBtn, copyBtn, speakBtn);
+  box.appendChild(acts);
 }
 
 function pushAssistant(html, label) {
@@ -249,17 +402,20 @@ function streamPiece(piece) {
   scroll();
 }
 
-function finishAnswer(html, label) {
+function finishAnswer(html, label, rawText) {
+  const turnIdx = Math.max(0, userTurnCount - 1);
   if (answerEl) {
     const box = answerEl.parentNode;
     const who = box.querySelector('.who');
     if (label && who) who.textContent = label;
     else if (label) box.insertBefore(node('div', 'who', esc(label)), box.firstChild);
     answerEl.innerHTML = html;
+    attachAssistantActions(box, rawText, turnIdx);
     answerEl = null;
     return;
   }
-  pushAssistant(html, label);
+  const body = pushAssistant(html, label);
+  if (body && body.parentNode) attachAssistantActions(body.parentNode, rawText, turnIdx);
 }
 
 function resetStream() { answerEl = null; }
@@ -505,6 +661,9 @@ function render(ev, replayed) {
     pushNotice((ev.question || (ev.tool + ': ' + ev.reason)) + ' — уже обработано', 'warn');
     return;
   }
+  if (!replayed && typeof onVoiceCallEvent === 'function') {
+    try { onVoiceCallEvent(ev); } catch (e) {}
+  }
   switch (ev.type) {
     case 'user':
       turn = null; dropDive(); resetStream(); closeBand();
@@ -530,8 +689,13 @@ function render(ev, replayed) {
       break;
     case 'done':
       dropDive();
-      finishAnswer(md(ev.text), 'модель · ' + (ev.protocol === 'json' ? 'json-инструменты' : 'native'));
-      if (!replayed && typeof speakAnswer === 'function' && ev.text) speakAnswer(ev.text);
+      finishAnswer(md(ev.text), 'модель · ' + (ev.protocol === 'json' ? 'json-инструменты' : 'native'), ev.text);
+      if (!replayed && typeof onVoiceCallAnswer === 'function' && ev.text) {
+        const handledByCall = onVoiceCallAnswer(ev.text);
+        if (!handledByCall && typeof speakAnswer === 'function') speakAnswer(ev.text);
+      } else if (!replayed && typeof speakAnswer === 'function' && ev.text) {
+        speakAnswer(ev.text);
+      }
       finishRun(ev);
       break;
     default: break;
@@ -644,6 +808,7 @@ async function openSession(id) {
   running = false;
   sessionId = id;
   since = 0;
+  userTurnCount = 0;
   turn = null; resetStream(); dropDive(); closeBand();
   thread.innerHTML = '';
   $('#trace').innerHTML = '';
@@ -846,6 +1011,7 @@ async function refreshState() {
   const secNote = $('#plugSecNote');
   if (secNote) secNote.textContent = vtOn ? 'аудит кода + VirusTotal' : 'аудит кода включён';
   renderThermalState(st.gpu_thermal);
+  if (typeof syncExtendedState === 'function') syncExtendedState(st);
   $('#toolsChip').textContent = 'инструментов: ' + (st.tools || []).length + ' · профиль ' + (st.tool_profile || 'core');
   $('#toolsChip').title = (st.tools || []).join(', ');
   fillSelect($('#provider'), Object.keys(st.providers || {}).map((k) => [k, st.providers[k]]), st.provider);
@@ -2777,6 +2943,29 @@ function fmtTimer(sec) {
   return (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
 }
 
+let thermalModalTimerId = null;
+let thermalBgTimerId = null;
+
+function fillThermalModal(th) {
+  if (!th) return;
+  const pwr = th.power_w != null ? (' · ' + th.power_w + 'W') : '';
+  if ($('#gpuDialogMeta')) $('#gpuDialogMeta').textContent = (th.gpu_name || 'GPU') + pwr;
+  if ($('#tmetricTemp')) $('#tmetricTemp').textContent = th.temp_c != null ? th.temp_c + '°C' : '—';
+  if ($('#tmetricTempSub')) $('#tmetricTempSub').textContent = th.status_label || 'Норма';
+  if ($('#tmetricUtil')) $('#tmetricUtil').textContent = th.utilization_pct != null ? th.utilization_pct + '%' : '—';
+  if ($('#tmetricUtilSub')) $('#tmetricUtilSub').textContent = th.power_w != null ? ('Мощность: ' + th.power_w + ' Вт') : 'GPU Load';
+  const usedGb = th.vram_used_mb ? (th.vram_used_mb / 1024).toFixed(1) : '0.0';
+  const totGb = th.vram_total_mb ? (th.vram_total_mb / 1024).toFixed(1) : '0.0';
+  if ($('#tmetricVram')) $('#tmetricVram').textContent = usedGb + ' / ' + totGb + ' ГБ';
+  if ($('#tmetricGovernor')) $('#tmetricGovernor').textContent = th.throttle_active ? 'Троттлинг 🧊' : 'В норме';
+  if ($('#tmetricGovernorSub')) {
+    $('#tmetricGovernorSub').textContent = th.throttle_active
+      ? ('Задержка: ' + (th.throttle_delay * 1000).toFixed(0) + ' мс/токен')
+      : 'Снижение скорости не требуется';
+  }
+  if ($('#thermalModalDesc')) $('#thermalModalDesc').textContent = th.message || 'Датчик работает штатно.';
+}
+
 function renderThermalState(th) {
   if (!th) return;
   const pill = $('#gpuThermalPill');
@@ -2785,12 +2974,17 @@ function renderThermalState(th) {
       pill.hidden = false;
       const ico = th.status === 'critical' ? '🔥' : (th.status === 'hot' ? '⚠️' : (th.status === 'warm' ? '🌡️' : '❄️'));
       $('#gpuPillIco').textContent = ico;
-      $('#gpuPillTxt').textContent = th.temp_c + '°C';
+      const utilStr = th.utilization_pct != null ? (' · ' + th.utilization_pct + '%') : '';
+      $('#gpuPillTxt').textContent = th.temp_c + '°C' + utilStr;
       pill.className = 'gpu-pill small-btn ' + (th.status === 'critical' ? 'critical' : (th.status === 'hot' ? 'hot' : (th.status === 'warm' ? 'warm' : 'ok')));
-      pill.title = (th.gpu_name ? th.gpu_name + ' · ' : '') + th.status_label + (th.throttle_active ? ' · троттлинг активен' : '');
+      const vramStr = th.vram_total_mb ? (' · VRAM ' + (th.vram_used_mb / 1024).toFixed(1) + '/' + (th.vram_total_mb / 1024).toFixed(1) + ' ГБ') : '';
+      pill.title = (th.gpu_name ? th.gpu_name + ' · ' : '') + th.status_label + utilStr + vramStr + (th.throttle_active ? ' · троттлинг активен' : '');
     } else {
       pill.hidden = true;
     }
+  }
+  if ($('#gpuThermalDialog') && $('#gpuThermalDialog').open) {
+    fillThermalModal(th);
   }
 
   // Settings block
@@ -2898,31 +3092,54 @@ async function startGpuCooldown(durationSec, targetTemp) {
   }, 1000);
 }
 
-// Thermal Pill and Dialog click handlers
+// Thermal Pill and Dialog click handlers (with live 1.5s refresh while open + 3s background poll)
+function stopThermalModalTimer() {
+  if (thermalModalTimerId) {
+    clearInterval(thermalModalTimerId);
+    thermalModalTimerId = null;
+  }
+}
+
+async function refreshThermalLive() {
+  if (document.hidden) return;
+  try {
+    const th = await api('/api/thermal/status?force=1');
+    if (th) renderThermalState(th);
+  } catch (e) {}
+}
+
+if (!thermalBgTimerId) {
+  thermalBgTimerId = setInterval(refreshThermalLive, 3000);
+}
+
 if ($('#gpuThermalPill')) {
   $('#gpuThermalPill').onclick = async () => {
     try {
-      const th = await api('/api/thermal/status');
+      const th = await api('/api/thermal/status?force=1');
       if (!th) return;
-      $('#gpuDialogMeta').textContent = th.gpu_name || 'GPU';
-      $('#tmetricTemp').textContent = th.temp_c != null ? th.temp_c + '°C' : '—';
-      $('#tmetricTempSub').textContent = th.status_label || 'Норма';
-      $('#tmetricUtil').textContent = th.utilization_pct != null ? th.utilization_pct + '%' : '—';
-      const usedGb = th.vram_used_mb ? (th.vram_used_mb / 1024).toFixed(1) : '0';
-      const totGb = th.vram_total_mb ? (th.vram_total_mb / 1024).toFixed(1) : '0';
-      $('#tmetricVram').textContent = usedGb + ' / ' + totGb + ' ГБ';
-      $('#tmetricGovernor').textContent = th.throttle_active ? 'Троттлинг 🧊' : 'В норме';
-      $('#tmetricGovernorSub').textContent = th.throttle_active
-        ? ('Задержка: ' + (th.throttle_delay * 1000).toFixed(0) + ' мс/токен')
-        : 'Снижение скорости не требуется';
-      $('#thermalModalDesc').textContent = th.message || 'Датчик работает штатно.';
-      $('#gpuThermalDialog').showModal();
+      renderThermalState(th);
+      fillThermalModal(th);
+      const dlg = $('#gpuThermalDialog');
+      if (dlg && !dlg.open) dlg.showModal();
+      stopThermalModalTimer();
+      thermalModalTimerId = setInterval(async () => {
+        if (!dlg || !dlg.open) { stopThermalModalTimer(); return; }
+        await refreshThermalLive();
+      }, 1500);
     } catch (e) {
       pushNotice('Не удалось прочитать датчики GPU: ' + e.message, 'warn');
     }
   };
 }
-if ($('#gpuDialogClose')) $('#gpuDialogClose').onclick = () => $('#gpuThermalDialog').close();
+if ($('#gpuDialogClose')) {
+  $('#gpuDialogClose').onclick = () => {
+    stopThermalModalTimer();
+    $('#gpuThermalDialog').close();
+  };
+}
+if ($('#gpuThermalDialog')) {
+  $('#gpuThermalDialog').addEventListener('close', stopThermalModalTimer);
+}
 if ($('#gpuDialogUnloadBtn')) {
   $('#gpuDialogUnloadBtn').onclick = () => {
     const dur = (Number($('#gpuCooldownDuration').value) || 3) * 60;
@@ -3780,6 +3997,840 @@ if ($('#bkImportFile')) {
       e.target.value = '';
     }
   };
+}
+
+/* ---------- Theme (Dark / Light), Personas, Toast, Updater, RAG, MCP & Voice Call (XTTS v2) ---------- */
+function applyTheme(theme, persist) {
+  const t = theme === 'light' ? 'light' : 'dark';
+  document.documentElement.dataset.theme = t;
+  localStorage.setItem('lh.theme', t);
+  const btn = $('#themeToggleBtn');
+  if (btn) btn.textContent = t === 'light' ? '🌙' : '☀️';
+  const chk = $('#lightThemeToggle');
+  if (chk) chk.checked = t === 'light';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute('content', t === 'light' ? '#f4f6fa' : '#121316');
+  if (persist) {
+    api('/api/config', { config: { theme: t } }).catch(() => {});
+  }
+}
+
+applyTheme(localStorage.getItem('lh.theme') || 'dark', false);
+
+if ($('#themeToggleBtn')) {
+  $('#themeToggleBtn').onclick = () => {
+    const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    applyTheme(next, true);
+  };
+}
+if ($('#lightThemeToggle')) {
+  $('#lightThemeToggle').onchange = (e) => applyTheme(e.target.checked ? 'light' : 'dark', true);
+}
+
+/* ---------- Personas ---------- */
+if ($('#personaSelect')) {
+  $('#personaSelect').onchange = async (e) => {
+    const persona = e.target.value || 'default';
+    try {
+      await api('/api/config', { config: { persona } });
+      pushNotice('Персона переключена: ' + e.target.options[e.target.selectedIndex].text, 'ok');
+    } catch (err) {
+      pushNotice('Не удалось сменить персону: ' + err.message, 'bad');
+    }
+  };
+}
+
+/* ---------- Windows Toast Notifications ---------- */
+if ($('#toastNotifToggle')) {
+  $('#toastNotifToggle').onchange = (e) => {
+    api('/api/config', { config: { toast_notifications: !!e.target.checked } }).catch(() => {});
+  };
+}
+if ($('#toastTestBtn')) {
+  $('#toastTestBtn').onclick = async () => {
+    try {
+      const res = await api('/api/notify/test', {
+        title: 'LocalHarness',
+        message: 'Windows Toast уведомления активны и готовы к работе!',
+      });
+      pushNotice(res.ok ? '🔔 Тестовое уведомление отправлено' : 'Уведомления отключены в настройках', res.ok ? 'ok' : 'warn');
+    } catch (err) {
+      pushNotice(err.message, 'bad');
+    }
+  };
+}
+
+/* ---------- Self-Updater ---------- */
+let latestUpdateInfo = null;
+if ($('#updateCheckBtn')) {
+  $('#updateCheckBtn').onclick = async () => {
+    const stEl = $('#updateStatusText');
+    const dlBtn = $('#updateDownloadBtn');
+    if (stEl) stEl.textContent = 'Проверка GitHub Releases…';
+    try {
+      const info = await api('/api/update/check?force=1');
+      latestUpdateInfo = info;
+      if (!info.ok) {
+        if (stEl) stEl.textContent = '❌ ' + (info.error || 'Ошибка проверки');
+        return;
+      }
+      if (info.available) {
+        if (stEl) stEl.textContent = '🎉 Доступна новая версия v' + info.latest + ' (у вас v' + info.current + ')';
+        if (dlBtn) dlBtn.hidden = !info.installer_url;
+      } else {
+        if (stEl) stEl.textContent = '✅ Установлена актуальная версия v' + info.current;
+        if (dlBtn) dlBtn.hidden = true;
+      }
+    } catch (err) {
+      if (stEl) stEl.textContent = '❌ ' + err.message;
+    }
+  };
+}
+if ($('#updateDownloadBtn')) {
+  $('#updateDownloadBtn').onclick = async () => {
+    if (!latestUpdateInfo || !latestUpdateInfo.installer_url) return;
+    const stEl = $('#updateStatusText');
+    const dlBtn = $('#updateDownloadBtn');
+    dlBtn.disabled = true;
+    try {
+      const res = await api('/api/update/download', {
+        installer_url: latestUpdateInfo.installer_url,
+        installer_name: latestUpdateInfo.installer_name,
+        launch: true,
+      });
+      if (!res.ok) {
+        if (stEl) stEl.textContent = '❌ ' + (res.error || 'Ошибка загрузки');
+        dlBtn.disabled = false;
+        return;
+      }
+      if (stEl) stEl.textContent = '⬇️ Скачивание установщика… 0%';
+      const poll = setInterval(async () => {
+        try {
+          const ds = await api('/api/update/status');
+          if (stEl) stEl.textContent = ds.status === 'done'
+            ? '✅ Установщик скачан и запущен!'
+            : (ds.status === 'error' ? '❌ ' + ds.error : '⬇️ Скачивание… ' + (ds.progress || 0) + '%');
+          if (!ds.running) {
+            clearInterval(poll);
+            dlBtn.disabled = false;
+          }
+        } catch (e) {
+          clearInterval(poll);
+          dlBtn.disabled = false;
+        }
+      }, 900);
+    } catch (err) {
+      if (stEl) stEl.textContent = '❌ ' + err.message;
+      dlBtn.disabled = false;
+    }
+  };
+}
+
+/* ---------- Local RAG Knowledge Base ---------- */
+function renderRagState(rag) {
+  if (!rag) return;
+  const chip = $('#ragCountChip');
+  if (chip) chip.textContent = (rag.files_count || 0) + ' файлов · ' + (rag.chunks_count || 0) + ' чанков';
+  const list = $('#ragFoldersList');
+  if (!list) return;
+  list.innerHTML = '';
+  (rag.folders || []).forEach((folder) => {
+    const row = node('div', 'memory-item');
+    row.append(node('span', 'memory-text', '📁 ' + esc(folder)));
+    const del = node('button', 'ghost small-btn danger-text', '✕');
+    del.type = 'button';
+    del.onclick = async () => {
+      const res = await api('/api/rag/remove', { path: folder });
+      renderRagState(res);
+    };
+    row.append(del);
+    list.append(row);
+  });
+}
+
+if ($('#ragIndexBtn')) {
+  $('#ragIndexBtn').onclick = async () => {
+    const p = ($('#ragPathInput') && $('#ragPathInput').value.trim()) || '';
+    if (!p) { pushNotice('Укажи путь к папке или файлу для RAG', 'warn'); return; }
+    const out = $('#ragSearchOut');
+    if (out) out.textContent = 'Индексация…';
+    try {
+      const res = await api('/api/rag/index', { path: p });
+      if (res.ok) {
+        renderRagState(res);
+        if (out) out.textContent = '✅ Проиндексировано файлов: ' + res.indexed_files + ', чанков: ' + res.added_chunks;
+        $('#ragPathInput').value = '';
+      } else if (out) {
+        out.textContent = '❌ ' + (res.error || 'Ошибка индексации');
+      }
+    } catch (err) {
+      if (out) out.textContent = '❌ ' + err.message;
+    }
+  };
+}
+if ($('#ragSearchBtn')) {
+  $('#ragSearchBtn').onclick = async () => {
+    const q = ($('#ragQueryInput') && $('#ragQueryInput').value.trim()) || '';
+    const out = $('#ragSearchOut');
+    if (!q) return;
+    try {
+      const res = await api('/api/rag/search', { query: q, top_k: 4 });
+      if (!res.results || !res.results.length) {
+        if (out) out.textContent = res.note || 'Совпадений не найдено.';
+      } else if (out) {
+        out.innerHTML = res.results.map((r) =>
+          '<div><b>' + esc((r.file || '').split(/[\\/]/).pop()) + '</b> (' + r.score + '): ' + esc((r.text || '').slice(0, 140)) + '…</div>'
+        ).join('');
+      }
+    } catch (err) {
+      if (out) out.textContent = '❌ ' + err.message;
+    }
+  };
+}
+if ($('#ragClearBtn')) {
+  $('#ragClearBtn').onclick = async () => {
+    const res = await api('/api/rag/clear', {});
+    renderRagState(res);
+    if ($('#ragSearchOut')) $('#ragSearchOut').textContent = 'Индекс базы знаний очищен.';
+  };
+}
+
+/* ---------- MCP Servers ---------- */
+function renderMcpState(servers) {
+  const rows = Array.isArray(servers) ? servers : [];
+  const chip = $('#mcpCountChip');
+  if (chip) chip.textContent = rows.length + ' серверов';
+  const list = $('#mcpServerList');
+  if (!list) return;
+  list.innerHTML = '';
+  rows.forEach((s) => {
+    const row = node('div', 'memory-item');
+    const stIcon = s.connected ? '🟢' : (s.enabled ? '🟡' : '⚪');
+    const toolsCnt = (s.tools || []).length;
+    row.append(node('span', 'memory-text',
+      stIcon + ' <b>' + esc(s.name) + '</b> (' + esc(s.command) + ')' +
+      (toolsCnt ? ' · ' + toolsCnt + ' инстр.' : '') +
+      (s.error ? ' · ' + esc(s.error.slice(0, 60)) : '')
+    ));
+    const reconn = node('button', 'ghost small-btn', '🔌');
+    reconn.type = 'button';
+    reconn.title = 'Переподключить';
+    reconn.onclick = async () => {
+      const res = await api('/api/mcp/connect', { name: s.name });
+      pushNotice(res.connected ? ('MCP ' + s.name + ' подключён (' + (res.tools || []).length + ' инстр.)') : ('MCP ' + s.name + ': ' + (res.error || 'ошибка')), res.connected ? 'ok' : 'warn');
+      refreshState();
+    };
+    const del = node('button', 'ghost small-btn danger-text', '✕');
+    del.type = 'button';
+    del.onclick = async () => {
+      await api('/api/mcp/remove', { name: s.name });
+      refreshState();
+    };
+    row.append(reconn, del);
+    list.append(row);
+  });
+}
+
+if ($('#mcpAddBtn')) {
+  $('#mcpAddBtn').onclick = async () => {
+    const name = ($('#mcpNameInput') && $('#mcpNameInput').value.trim()) || '';
+    const command = ($('#mcpCmdInput') && $('#mcpCmdInput').value.trim()) || '';
+    const args = ($('#mcpArgsInput') && $('#mcpArgsInput').value.trim()) || '';
+    const msg = $('#mcpStatusMsg');
+    if (!name || !command) {
+      if (msg) msg.textContent = 'Укажите имя и команду MCP-сервера';
+      return;
+    }
+    if (msg) msg.textContent = 'Подключение MCP ' + name + '…';
+    try {
+      const res = await api('/api/mcp/add', { name, command, args, connect: true });
+      if (res.ok) {
+        $('#mcpNameInput').value = '';
+        $('#mcpCmdInput').value = '';
+        $('#mcpArgsInput').value = '';
+        if (msg) msg.textContent = res.connected
+          ? ('✅ Подключён: ' + (res.tools || []).length + ' инструментов')
+          : ('⚠️ Добавлен, но не подключён: ' + (res.error || ''));
+        refreshState();
+      } else if (msg) {
+        msg.textContent = '❌ ' + (res.error || 'Ошибка');
+      }
+    } catch (err) {
+      if (msg) msg.textContent = '❌ ' + err.message;
+    }
+  };
+}
+
+/* ---------- Voice Engine (XTTS v2 / SAPI5) & Voice Call Modal ---------- */
+let voiceAudioEl = null;
+let voiceCallActive = false;
+let voiceCallMuted = false;
+let voiceCallTimer = null;
+let voiceCallStartedAt = 0;
+let voiceCallRec = null;
+let voiceCallRecording = false;
+
+function fillVoicePresets(presets, currentId) {
+  const list = Array.isArray(presets) ? presets : [];
+  ['#voicePresetSelect', '#callVoiceSelect'].forEach((sel) => {
+    const el = $(sel);
+    if (!el) return;
+    el.innerHTML = '';
+    list.forEach((p) => {
+      const opt = document.createElement('option');
+      opt.value = p.id;
+      opt.textContent = p.name;
+      el.appendChild(opt);
+    });
+    if (currentId && list.some((p) => p.id === currentId)) el.value = currentId;
+  });
+}
+
+function stopVoiceAudio() {
+  if (voiceAudioEl) {
+    try { voiceAudioEl.pause(); voiceAudioEl.src = ''; } catch (e) {}
+    voiceAudioEl = null;
+  }
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+}
+
+async function speakWithServer(text, onEnd) {
+  const clean = String(text || '').trim();
+  if (!clean) { if (onEnd) onEnd(); return; }
+  stopVoiceAudio();
+  const voiceId = ($('#callVoiceSelect') && $('#callVoiceSelect').value) ||
+    ($('#voicePresetSelect') && $('#voicePresetSelect').value) || 'ru_female_warm';
+  try {
+    const res = await api('/api/voice/speak', { text: clean, voice: voiceId });
+    if (res && res.ok && res.audio_b64) {
+      const audio = new Audio(res.audio_b64);
+      voiceAudioEl = audio;
+      audio.onended = () => { voiceAudioEl = null; if (onEnd) onEnd(); };
+      audio.onerror = () => { voiceAudioEl = null; if (onEnd) onEnd(); };
+      await audio.play();
+      return res;
+    }
+  } catch (e) {
+    console.warn('Server TTS fallback to WebSpeech:', e);
+  }
+  // Fallback to browser WebSpeech API
+  if ('speechSynthesis' in window) {
+    const utter = new SpeechSynthesisUtterance(clean.slice(0, 1200));
+    utter.lang = 'ru-RU';
+    utter.onend = () => { if (onEnd) onEnd(); };
+    utter.onerror = () => { if (onEnd) onEnd(); };
+    window.speechSynthesis.speak(utter);
+  } else if (onEnd) {
+    onEnd();
+  }
+  return null;
+}
+
+if ($('#voiceSaveBtn')) {
+  $('#voiceSaveBtn').onclick = async () => {
+    const cfgPatch = {
+      voice_engine: ($('#voiceEngineSelect') && $('#voiceEngineSelect').value) || 'auto',
+      voice_language: ($('#voiceLangSelect') && $('#voiceLangSelect').value) || 'ru',
+      voice_xtts_url: ($('#voiceXttsUrl') && $('#voiceXttsUrl').value.trim()) || 'http://127.0.0.1:8020',
+      voice_preset: ($('#voicePresetSelect') && $('#voicePresetSelect').value) || 'ru_female_warm',
+    };
+    await api('/api/config', { config: cfgPatch });
+    const st = await api('/api/voice/status');
+    const stEl = $('#voiceSettingsStatus');
+    if (stEl) stEl.textContent = st.xtts_alive
+      ? '✅ XTTS v2 сервер активен (' + st.xtts_url + ')'
+      : 'ℹ️ XTTS v2 офлайн — активен встроенный Windows SAPI5';
+    refreshState();
+  };
+}
+if ($('#voiceTestSpeakBtn')) {
+  $('#voiceTestSpeakBtn').onclick = async () => {
+    const stEl = $('#voiceSettingsStatus');
+    if (stEl) stEl.textContent = '🔊 Синтез тестовой фразы…';
+    const res = await speakWithServer('Привет! Голосовой движок LocalHarness готов к работе.');
+    if (stEl) stEl.textContent = res ? ('✅ Озвучено через ' + res.engine_used) : '✅ Озвучено через браузер';
+  };
+}
+if ($('#voiceCloneFile')) {
+  $('#voiceCloneFile').onchange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const stEl = $('#voiceSettingsStatus');
+    if (stEl) stEl.textContent = 'Загрузка WAV-образца…';
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      const name = ($('#voiceCloneName') && $('#voiceCloneName').value.trim()) || file.name.replace(/\.wav$/i, '');
+      const res = await api('/api/voice/sample/upload', { name, data_b64: btoa(bin) });
+      if (res.ok) {
+        fillVoicePresets(res.presets, res.id);
+        if (stEl) stEl.textContent = '✅ Клон голоса сохранён: ' + res.file + ' (' + res.size_kb + ' КБ)';
+        if ($('#voiceCloneName')) $('#voiceCloneName').value = '';
+      } else if (stEl) {
+        stEl.textContent = '❌ ' + (res.error || 'Ошибка загрузки');
+      }
+    } catch (err) {
+      if (stEl) stEl.textContent = '❌ ' + err.message;
+    } finally {
+      e.target.value = '';
+    }
+  };
+}
+
+function setCallState(mode, label) {
+  const orb = $('#callOrb');
+  const core = $('#callOrbCore');
+  const lbl = $('#callStateLabel');
+  if (orb) {
+    orb.classList.remove('listening', 'thinking', 'speaking');
+    if (mode && mode !== 'idle') orb.classList.add(mode);
+  }
+  if (core) {
+    core.textContent = mode === 'listening' ? '🎤' : (mode === 'thinking' ? '🧠' : (mode === 'speaking' ? '🔊' : '🎙️'));
+  }
+  if (lbl) lbl.textContent = label || 'Готов к разговору';
+}
+
+function pushCallSubtitle(role, text) {
+  const box = $('#callSubtitles');
+  if (!box) return;
+  const cls = role === 'user' ? 'call-sub-user' : (role === 'ai' ? 'call-sub-ai' : 'call-sub-sys');
+  const prefix = role === 'user' ? 'Вы: ' : (role === 'ai' ? 'Агент: ' : '');
+  const line = node('div', 'call-sub-line ' + cls, esc(prefix + text));
+  box.appendChild(line);
+  box.scrollTop = box.scrollHeight;
+}
+
+function updateCallTimer() {
+  const el = $('#callTimer');
+  if (!el || !voiceCallActive) return;
+  const sec = Math.floor((Date.now() - voiceCallStartedAt) / 1000);
+  const mm = String(Math.floor(sec / 60)).padStart(2, '0');
+  const ss = String(sec % 60).padStart(2, '0');
+  el.textContent = mm + ':' + ss;
+}
+
+let pendingCallAsk = null;
+
+function setCallToolPill(text) {
+  const pill = $('#callToolPill');
+  if (!pill) return;
+  if (text) {
+    pill.textContent = text;
+    pill.hidden = false;
+  } else {
+    pill.hidden = true;
+    pill.textContent = '';
+  }
+}
+
+function clearCallAsk() {
+  pendingCallAsk = null;
+  const band = $('#callAskBand');
+  if (band) {
+    band.innerHTML = '';
+    band.hidden = true;
+  }
+}
+
+async function respondCallAsk(value) {
+  if (!pendingCallAsk || !sessionId) return;
+  const key = pendingCallAsk.key;
+  clearCallAsk();
+  closeBand();
+  try {
+    await api('/api/respond', { session: sessionId, key, value });
+    setCallState('thinking', 'Ответ передан агенту…');
+  } catch (e) {
+    pushCallSubtitle('sys', 'Ошибка ответа агенту: ' + e.message);
+  }
+}
+
+function showCallAsk(ev) {
+  const band = $('#callAskBand');
+  if (!band) return;
+  pendingCallAsk = ev;
+  band.innerHTML = '';
+  const isApprove = ev.type === 'approve';
+  const msg = isApprove
+    ? ('⚠️ Подтвердите действие: ' + (ev.tool || 'инструмент') + (ev.reason ? ' — ' + ev.reason : ''))
+    : ('❓ Вопрос агента: ' + (ev.question || ''));
+  band.append(node('div', null, esc(msg)));
+  const acts = node('div', 'call-ask-actions');
+  if (isApprove) {
+    const yesBtn = node('button', 'primary small-btn', '✅ Разрешить');
+    yesBtn.type = 'button';
+    yesBtn.onclick = () => respondCallAsk({ allow: true });
+    const noBtn = node('button', 'danger small-btn', '❌ Отклонить');
+    noBtn.type = 'button';
+    noBtn.onclick = () => respondCallAsk({ allow: false });
+    acts.append(yesBtn, noBtn);
+  } else {
+    const opts = Array.isArray(ev.options) ? ev.options : [];
+    opts.forEach((opt) => {
+      const b = node('button', 'ghost small-btn', esc(opt));
+      b.type = 'button';
+      b.onclick = () => respondCallAsk({ text: opt });
+      acts.append(b);
+    });
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.className = 'field grow';
+    inp.placeholder = 'Ответь текстом или голосом…';
+    const sendB = node('button', 'primary small-btn', 'Ответить');
+    sendB.type = 'button';
+    sendB.onclick = () => { if (inp.value.trim()) respondCallAsk({ text: inp.value.trim() }); };
+    inp.onkeydown = (e) => { if (e.key === 'Enter' && inp.value.trim()) respondCallAsk({ text: inp.value.trim() }); };
+    acts.append(inp, sendB);
+  }
+  band.append(acts);
+  band.hidden = false;
+  if (!voiceCallMuted) {
+    setCallState('speaking', isApprove ? 'Жду подтверждения…' : 'Агент спрашивает…');
+    speakWithServer(msg, () => {
+      if (voiceCallActive && pendingCallAsk && $('#callHandsFree') && $('#callHandsFree').checked) {
+        setTimeout(() => { if (voiceCallActive && pendingCallAsk) callStartListening(); }, 350);
+      }
+    });
+  }
+}
+
+function pushCallToolEvent(text, imagePath) {
+  const box = $('#callSubtitles');
+  if (!box) return;
+  const line = node('div', 'call-sub-line call-sub-tool', esc(text));
+  box.appendChild(line);
+  if (imagePath) {
+    const img = document.createElement('img');
+    img.className = 'call-sub-img';
+    img.src = '/shot?path=' + encodeURIComponent(imagePath);
+    img.alt = 'скриншот';
+    img.onclick = () => window.open(img.src, '_blank');
+    box.appendChild(img);
+  }
+  box.scrollTop = box.scrollHeight;
+}
+
+function callSendPrompt(text) {
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  // Если агент ждёт подтверждения или ответа на вопрос — отвечаем прямо в /api/respond!
+  if (pendingCallAsk) {
+    pushCallSubtitle('user', clean);
+    if (pendingCallAsk.type === 'approve') {
+      const low = clean.toLowerCase();
+      const allow = /\b(да|разрешаю|можно|ок|окей|подтверждаю|выполняй|yes|allow|ok)\b/.test(low) &&
+        !/\b(нет|нельзя|отмена|запрещаю|no|deny|cancel)\b/.test(low);
+      respondCallAsk({ allow });
+    } else {
+      respondCallAsk({ text: clean });
+    }
+    return;
+  }
+  pushCallSubtitle('user', clean);
+  setCallState('thinking', 'Агент работает…');
+  if ($('#callStopAgentBtn')) $('#callStopAgentBtn').disabled = false;
+  if (!running) {
+    const wantGoal = $('#callGoalToggle') && $('#callGoalToggle').checked;
+    if (wantGoal && $('#goalMode')) {
+      $('#goalMode').checked = true;
+    }
+    $('#input').value = clean;
+    $('#send').click();
+    if (wantGoal && $('#callGoalToggle')) {
+      $('#callGoalToggle').checked = false;
+      if ($('#goalMode')) $('#goalMode').checked = false;
+    }
+  }
+}
+
+function onVoiceCallEvent(ev) {
+  if (!voiceCallActive || !ev) return;
+  switch (ev.type) {
+    case 'tool_start':
+      setCallState('thinking', 'Выполняю инструмент…');
+      setCallToolPill('⚙️ ' + (ev.tool || 'tool') + '…');
+      if ($('#callStopAgentBtn')) $('#callStopAgentBtn').disabled = false;
+      break;
+    case 'tool':
+      setCallToolPill('');
+      pushCallToolEvent((ev.ok ? '✅ ' : '❌ ') + (ev.tool || 'tool'), ev.image);
+      break;
+    case 'plan':
+      pushCallToolEvent('📋 ' + (ev.text || ''));
+      break;
+    case 'goal':
+      if (ev.state === 'started') pushCallToolEvent('🎯 Цель запущена: ' + (ev.objective || '').slice(0, 100));
+      else if (ev.state === 'closed') pushCallToolEvent((ev.achieved ? '🏆 Цель достигнута: ' : '🎯 Цель закрыта: ') + (ev.summary || '').slice(0, 120));
+      break;
+    case 'question':
+    case 'approve':
+      setCallToolPill('');
+      showCallAsk(ev);
+      break;
+    case 'error':
+      setCallToolPill('');
+      clearCallAsk();
+      if ($('#callStopAgentBtn')) $('#callStopAgentBtn').disabled = true;
+      pushCallSubtitle('sys', '❌ ' + (ev.text || 'Ошибка'));
+      setCallState('idle', 'Ошибка — попробуй снова');
+      break;
+    case 'stopped':
+      setCallToolPill('');
+      clearCallAsk();
+      if ($('#callStopAgentBtn')) $('#callStopAgentBtn').disabled = true;
+      pushCallSubtitle('sys', '🛑 Агент остановлен');
+      setCallState('idle', 'Остановлено');
+      break;
+    case 'done':
+      setCallToolPill('');
+      clearCallAsk();
+      if ($('#callStopAgentBtn')) $('#callStopAgentBtn').disabled = true;
+      break;
+    default:
+      break;
+  }
+}
+
+async function openVoiceCall() {
+  const dlg = $('#voiceCallDialog');
+  if (!dlg) return;
+  voiceCallActive = true;
+  voiceCallMuted = false;
+  voiceCallStartedAt = Date.now();
+  clearCallAsk();
+  setCallToolPill('');
+  if ($('#callStopAgentBtn')) $('#callStopAgentBtn').disabled = !running;
+  if ($('#callMuteBtn')) {
+    $('#callMuteBtn').classList.remove('muted');
+    $('#callMuteBtn').textContent = '🔊';
+  }
+  if ($('#callPersonaSelect') && $('#personaSelect')) {
+    $('#callPersonaSelect').innerHTML = $('#personaSelect').innerHTML;
+    $('#callPersonaSelect').value = $('#personaSelect').value;
+  }
+  setCallState('idle', 'Подключение голосового движка…');
+  if (typeof dlg.showModal === 'function' && !dlg.open) dlg.showModal();
+  if (voiceCallTimer) clearInterval(voiceCallTimer);
+  voiceCallTimer = setInterval(updateCallTimer, 1000);
+  updateCallTimer();
+  try {
+    const st = await api('/api/voice/status');
+    fillVoicePresets(st.presets, st.voice_preset);
+    if ($('#callEngineMeta')) {
+      const toolsCnt = (stateCache && stateCache.tools ? stateCache.tools.length : 0);
+      $('#callEngineMeta').textContent = (st.xtts_alive
+        ? ('XTTS v2 онлайн · ' + st.voice_language.toUpperCase())
+        : ('Windows SAPI5 (офлайн) · ' + st.voice_language.toUpperCase())) +
+        (toolsCnt ? (' · ' + toolsCnt + ' инстр.') : '');
+    }
+    setCallState('idle', 'Нажми 🎤 или напиши — доступны все функции');
+  } catch (e) {
+    setCallState('idle', 'Готов к разговору');
+  }
+}
+
+function closeVoiceCall() {
+  voiceCallActive = false;
+  clearCallAsk();
+  setCallToolPill('');
+  stopVoiceAudio();
+  if (voiceCallRec && voiceCallRecording) {
+    try { voiceCallRec.stop(); } catch (e) {}
+  }
+  voiceCallRecording = false;
+  if (voiceCallTimer) { clearInterval(voiceCallTimer); voiceCallTimer = null; }
+  const dlg = $('#voiceCallDialog');
+  if (dlg && dlg.open) dlg.close();
+}
+
+function callStartListening() {
+  if (!voiceCallActive) return;
+  const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRec) {
+    pushCallSubtitle('sys', 'Распознавание речи не поддерживается браузером (используй Chrome/Edge или текстовое поле ниже).');
+    return;
+  }
+  if (voiceCallRecording && voiceCallRec) {
+    voiceCallRec.stop();
+    return;
+  }
+  stopVoiceAudio();
+  const rec = new SpeechRec();
+  const lang = ($('#voiceLangSelect') && $('#voiceLangSelect').value) || 'ru';
+  rec.lang = lang === 'en' ? 'en-US' : 'ru-RU';
+  rec.interimResults = false;
+  rec.continuous = false;
+  voiceCallRec = rec;
+  voiceCallRecording = true;
+  if ($('#callMicBtn')) $('#callMicBtn').classList.add('recording');
+  setCallState('listening', pendingCallAsk ? 'Слушаю ваш ответ…' : 'Слушаю вас…');
+
+  let captured = '';
+  rec.onresult = (ev) => {
+    for (let i = 0; i < ev.results.length; i++) {
+      captured += ev.results[i][0].transcript;
+    }
+  };
+  rec.onerror = (ev) => {
+    setCallState('idle', 'Микрофон: ' + (ev.error || 'пауза'));
+  };
+  rec.onend = async () => {
+    voiceCallRecording = false;
+    if ($('#callMicBtn')) $('#callMicBtn').classList.remove('recording');
+    const text = captured.trim();
+    if (!text) {
+      if (voiceCallActive) setCallState('idle', 'Ничего не услышал — нажми 🎤');
+      return;
+    }
+    callSendPrompt(text);
+  };
+  rec.start();
+}
+
+function onVoiceCallAnswer(rawText) {
+  if (!voiceCallActive) return false;
+  const clean = String(rawText || '').trim();
+  if (!clean) return false;
+  pushCallSubtitle('ai', clean.slice(0, 420));
+  if (voiceCallMuted) {
+    setCallState('idle', 'Звук выключен (Mute)');
+    return true;
+  }
+  setCallState('speaking', 'Агент говорит…');
+  speakWithServer(clean, () => {
+    if (!voiceCallActive) return;
+    setCallState('idle', 'Готов к разговору');
+    if ($('#callHandsFree') && $('#callHandsFree').checked) {
+      setTimeout(() => { if (voiceCallActive && !running && !pendingCallAsk) callStartListening(); }, 450);
+    }
+  });
+  return true;
+}
+
+if ($('#voiceCallBtn')) $('#voiceCallBtn').onclick = openVoiceCall;
+if ($('#voiceOpenCallFromDrawer')) $('#voiceOpenCallFromDrawer').onclick = () => {
+  if ($('#drawerClose')) $('#drawerClose').click();
+  openVoiceCall();
+};
+if ($('#callCloseBtn')) $('#callCloseBtn').onclick = closeVoiceCall;
+if ($('#callEndBtn')) $('#callEndBtn').onclick = closeVoiceCall;
+if ($('#callMicBtn')) $('#callMicBtn').onclick = callStartListening;
+if ($('#callInterruptBtn')) $('#callInterruptBtn').onclick = () => {
+  stopVoiceAudio();
+  setCallState('idle', 'Речь прервана');
+};
+if ($('#callMuteBtn')) $('#callMuteBtn').onclick = () => {
+  voiceCallMuted = !voiceCallMuted;
+  $('#callMuteBtn').classList.toggle('muted', voiceCallMuted);
+  $('#callMuteBtn').textContent = voiceCallMuted ? '🔇' : '🔊';
+  if (voiceCallMuted) stopVoiceAudio();
+};
+if ($('#callVoiceSelect')) {
+  $('#callVoiceSelect').onchange = (e) => {
+    const val = e.target.value;
+    if ($('#voicePresetSelect')) $('#voicePresetSelect').value = val;
+    api('/api/config', { config: { voice_preset: val } }).catch(() => {});
+  };
+}
+if ($('#callPersonaSelect')) {
+  $('#callPersonaSelect').onchange = async (e) => {
+    const persona = e.target.value || 'default';
+    if ($('#personaSelect')) $('#personaSelect').value = persona;
+    await api('/api/config', { config: { persona } }).catch(() => {});
+    pushCallToolEvent('🎭 Персона: ' + e.target.options[e.target.selectedIndex].text);
+  };
+}
+if ($('#callScreenBtn')) {
+  $('#callScreenBtn').onclick = () => {
+    if (running) return;
+    callSendPrompt('Сделай скриншот моего экрана через screenshot и кратко опиши, что на нём сейчас происходит.');
+  };
+}
+if ($('#callAttachBtn')) {
+  $('#callAttachBtn').onclick = () => {
+    if ($('#attachFile')) $('#attachFile').click();
+    pushCallToolEvent('🖼️ Выбери изображение — оно прикрепится к следующему запросу в звонке');
+  };
+}
+if ($('#callStopAgentBtn')) {
+  $('#callStopAgentBtn').onclick = async () => {
+    stopVoiceAudio();
+    if (sessionId && running) {
+      await api('/api/stop', { session: sessionId }).catch(() => {});
+    }
+    setCallToolPill('');
+    setCallState('idle', 'Остановлено');
+  };
+}
+if ($('#callTextSendBtn')) {
+  $('#callTextSendBtn').onclick = () => {
+    const inp = $('#callTextInput');
+    if (!inp || !inp.value.trim()) return;
+    const val = inp.value.trim();
+    inp.value = '';
+    callSendPrompt(val);
+  };
+}
+if ($('#callTextInput')) {
+  $('#callTextInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && e.target.value.trim()) {
+      e.preventDefault();
+      const val = e.target.value.trim();
+      e.target.value = '';
+      callSendPrompt(val);
+    }
+  });
+}
+
+function syncExtendedState(st) {
+  if (!st) return;
+  if (st.version && $('#updateVerChip')) $('#updateVerChip').textContent = 'v' + st.version;
+  if (st.theme && !localStorage.getItem('lh.theme')) applyTheme(st.theme, false);
+  if ($('#personaSelect') && st.personas) {
+    const sel = $('#personaSelect');
+    if (sel.options.length !== Object.keys(st.personas).length) {
+      sel.innerHTML = '';
+      Object.keys(st.personas).forEach((k) => {
+        const p = st.personas[k];
+        const opt = document.createElement('option');
+        opt.value = k;
+        opt.textContent = (p.icon ? p.icon + ' ' : '') + (p.name || k);
+        sel.appendChild(opt);
+      });
+    }
+    sel.value = st.persona || 'default';
+  }
+  if ($('#toastNotifToggle')) $('#toastNotifToggle').checked = st.toast_notifications !== false;
+  if (st.rag) renderRagState(st.rag);
+  if (st.mcp_servers) renderMcpState(st.mcp_servers);
+  if (st.voice) {
+    if ($('#voiceEngineChip')) $('#voiceEngineChip').textContent = st.voice.engine || 'auto';
+    if ($('#voiceEngineSelect')) $('#voiceEngineSelect').value = st.voice.engine || 'auto';
+    if ($('#voiceLangSelect')) $('#voiceLangSelect').value = st.voice.voice_language || 'ru';
+    if ($('#voiceXttsUrl') && document.activeElement !== $('#voiceXttsUrl')) {
+      $('#voiceXttsUrl').value = st.voice.xtts_url || 'http://127.0.0.1:8020';
+    }
+    if (st.voice.presets) fillVoicePresets(st.voice.presets, st.voice.voice_preset);
+  }
+}
+
+const AUTO_GOAL_RE = /(?:^\s*\/goal\b|поставь(?:\s+себе)?\s+цель|задай\s+цель|установи\s+цель|новая\s+цель|включи\s+режим\s+цели|в\s+режиме\s+цели|режим\s+цели\s*[:—\-]|^\s*цель\s*[:—\-]|set\s+(?:a\s+)?goal)/i;
+if ($('#input')) {
+  $('#input').addEventListener('input', () => {
+    const hint = $('#modeHint');
+    if (!hint) return;
+    const val = $('#input').value || '';
+    if (AUTO_GOAL_RE.test(val)) {
+      hint.textContent = '🎯 Режим цели (авто)';
+      hint.style.color = 'var(--ok-soft)';
+    } else if (hint.textContent === '🎯 Режим цели (авто)') {
+      hint.textContent = '';
+      hint.style.color = '';
+    }
+  });
 }
 
 (async function boot() {

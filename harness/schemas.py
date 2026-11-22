@@ -41,17 +41,60 @@ SPECS = [
     {"profile":"full","name":"generate_image","desc":"Картинка через ComfyUI/SD WebUI (в Настройках).","params":{"prompt":("string","промпт (англ.)"),"negative_prompt":("string?","исключить"),"width":("number?","ширина"),"height":("number?","высота"),"steps":("number?","шаги"),"seed":("number?","сид")},"required":["prompt"]},
     {"profile":"full","name":"recall","desc":"Поиск в долговременной памяти.","params":{"query":("string?","запрос")},"required":[]},
     {"profile":"full","name":"cluster_run","desc":"Wi-Fi кластер устройств: status|map|bench|llm (разгрузка задач на телефоны/ПК в локальной сети).","params":{"action":("string","status|map|bench|llm"),"kind":("string?","compute_bench|text_search|hash_batch|json_transform"),"items":("array?","массив подзадач"),"prompt":("string?","промпт для LAN LLM"),"node_url":("string?","URL узла"),"chunks":("number?","чанков для bench")},"required":["action"]},
+    {"profile":"core","name":"rag_search","desc":"Поиск по локальной базе знаний (RAG: проиндексированные папки, MD, TXT, PDF, DOCX, код).","params":{"query":("string","поисковый запрос"),"top_k":("number?","количество фрагментов (1-20)")},"required":["query"]},
+    {"profile":"full","name":"rag_index","desc":"Добавить папку или файл в локальную базу знаний (RAG).","params":{"path":("string","путь к папке или файлу")},"required":["path"]},
 ]
 PROFILES=("core","full")
 MEMORY_TOOLS=("remember","recall")
 
+PERSONAS = {
+    "default": {
+        "name": "Универсальный агент",
+        "icon": "🤖",
+        "prompt": "",
+    },
+    "coder": {
+        "name": "Senior Разработчик",
+        "icon": "💻",
+        "prompt": "Ты — Senior Software Architect & Full-Stack инженер. Пиши чистый, протестированный и безопасный код, проверяй изменения тестами и линтерами, объясняй архитектурные решения кратко и точно.",
+    },
+    "security": {
+        "name": "Кибербезопасность (SecOps)",
+        "icon": "🛡️",
+        "prompt": "Ты — специалист по информационной безопасности и аудиту кода (AppSec / DevSecOps). Обращай особое внимание на OWASP Top 10, инъекции, утечки секретов, права доступа и сетевую безопасность.",
+    },
+    "analyst": {
+        "name": "Аналитик данных & RAG",
+        "icon": "📊",
+        "prompt": "Ты — аналитик данных и исследователь. Опирайся на факты, цифры, локальную базу знаний (rag_search) и проверенные источники. Структурируй выводы в таблицы и списки.",
+    },
+    "writer": {
+        "name": "Технический писатель",
+        "icon": "✍️",
+        "prompt": "Ты — редактор и технический писатель. Создавай ясную, структурированную документацию, статьи и гайды с живым языком, примерами и аккуратной вёрсткой Markdown.",
+    },
+    "voice": {
+        "name": "Голосовой собеседник",
+        "icon": "🎙️",
+        "prompt": "Ты общаешься с пользователем в режиме живого голосового звонка (XTTS v2). Отвечай естественно, разговорно, ёмко (2-4 предложения), без громоздких таблиц и длинных блоков кода, чтобы твой ответ легко воспринимался на слух.",
+    },
+}
+
 def entries(profile="core", cfg=None):
-    from . import plugins
+    from . import plugins, mcp_client
     base=SPECS if profile=="full" else [s for s in SPECS if s["profile"]=="core"]
     if not (cfg or {}).get("memory_enabled", False):
         base=[s for s in base if s["name"] not in MEMORY_TOOLS]
-    try: return base+plugins.entries()
-    except Exception: return base
+    out = list(base)
+    try:
+        out += plugins.entries()
+    except Exception:
+        pass
+    try:
+        out += mcp_client.tool_entries(cfg)
+    except Exception:
+        pass
+    return out
 
 # Имена, где описание дублирует само имя: в JSON-схеме это лишние токены в каждом запросе.
 PLAIN_PARAMS={"cmd","command","path","local_path","remote_path","url","query","pattern","content","find",
@@ -113,5 +156,9 @@ def build_system_prompt(cfg, profile="core", vision=False, tools_doc=True):
                 built += "\n\n" + mem_text
         except Exception:
             pass
+    persona_id = str(cfg.get("persona") or "default").strip()
+    persona = PERSONAS.get(persona_id) or {}
+    if persona.get("prompt"):
+        built += "\n\nРОЛЬ / ПЕРСОНА (%s):\n%s" % (persona.get("name", persona_id), persona["prompt"])
     custom = str(cfg.get("system_prompt") or "").strip()
     return built + ("\n\nДОПОЛНИТЕЛЬНАЯ ИНСТРУКЦИЯ ПОЛЬЗОВАТЕЛЯ:\n" + custom if custom else "")

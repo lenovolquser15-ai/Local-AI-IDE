@@ -34,20 +34,22 @@ def export_profile(include_sessions=True, include_plugins=True, include_memory=T
         zf.writestr("config.json", json.dumps(cfg, ensure_ascii=False, indent=2))
         counts["config"] = 1
 
+        d_dir = config_mod.data_dir()
+
         # 2. Memory
-        mem_path = os.path.join(config_mod.DATA_DIR, "memory.json")
+        mem_path = os.path.join(d_dir, "memory.json")
         if include_memory and os.path.isfile(mem_path):
             zf.write(mem_path, "data/memory.json")
             counts["memory"] = 1
 
         # 3. Schedules
-        sched_path = os.path.join(config_mod.DATA_DIR, "schedules.json")
+        sched_path = os.path.join(d_dir, "schedules.json")
         if include_schedules and os.path.isfile(sched_path):
             zf.write(sched_path, "data/schedules.json")
             counts["schedules"] = 1
 
         # 4. Sessions (.jsonl and legacy .json)
-        sess_dir = os.path.join(config_mod.DATA_DIR, "sessions")
+        sess_dir = os.path.join(d_dir, "sessions")
         if include_sessions and os.path.isdir(sess_dir):
             for fname in sorted(os.listdir(sess_dir)):
                 if not fname.endswith((".jsonl", ".json")) or not _SAFE_NAME.match(fname):
@@ -134,12 +136,14 @@ def import_profile(raw_bytes, restore_config=True, restore_memory=True,
             except Exception as exc:
                 warnings.append("config.json: %s" % exc)
 
+        d_dir = config_mod.data_dir()
+
         if restore_memory and "data/memory.json" in names:
             try:
-                os.makedirs(config_mod.DATA_DIR, exist_ok=True)
+                os.makedirs(d_dir, exist_ok=True)
                 data = zf.read("data/memory.json")
                 json.loads(data.decode("utf-8", "replace"))
-                with open(os.path.join(config_mod.DATA_DIR, "memory.json"), "wb") as fh:
+                with open(os.path.join(d_dir, "memory.json"), "wb") as fh:
                     fh.write(data)
                 restored["memory"] = True
             except Exception as exc:
@@ -147,17 +151,17 @@ def import_profile(raw_bytes, restore_config=True, restore_memory=True,
 
         if restore_schedules and "data/schedules.json" in names:
             try:
-                os.makedirs(config_mod.DATA_DIR, exist_ok=True)
+                os.makedirs(d_dir, exist_ok=True)
                 data = zf.read("data/schedules.json")
                 json.loads(data.decode("utf-8", "replace"))
-                with open(os.path.join(config_mod.DATA_DIR, "schedules.json"), "wb") as fh:
+                with open(os.path.join(d_dir, "schedules.json"), "wb") as fh:
                     fh.write(data)
                 restored["schedules"] = True
             except Exception as exc:
                 warnings.append("schedules.json: %s" % exc)
 
         if restore_sessions:
-            sess_dir = os.path.join(config_mod.DATA_DIR, "sessions")
+            sess_dir = os.path.join(d_dir, "sessions")
             os.makedirs(sess_dir, exist_ok=True)
             for n in sorted(names):
                 if not n.startswith("data/sessions/") or not n.endswith((".jsonl", ".json")):

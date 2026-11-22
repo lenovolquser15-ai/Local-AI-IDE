@@ -14,7 +14,7 @@ _THERMAL_CACHE = {
     "lock": threading.Lock(),
     "simulated_temp": None,
 }
-_THERMAL_TTL = 1.8  # Cache duration for sensor queries
+_THERMAL_TTL = 1.0  # Cache duration for sensor queries
 
 _COOLDOWN_STATE = {
     "active": False,
@@ -60,49 +60,73 @@ def read_gpu_sensors(force=False):
         "vram_used_mb": 0.0,
         "vram_total_mb": 0.0,
         "fan_speed": None,
+        "power_w": None,
         "simulated": False,
     }
 
-    # 1. Try NVIDIA-SMI
+    # 1. Try NVIDIA-SMI (supports multi-GPU: picks the primary discrete GPU with highest VRAM/load)
     smi = shutil.which("nvidia-smi") or shutil.which("nvidia-smi.exe")
     if smi:
         try:
             cmd = [
                 smi,
-                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,fan.speed",
+                "--query-gpu=name,temperature.gpu,utilization.gpu,memory.used,memory.total,fan.speed,power.draw",
                 "--format=csv,noheader,nounits"
             ]
             proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=2.5, creationflags=NO_WINDOW)
             if proc.returncode == 0 and proc.stdout:
-                line = proc.stdout.decode("utf-8", "replace").strip().splitlines()[0]
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 2:
-                    data["has_gpu"] = True
-                    data["gpu_name"] = parts[0]
+                lines = [ln.strip() for ln in proc.stdout.decode("utf-8", "replace").strip().splitlines() if ln.strip()]
+                best = None
+                for line in lines:
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) < 2:
+                        continue
+                    row = {
+                        "has_gpu": True,
+                        "gpu_name": parts[0],
+                        "temp_c": None,
+                        "utilization_pct": None,
+                        "vram_used_mb": 0.0,
+                        "vram_total_mb": 0.0,
+                        "fan_speed": None,
+                        "power_w": None,
+                        "simulated": False,
+                    }
                     try:
-                        data["temp_c"] = int(float(parts[1]))
+                        row["temp_c"] = int(float(parts[1]))
                     except (ValueError, TypeError):
                         pass
                     if len(parts) >= 3:
                         try:
-                            data["utilization_pct"] = int(float(parts[2]))
+                            row["utilization_pct"] = int(float(parts[2]))
                         except (ValueError, TypeError):
                             pass
                     if len(parts) >= 5:
                         try:
-                            data["vram_used_mb"] = round(float(parts[3]), 1)
-                            data["vram_total_mb"] = round(float(parts[4]), 1)
+                            row["vram_used_mb"] = round(float(parts[3]), 1)
+                            row["vram_total_mb"] = round(float(parts[4]), 1)
                         except (ValueError, TypeError):
                             pass
                     if len(parts) >= 6:
                         fan_raw = parts[5].strip()
                         if fan_raw and not fan_raw.startswith("[") and "N/A" not in fan_raw:
                             try:
-                                data["fan_speed"] = int(float(fan_raw))
+                                row["fan_speed"] = int(float(fan_raw))
                             except (ValueError, TypeError):
-                                data["fan_speed"] = fan_raw
-                        else:
-                            data["fan_speed"] = None
+                                row["fan_speed"] = fan_raw
+                    if len(parts) >= 7:
+                        pwr_raw = parts[6].strip()
+                        if pwr_raw and not pwr_raw.startswith("[") and "N/A" not in pwr_raw:
+                            try:
+                                row["power_w"] = round(float(pwr_raw), 1)
+                            except (ValueError, TypeError):
+                                pass
+                    if best is None or (row["vram_total_mb"], row["utilization_pct"] or 0, row["temp_c"] or 0) > (
+                        best["vram_total_mb"], best["utilization_pct"] or 0, best["temp_c"] or 0
+                    ):
+                        best = row
+                if best is not None:
+                    data = best
         except Exception:
             pass
 
@@ -211,6 +235,7 @@ def get_thermal_status(cfg=None, force=False):
         "vram_used_mb": sensor.get("vram_used_mb"),
         "vram_total_mb": sensor.get("vram_total_mb"),
         "fan_speed": sensor.get("fan_speed"),
+        "power_w": sensor.get("power_w"),
         "simulated": sensor.get("simulated", False),
         "status": status,
         "status_label": status_label,

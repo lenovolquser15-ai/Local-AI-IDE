@@ -115,6 +115,11 @@ HABR_XML = """<?xml version="1.0" encoding="utf-8"?>
 
 
 def main():
+    # Для оффлайн-тестов HTTP-движков и RRF/кулдауна временно отключаем живые браузеры 1-2 эшелона
+    old_primary = list(search_mod.PRIMARY_BROWSERS)
+    old_secondary = list(search_mod.SECONDARY_BROWSERS)
+    search_mod.PRIMARY_BROWSERS = []
+    search_mod.SECONDARY_BROWSERS = []
     # 1. разбор выдачи DuckDuckGo
     old_fetch = search_mod._fetch
     try:
@@ -531,6 +536,8 @@ def main():
     search_mod.reset_state()
 
     # 20. Camoufox: алиасы, парсинг выдачи и запасной проход, когда поисковики заблокированы
+    search_mod.PRIMARY_BROWSERS = old_primary
+    search_mod.SECONDARY_BROWSERS = old_secondary
     from harness import camoufox_browser
     camo_rows = [{"title": "Camoufox пример", "snippet": "snippet",
                   "url": "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fcamo"}]

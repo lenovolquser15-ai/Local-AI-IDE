@@ -463,6 +463,112 @@ def _obscura_engine(cfg):
     return _obscura
 
 
+def find_system_browser():
+    """Найти любой установленный Chromium/системный браузер на устройстве (Chrome, Edge, Brave, Yandex, Opera, Chromium)."""
+    import os
+    import shutil
+    for cmd in ("chrome", "google-chrome", "msedge", "brave", "chromium", "chromium-browser", "opera"):
+        found = shutil.which(cmd)
+        if found:
+            return found
+    local_app = os.environ.get("LOCALAPPDATA", "")
+    prog_files = os.environ.get("PROGRAMFILES", r"C:\Program Files")
+    prog_x86 = os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)")
+    candidates = [
+        os.path.join(prog_files, "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(prog_x86, "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(local_app, "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(prog_x86, "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(prog_files, "Microsoft", "Edge", "Application", "msedge.exe"),
+        os.path.join(local_app, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+        os.path.join(prog_files, "BraveSoftware", "Brave-Browser", "Application", "brave.exe"),
+        os.path.join(local_app, "Yandex", "YandexBrowser", "Application", "browser.exe"),
+        os.path.join(local_app, "Programs", "Opera", "opera.exe"),
+        os.path.join(local_app, "Chromium", "Application", "chrome.exe"),
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
+def _parse_browser_search_html(html_text, count=8, source="system_browser"):
+    """Извлекает результаты поиска из DOM-выдачи DuckDuckGo или Bing."""
+    results = []
+    if not html_text:
+        return results
+    # 1. DuckDuckGo HTML / Lite / React DOM
+    for match in re.finditer(
+        r'<a[^>]+(?:class="[^"]*result__a[^"]*"|data-testid="result-title-a")[^>]*href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>',
+        html_text, re.S | re.I,
+    ):
+        href = html_unescape(match.group("href"))
+        target = href
+        if "uddg=" in href:
+            found = re.search(r"[?&]uddg=([^&]+)", href)
+            if found:
+                target = urllib.parse.unquote(found.group(1))
+        if target.startswith("http") and "duckduckgo.com" not in target:
+            results.append(_item(match.group("title"), target, "", source))
+        if len(results) >= count:
+            return results
+    # 2. Bing DOM (<li class="b_algo"><h2><a href="...">)
+    for match in re.finditer(
+        r'<li[^>]+class="[^"]*b_algo[^"]*"[^>]*>.*?<h2[^>]*>\s*<a[^>]+href="(?P<href>[^"]+)"[^>]*>(?P<title>.*?)</a>(.*?)</li>',
+        html_text, re.S | re.I,
+    ):
+        target = _bing_url(html_unescape(match.group("href")))
+        snip_m = re.search(r"<p[^>]*>(.*?)</p>", match.group(3), re.S | re.I)
+        snippet = snip_m.group(1) if snip_m else ""
+        if target.startswith("http"):
+            results.append(_item(match.group("title"), target, snippet, source))
+        if len(results) >= count:
+            return results
+    return results
+
+
+def system_browser(query, count=8, timeout=DEFAULT_TIMEOUT):
+    """Вторичный эшелон поиска: любой установленный браузер на устройстве (Chrome / Edge / Brave / Yandex / Opera)."""
+    import os
+    import subprocess
+    exe = find_system_browser()
+    if not exe:
+        raise RuntimeError("системный браузер (Chrome/Edge/Brave/Yandex) не найден на устройстве")
+    flags = 0x08000000 if os.name == "nt" else 0
+    urls = [
+        "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query, "kl": "wt-wt"}),
+        "https://www.bing.com/search?" + urllib.parse.urlencode({"q": query, "count": count}),
+    ]
+    last_err = ""
+    for url in urls:
+        try:
+            cmd = [
+                exe,
+                "--headless=new",
+                "--disable-gpu",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-extensions",
+                "--dump-dom",
+                url,
+            ]
+            proc = subprocess.run(
+                cmd,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=max(10.0, min(float(timeout or 15.0), 25.0)),
+                creationflags=flags,
+            )
+            html_out = (proc.stdout or b"").decode("utf-8", "replace")
+            if html_out and not _blocked(html_out):
+                items = _parse_browser_search_html(html_out, count=count, source="system_browser")
+                if items:
+                    return items
+        except Exception as exc:
+            last_err = str(exc)
+    raise RuntimeError("system_browser (%s): пустая выдача%s" % (os.path.basename(exe), (": " + last_err) if last_err else ""))
+
+
 def searxng(query, count=8, timeout=DEFAULT_TIMEOUT, base_url="http://127.0.0.1:8080"):
     """Свой инстанс SearXNG: агрегирует десятки движков с твоего IP, без общих лимитов.
     Включается галочкой в настройках; инстанс должен отдавать JSON (search.formats)."""
@@ -699,13 +805,16 @@ def hackernews(query, count=5, timeout=DEFAULT_TIMEOUT):
     return results
 
 
+# 3-уровневая иерархия поиска LocalHarness:
+# 1-й сорт (основные): специализированные агентные браузеры Camoufox и Obscura
+# 2-й сорт (вторичные): любой установленный браузер на устройстве (Chrome / Edge / Brave / Yandex / Opera)
+# 3-й сорт (резерв): HTTP-движки без браузера (DuckDuckGo, Bing, RightDao) и вертикальные API
+PRIMARY_BROWSERS = [camoufox, obscura]
+SECONDARY_BROWSERS = [system_browser]
 GENERAL = [duckduckgo, ddg_lite, bing, rightdao]
-# Obscura (Rust CDP stealth) и Camoufox (Firefox stealth) запускают браузер,
-# поэтому идут отдельным запасным проходом, когда обычная выдача пустая
-# (либо приоритетно, если включён search_obscura в настройках).
 STEALTH = [obscura, camoufox]
 VERTICALS = [ddg_ia, versions, habr, wikipedia, stackexchange, github, hackernews, arxiv, npm, pypi]
-ENGINES = {fn.__name__: fn for fn in GENERAL + STEALTH + VERTICALS}
+ENGINES = {fn.__name__: fn for fn in PRIMARY_BROWSERS + SECONDARY_BROWSERS + GENERAL + VERTICALS}
 ALIASES = {"ddg": "duckduckgo", "duckduckgo_html": "duckduckgo", "lite": "ddg_lite",
            "so": "stackexchange", "stack": "stackexchange", "stackoverflow": "stackexchange",
            "wiki": "wikipedia", "hn": "hackernews", "pypi": "pypi", "npm": "npm",
@@ -714,7 +823,9 @@ ALIASES = {"ddg": "duckduckgo", "duckduckgo_html": "duckduckgo", "lite": "ddg_li
            "version": "versions", "habr": "habr", "хабр": "habr", "habrahabr": "habr",
            "obscura": "obscura", "обскура": "obscura", "rustbrowser": "obscura",
            "camoufox": "camoufox", "stealth": "camoufox", "firefox": "camoufox",
-           "камофокс": "camoufox"}
+           "камофокс": "camoufox",
+           "system_browser": "system_browser", "browser": "system_browser",
+           "chrome": "system_browser", "edge": "system_browser", "браузер": "system_browser"}
 
 
 def engine_names():
@@ -819,18 +930,20 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
     if name != "auto":
         name = ALIASES_NORM.get(name, name)
 
+    primary = list(PRIMARY_BROWSERS)
+    secondary = list(SECONDARY_BROWSERS)
     general = list(GENERAL)
-    stealth = list(STEALTH)
     engines_norm = dict(ENGINES_NORM)
     if obscura_cfg:
         obscura_fn = _obscura_engine(obscura_cfg)
         engines_norm["obscura"] = obscura_fn
-        stealth = [obscura_fn if fn.__name__ == "obscura" else fn for fn in stealth]
+        primary = [obscura_fn if fn.__name__ == "obscura" else fn for fn in primary]
         if obscura_cfg.get("search_obscura"):
-            general.insert(0, obscura_fn)
+            # Если Obscura явно включён в настройках, ставим его первым в Tier 1 перед Camoufox
+            primary = [obscura_fn] + [fn for fn in primary if fn.__name__ != "obscura"]
     if searxng_url:
         searxng_fn = _searxng_engine(searxng_url)
-        general.insert(0, searxng_fn)
+        primary.insert(0, searxng_fn)
         engines_norm["searxng"] = searxng_fn
 
     if name != "auto" and name not in engines_norm:
@@ -850,43 +963,51 @@ def search(query, count=8, engine="auto", timeout=DEFAULT_TIMEOUT, searxng_url=N
         return cached
 
     errors = {}
-    general_names = {fn.__name__ for fn in general}
+    browser_and_general_names = {fn.__name__ for fn in primary + secondary + general}
+
+    def _merge_unique(existing, incoming, limit):
+        seen = {_norm_url(r.get("url") or "") for r in existing}
+        out = list(existing)
+        for item in incoming:
+            if len(out) >= limit:
+                break
+            k = _norm_url(item.get("url") or "")
+            if k and k not in seen:
+                seen.add(k)
+                out.append(item)
+        return out
+
     if name != "auto":
         fn = engines_norm[name]
         lists = _run_group([fn], query, count, timeout, errors,
-                           relevance=fn.__name__ in general_names or fn.__name__ in ("camoufox", "obscura"),
+                           relevance=fn.__name__ in browser_and_general_names,
                            respect_cooldown=False)
         results = _rrf(lists)
         sources = [n for n, items in lists if items]
     else:
-        lists = _run_parallel(_groups(general), query, count, timeout, errors, relevance=True)
-        results = _rrf(lists)
-        sources = [n for n, items in lists if items]
+        results = []
+        sources = []
+        # Tier 1: Основные агентные браузеры (Camoufox + Obscura, + SearXNG если задан)
+        t1_lists = _run_group(primary, query, count, timeout, errors, relevance=True)
+        sources += [n for n, items in t1_lists if items]
+        results = _merge_unique(results, _rrf(t1_lists), count)
+
+        # Tier 2: Вторичные — любой установленный системный браузер на устройстве (Chrome/Edge/Brave/Yandex)
+        if len(results) < count:
+            t2_lists = _run_group(secondary, query, count, timeout, errors, relevance=True)
+            sources += [n for n, items in t2_lists if items]
+            results = _merge_unique(results, _rrf(t2_lists), count)
+
+        # Tier 3: Третий сорт — HTTP-движки (DuckDuckGo, Bing, RightDao) и вертикальные API
+        if len(results) < count:
+            t3_lists = _run_parallel(_groups(general), query, count, timeout, errors, relevance=True)
+            sources += [n for n, items in t3_lists if items]
+            results = _merge_unique(results, _rrf(t3_lists), count)
+
         if len(results) < count:
             vlists = _run_parallel(_groups(VERTICALS), query, count, timeout, errors, relevance=False)
             sources += [n for n, items in vlists if items]
-            seen = {_norm_url(r.get("url") or "") for r in results}
-            for item in _rrf(vlists):
-                if len(results) >= count:
-                    break
-                k = _norm_url(item.get("url") or "")
-                if k and k not in seen:
-                    seen.add(k)
-                    results.append(item)
-        general_hit = any(name in general_names for name, _ in lists)
-        if not results or (not general_hit and len(results) < count):
-            # Поисковики упёрлись в капчу/403: stealth-браузеры (Obscura / Camoufox) добирают выдачу.
-            slists = _run_group(stealth, query, count, timeout, errors, relevance=True)
-            sources += [n for n, items in slists if items]
-            stealth_items = _rrf(slists)
-            seen = {_norm_url(item.get("url") or "") for item in stealth_items}
-            merged = list(stealth_items)
-            for item in results:
-                k = _norm_url(item.get("url") or "")
-                if k and k not in seen:
-                    seen.add(k)
-                    merged.append(item)
-            results = merged
+            results = _merge_unique(results, _rrf(vlists), count)
 
     # Если выдача пустая, а в запросе были кавычки или спецсимволы — автоматически перезапускаем без них
     if not results and any(ch in orig_query for ch in ('"', "'", '«', '»', '“', '”', '+')):
