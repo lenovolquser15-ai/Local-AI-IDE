@@ -2377,16 +2377,23 @@ html[data-theme="light"] .cbench-cnt {
 
 /* ---------- Header Persona, Call & Theme Controls ---------- */
 .persona-select {
-  max-width: 195px;
+  max-width: 185px;
   font-size: 12px;
   padding: 4px 8px;
   border-radius: var(--r-sm);
+  flex-shrink: 0;
 }
 .call-open-btn {
   color: var(--ok-soft) !important;
   border-color: rgba(34, 197, 94, .35) !important;
   background: rgba(34, 197, 94, .08) !important;
   font-weight: 500;
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+.gpu-pill {
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 .call-open-btn:hover {
   background: rgba(34, 197, 94, .18) !important;
@@ -2397,6 +2404,7 @@ html[data-theme="light"] .cbench-cnt {
   width: 30px;
   height: 30px;
   border-radius: var(--r-sm);
+  flex-shrink: 0;
 }
 
 /* ---------- Code Blocks with Copy Button ---------- */
@@ -2628,13 +2636,17 @@ html[data-theme="light"] .cbench-cnt {
   align-items: center;
   gap: 8px;
 }
+.call-settings-bar .check-pill {
+  white-space: nowrap;
+  flex-shrink: 0;
+}
 .call-subtitles {
   background: var(--layer-2);
   border: .5px solid var(--l2);
   border-radius: var(--r-md);
   padding: 10px 12px;
-  min-height: 88px;
-  max-height: 150px;
+  min-height: 110px;
+  max-height: 190px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
