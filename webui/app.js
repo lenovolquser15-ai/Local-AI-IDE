@@ -860,6 +860,7 @@ function setView(name) {
   if ($('#viewDashboard')) $('#viewDashboard').hidden = name !== 'dashboard';
   if ($('#viewCluster')) $('#viewCluster').hidden = name !== 'cluster';
   if ($('#viewSchedule')) $('#viewSchedule').hidden = name !== 'schedule';
+  if ($('#viewTrain')) $('#viewTrain').hidden = name !== 'train';
   const composer = document.querySelector('.composer');
   if (composer) composer.style.display = chat ? '' : 'none';
   const quick = document.querySelector('.quick-controls');
@@ -878,6 +879,11 @@ function setView(name) {
   else if (typeof clusterTimer !== 'undefined' && clusterTimer) { clearTimeout(clusterTimer); clusterTimer = null; }
   if (name === 'schedule') refreshSchedule();
   else if (typeof schedTimer !== 'undefined' && schedTimer) { clearTimeout(schedTimer); schedTimer = null; }
+  if (name === 'train') {
+    if (typeof refreshTrain === 'function') refreshTrain(true);
+  } else if (typeof trainTimer !== 'undefined' && trainTimer) {
+    clearTimeout(trainTimer); trainTimer = null;
+  }
 }
 
 /* ---------- state ---------- */
@@ -4831,6 +4837,247 @@ if ($('#input')) {
       hint.style.color = '';
     }
   });
+}
+
+/* ---------- Unsloth Fine-Tuning Studio ---------- */
+let trainTimer = null;
+
+function trainCollectParams() {
+  const custom = ($('#trainModelCustom') && $('#trainModelCustom').value.trim()) || '';
+  const preset = ($('#trainModelPreset') && $('#trainModelPreset').value) || 'unsloth/Qwen3-4B-bnb-4bit';
+  return {
+    model: custom || preset,
+    method: ($('#trainMethod') && $('#trainMethod').value) || 'sft',
+    dataset_path: ($('#trainDatasetSelect') && $('#trainDatasetSelect').value) || '',
+    lora_r: Number($('#trainLoraR') && $('#trainLoraR').value) || 16,
+    max_steps: Number($('#trainMaxSteps') && $('#trainMaxSteps').value) || 60,
+    learning_rate: parseFloat(($('#trainLr') && $('#trainLr').value) || '0.0002') || 0.0002,
+    max_seq_length: Number($('#trainMaxSeq') && $('#trainMaxSeq').value) || 2048,
+    gguf_quant: ($('#trainGgufQuant') && $('#trainGgufQuant').value) || 'q4_k_m',
+    export_gguf: $('#trainExportGguf') ? !!$('#trainExportGguf').checked : true,
+    auto_import_lmstudio: $('#trainAutoImport') ? !!$('#trainAutoImport').checked : true,
+  };
+}
+
+async function refreshTrainEnv(force) {
+  const chip = $('#trainEnvChip');
+  const sum = $('#trainEnvSummary');
+  if (chip) chip.textContent = 'проверка…';
+  try {
+    const env = await api('/api/train/env' + (force ? '?force=1' : ''));
+    if (!env) return;
+    if (chip) {
+      chip.className = 'sec-chip ' + (env.ready ? 'ok' : 'warn');
+      chip.textContent = env.ready ? 'готово (CUDA + Unsloth)' : 'нужна установка';
+    }
+    if (sum) {
+      const p = env.packages || {};
+      const gpuStr = env.has_gpu ? (env.gpu_name + ' (' + env.vram_gb + ' ГБ VRAM)') : 'GPU не найдена';
+      sum.textContent =
+        'GPU: ' + gpuStr +
+        ' · PyTorch: ' + (p.torch || 'нет') + (p.cuda ? ' (CUDA ' + (p.cuda_ver || '') + ')' : ' (без CUDA)') +
+        ' · Unsloth: ' + (p.unsloth || 'не установлен') +
+        (env.using_venv ? ' · venv активен' : '') +
+        ' — ' + (env.hint || '');
+    }
+    if ($('#trainInstallBtn')) {
+      $('#trainInstallBtn').textContent = env.ready
+        ? '🔄 Обновить Unsloth в изолированном venv'
+        : '⬇️ Установить Unsloth + PyTorch CUDA (в изолированный venv)';
+    }
+  } catch (e) {
+    if (sum) sum.textContent = 'Ошибка диагностики: ' + e.message;
+  }
+}
+
+async function refreshTrain(checkEnv) {
+  if (checkEnv) refreshTrainEnv(false);
+  try {
+    const data = await api('/api/train/status');
+    if (!data || !data.ok) return;
+
+    // Presets
+    const mSel = $('#trainModelPreset');
+    if (mSel && data.presets && !mSel.options.length) {
+      data.presets.forEach((m) => {
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = m.label + ' · ~' + m.vram_gb + ' ГБ';
+        mSel.appendChild(opt);
+      });
+    }
+
+    // Datasets list & dropdown
+    const dsRows = data.datasets || [];
+    const dsList = $('#trainDatasetsList');
+    const dsSel = $('#trainDatasetSelect');
+    const prevDs = dsSel ? dsSel.value : '';
+    if (dsSel) {
+      dsSel.innerHTML = '';
+      if (!dsRows.length) {
+        const opt = document.createElement('option');
+        opt.value = '';
+        opt.textContent = '— нет датасетов (нажми «Собрать из чатов») —';
+        dsSel.appendChild(opt);
+      } else {
+        dsRows.forEach((d) => {
+          const opt = document.createElement('option');
+          opt.value = d.path;
+          opt.textContent = d.name + ' (' + d.rows + ' прим., ' + d.size_kb + ' КБ)';
+          dsSel.appendChild(opt);
+        });
+        if (prevDs && dsRows.some((d) => d.path === prevDs)) dsSel.value = prevDs;
+      }
+    }
+    if (dsList) {
+      dsList.innerHTML = '';
+      if (!dsRows.length) {
+        dsList.append(node('div', 'page-sub', 'Датасетов пока нет. Нажми «📥 Собрать датасет из моих чатов» или добавь примеры вручную ниже.'));
+      } else {
+        dsRows.forEach((d) => {
+          const row = node('div', 'cllm-row');
+          const info = node('div', 'cllm-info');
+          info.append(node('div', 'cllm-title', '📄 ' + esc(d.name)));
+          info.append(node('div', 'cllm-sub', d.rows + ' примеров · ' + d.size_kb + ' КБ · ' + esc(d.path)));
+          row.append(info);
+          dsList.append(row);
+        });
+      }
+    }
+
+    // Active Job
+    const job = data.job || {};
+    const isRun = job.status === 'running';
+    if ($('#trainJobChip')) {
+      $('#trainJobChip').className = 'sec-chip ' + (isRun ? 'warn' : (job.status === 'done' ? 'ok' : (job.status === 'failed' ? 'err' : '')));
+      $('#trainJobChip').textContent = job.status || 'idle';
+    }
+    if ($('#trainStartBtn')) $('#trainStartBtn').disabled = isRun;
+    if ($('#trainInstallBtn')) $('#trainInstallBtn').disabled = isRun;
+    if ($('#trainStopBtn')) $('#trainStopBtn').disabled = !isRun;
+    if ($('#trainMetStep')) $('#trainMetStep').textContent = (job.step || 0) + ' / ' + (job.max_steps || 0);
+    if ($('#trainMetLoss')) $('#trainMetLoss').textContent = job.loss != null ? String(job.loss) : '—';
+    if ($('#trainMetEpoch')) $('#trainMetEpoch').textContent = job.epoch != null ? String(job.epoch) : '0.0';
+    if ($('#trainMetMethod')) $('#trainMetMethod').textContent = String(job.method || 'sft').toUpperCase();
+    const pct = job.max_steps > 0 ? Math.min(100, Math.round(((job.step || 0) / job.max_steps) * 100)) : (job.status === 'done' ? 100 : 0);
+    if ($('#trainProgressFill')) $('#trainProgressFill').style.width = pct + '%';
+    const logEl = $('#trainLogBox');
+    if (logEl && job.lines && job.lines.length) {
+      logEl.textContent = job.lines.join('\n');
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    // History
+    const hList = $('#trainHistoryList');
+    if (hList) {
+      hList.innerHTML = '';
+      const hist = data.history || [];
+      if (!hist.length) {
+        hList.append(node('div', 'page-sub', 'Завершённых обучений пока нет.'));
+      } else {
+        hist.forEach((h) => {
+          const row = node('div', 'cllm-row');
+          const info = node('div', 'cllm-info');
+          const ico = h.status === 'done' ? '✅' : (h.status === 'stopped' ? '⏹️' : '❌');
+          info.append(node('div', 'cllm-title', ico + ' ' + esc(h.model || '') + ' (' + esc(String(h.method || '').toUpperCase()) + ')'));
+          info.append(node('div', 'cllm-sub', 'датасет: ' + esc(h.dataset || '—') + ' · loss: ' + (h.loss != null ? h.loss : '—') + ' · GGUF: ' + ((h.gguf_files || []).length ? h.gguf_files[0] : 'адаптер в ' + (h.output_dir || ''))));
+          row.append(info);
+          hList.append(row);
+        });
+      }
+    }
+
+    if (trainTimer) clearTimeout(trainTimer);
+    if (currentView === 'train') {
+      trainTimer = setTimeout(() => refreshTrain(false), isRun ? 1800 : 6000);
+    }
+  } catch (e) {
+    console.warn('train refresh failed:', e);
+  }
+}
+
+if ($('#trainEnvCheckBtn')) $('#trainEnvCheckBtn').onclick = () => refreshTrainEnv(true);
+if ($('#trainInstallBtn')) {
+  $('#trainInstallBtn').onclick = async () => {
+    try {
+      const res = await api('/api/train/install', {});
+      if (res && res.ok) {
+        pushNotice('⬇️ Установка Unsloth + PyTorch CUDA запущена в data/unsloth_venv (смотри лог ниже)', 'ok');
+        refreshTrain(false);
+      } else {
+        pushNotice((res && res.error) || 'Не удалось запустить установку', 'bad');
+      }
+    } catch (err) {
+      pushNotice(err.message, 'bad');
+    }
+  };
+}
+if ($('#trainFromSessionsBtn')) {
+  $('#trainFromSessionsBtn').onclick = async () => {
+    try {
+      const res = await api('/api/train/dataset/from_sessions', { name: 'sessions_sft.jsonl' });
+      if (res && res.ok) {
+        pushNotice('📥 Собрано ' + res.count + ' примеров из ' + res.sessions_scanned + ' сессий в ' + res.name, 'ok');
+        refreshTrain(false);
+      }
+    } catch (err) {
+      pushNotice(err.message, 'bad');
+    }
+  };
+}
+if ($('#trainDsAddBtn')) {
+  $('#trainDsAddBtn').onclick = async () => {
+    const name = ($('#trainDsAddName') && $('#trainDsAddName').value.trim()) || 'custom_sft.jsonl';
+    const instruction = ($('#trainDsAddInst') && $('#trainDsAddInst').value.trim()) || '';
+    const output = ($('#trainDsAddOut') && $('#trainDsAddOut').value.trim()) || '';
+    if (!instruction || !output) { pushNotice('Заполни инструкцию и ответ', 'warn'); return; }
+    const res = await api('/api/train/dataset/append', { name, instruction, output });
+    if (res && res.ok) {
+      $('#trainDsAddInst').value = '';
+      $('#trainDsAddOut').value = '';
+      pushNotice('✅ Пример добавлен в ' + res.name, 'ok');
+      refreshTrain(false);
+    }
+  };
+}
+if ($('#trainScriptBtn')) {
+  $('#trainScriptBtn').onclick = async () => {
+    const params = trainCollectParams();
+    const res = await api('/api/train/script', params);
+    if (res && res.ok && $('#codeDialog')) {
+      $('#codeDialogTitle').textContent = 'Скрипт обучения Unsloth (' + params.method.toUpperCase() + ')';
+      $('#codeDialogMeta').textContent = params.model;
+      $('#codeDialogText').textContent = res.script || '';
+      $('#codeDialog').showModal();
+    }
+  };
+}
+if ($('#trainStartBtn')) {
+  $('#trainStartBtn').onclick = async () => {
+    const params = trainCollectParams();
+    if (!params.dataset_path) {
+      pushNotice('Сначала выбери датасет или нажми «Собрать датасет из моих чатов»', 'warn');
+      return;
+    }
+    try {
+      const res = await api('/api/train/start', params);
+      if (res && res.ok) {
+        pushNotice('🧬 Обучение Unsloth запущено: ' + params.model, 'ok');
+        refreshTrain(false);
+      } else {
+        pushNotice((res && res.error) || 'Не удалось запустить обучение', 'bad');
+      }
+    } catch (err) {
+      pushNotice(err.message, 'bad');
+    }
+  };
+}
+if ($('#trainStopBtn')) {
+  $('#trainStopBtn').onclick = async () => {
+    await api('/api/train/stop', {}).catch(() => {});
+    pushNotice('🛑 Задача обучения остановлена', 'warn');
+    refreshTrain(false);
+  };
 }
 
 (async function boot() {

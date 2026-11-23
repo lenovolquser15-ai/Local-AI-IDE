@@ -109,6 +109,7 @@
       <button class="view-tab" id="tabDashboard" data-view="dashboard">Дашборд</button>
       <button class="view-tab" id="tabCluster" data-view="cluster">Кластер</button>
       <button class="view-tab" id="tabSchedule" data-view="schedule">Расписание</button>
+      <button class="view-tab" id="tabTrain" data-view="train">🧬 Обучение</button>
     </nav>
 
     <div id="modelWarning" class="model-warning" role="status" hidden></div>
@@ -614,6 +615,126 @@
         <div class="cluster-box">
           <div class="plate-title">История запусков</div>
           <div id="schedHistoryList" class="cluster-list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="viewTrain" class="pageview" hidden>
+      <div class="page-inner sched-page">
+        <div class="page-head">
+          <div class="page-head-text">
+            <div class="page-title">🧬 Unsloth Fine-Tuning Studio</div>
+            <div class="page-sub">Локальное дообучение моделей в 2× быстрее и на 70% меньше VRAM (4-bit QLoRA · SFT / GRPO / DPO · экспорт GGUF)</div>
+          </div>
+          <span class="grow"></span>
+          <button id="trainEnvCheckBtn" class="ghost" type="button">🔄 Проверить CUDA / Unsloth</button>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title-row">
+            <div class="plate-title">1. Окружение и видеокарта</div>
+            <span class="sec-chip" id="trainEnvChip">проверка…</span>
+          </div>
+          <div id="trainEnvSummary" class="page-sub">Нажми «Проверить CUDA / Unsloth» для диагностики PyTorch и GPU.</div>
+          <div class="thermal-action-row" style="margin-top:8px;">
+            <button id="trainInstallBtn" class="primary" type="button">⬇️ Установить Unsloth + PyTorch CUDA (в изолированный venv)</button>
+          </div>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title-row">
+            <div class="plate-title">2. Датасеты для обучения (JSONL)</div>
+            <button id="trainFromSessionsBtn" class="ghost small-btn" type="button">📥 Собрать датасет из моих чатов</button>
+          </div>
+          <div id="trainDatasetsList" class="cluster-list" style="margin-top:6px;"></div>
+          <details class="remote-adv" style="margin-top:8px;">
+            <summary>➕ Добавить пример вручную в датасет</summary>
+            <div class="urlrow" style="margin-top:6px;">
+              <input type="text" id="trainDsAddName" class="field" placeholder="Имя файла (custom_sft.jsonl)" value="custom_sft.jsonl">
+            </div>
+            <textarea id="trainDsAddInst" class="settings-text" rows="2" placeholder="Инструкция / запрос пользователя…"></textarea>
+            <textarea id="trainDsAddOut" class="settings-text" rows="2" placeholder="Идеальный ответ модели…"></textarea>
+            <button id="trainDsAddBtn" class="ghost small-btn" type="button" style="margin-top:6px;">Добавить пример</button>
+          </details>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title">3. Параметры обучения (Unsloth 4-bit QLoRA)</div>
+          <div class="train-grid">
+            <label class="tcfg-item">
+              <span>Базовая модель (Unsloth / HuggingFace)</span>
+              <select id="trainModelPreset" class="compact"></select>
+            </label>
+            <label class="tcfg-item">
+              <span>Свой ID модели (опционально)</span>
+              <input type="text" id="trainModelCustom" class="field" placeholder="unsloth/Qwen3-4B-bnb-4bit">
+            </label>
+            <label class="tcfg-item">
+              <span>Метод обучения</span>
+              <select id="trainMethod" class="compact">
+                <option value="sft">SFT (Инструкции / LoRA 4-bit)</option>
+                <option value="grpo">GRPO (Reasoning RL — как DeepSeek-R1)</option>
+                <option value="dpo">DPO (Выравнивание предпочтений)</option>
+              </select>
+            </label>
+            <label class="tcfg-item">
+              <span>Датасет (.jsonl)</span>
+              <select id="trainDatasetSelect" class="compact"></select>
+            </label>
+            <label class="tcfg-item">
+              <span>LoRA Rank (r)</span>
+              <input type="number" id="trainLoraR" class="field" min="4" max="128" value="16">
+            </label>
+            <label class="tcfg-item">
+              <span>Шагов (max_steps)</span>
+              <input type="number" id="trainMaxSteps" class="field" min="5" max="10000" value="60">
+            </label>
+            <label class="tcfg-item">
+              <span>Learning Rate</span>
+              <input type="text" id="trainLr" class="field" value="0.0002">
+            </label>
+            <label class="tcfg-item">
+              <span>Контекст (max_seq_length)</span>
+              <input type="number" id="trainMaxSeq" class="field" min="512" max="16384" value="2048">
+            </label>
+            <label class="tcfg-item">
+              <span>GGUF квантование</span>
+              <select id="trainGgufQuant" class="compact">
+                <option value="q4_k_m">q4_k_m (оптимально для 8 ГБ)</option>
+                <option value="q8_0">q8_0 (высокое качество)</option>
+                <option value="f16">f16 (без сжатия)</option>
+              </select>
+            </label>
+          </div>
+          <div class="thermal-action-row" style="margin-top:8px;">
+            <label class="check-pill"><input type="checkbox" id="trainExportGguf" checked><span>Экспортировать в GGUF</span></label>
+            <label class="check-pill"><input type="checkbox" id="trainAutoImport" checked><span>Импортировать GGUF в LM Studio</span></label>
+          </div>
+          <div class="thermal-action-row" style="margin-top:10px;">
+            <button id="trainStartBtn" class="primary" type="button">▶ Запустить обучение Unsloth</button>
+            <button id="trainScriptBtn" class="ghost" type="button">📄 Показать Python-скрипт</button>
+            <button id="trainStopBtn" class="danger" type="button" disabled>🛑 Остановить</button>
+          </div>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title-row">
+            <div class="plate-title">4. Прогресс и живой лог</div>
+            <span class="sec-chip" id="trainJobChip">ожидание</span>
+          </div>
+          <div class="train-metrics-row">
+            <div class="train-metric"><span>Шаг</span><b id="trainMetStep">0 / 0</b></div>
+            <div class="train-metric"><span>Loss</span><b id="trainMetLoss">—</b></div>
+            <div class="train-metric"><span>Эпоха</span><b id="trainMetEpoch">0.0</b></div>
+            <div class="train-metric"><span>Метод</span><b id="trainMetMethod">SFT</b></div>
+          </div>
+          <div class="train-progress-track"><div class="train-progress-fill" id="trainProgressFill" style="width:0%"></div></div>
+          <pre id="trainLogBox" class="train-log">Готов к запуску обучения Unsloth…</pre>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title">История обученных моделей и адаптеров</div>
+          <div id="trainHistoryList" class="cluster-list"></div>
         </div>
       </div>
     </section>

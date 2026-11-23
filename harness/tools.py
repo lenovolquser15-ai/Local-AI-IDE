@@ -1498,6 +1498,29 @@ class Toolkit:
         from . import rag as rag_mod
         return rag_mod.index_path(path, cfg=self.cfg)
 
+    def unsloth_train(self, action="status", **kw):
+        from . import unsloth_trainer as ut
+        act = str(action or "status").strip().lower()
+        if act == "env":
+            return ut.env_status(force=True)
+        if act == "datasets":
+            return ut.list_datasets()
+        if act == "status":
+            return ut.job_status()
+        if act == "stop":
+            return ut.stop_job()
+        if act == "install":
+            return ut.install_unsloth_env()
+        if act == "script":
+            return {"ok": True, "script": ut.generate_unsloth_script(kw)}
+        if act == "start":
+            return ut.start_training(kw)
+        return {"ok": False, "error": "неизвестное действие: %s (env|datasets|script|start|status|stop|install)" % act}
+
+    def dataset_from_sessions(self, name="sessions_sft.jsonl", max_sessions=100, **kw):
+        from . import unsloth_trainer as ut
+        return ut.export_sessions_to_dataset(dataset_name=name, max_sessions=int(max_sessions or 100))
+
     def call(self, name, args):
         fn = getattr(self, name, None)
         if fn is None or name.startswith("_") or name in ("call", "cfg", "jobs"):

@@ -30,6 +30,7 @@ from . import notify as notify_mod
 from . import rag as rag_mod
 from . import mcp_client as mcp_mod
 from . import voice as voice_mod
+from . import unsloth_trainer as train_mod
 
 
 def _obscura_status_safe(cfg):
@@ -627,6 +628,23 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, {"ok": True, "presets": voice_mod.list_presets(load())})
             return
 
+        if path == "/api/train/status":
+            _json_response(self, {
+                **train_mod.job_status(),
+                "datasets": train_mod.list_datasets().get("datasets", []),
+                "presets": train_mod.PRESET_MODELS,
+            })
+            return
+
+        if path == "/api/train/env":
+            force = query.get("force", ["0"])[0] in ("1", "true", "yes")
+            _json_response(self, train_mod.env_status(force=force))
+            return
+
+        if path == "/api/train/datasets":
+            _json_response(self, train_mod.list_datasets())
+            return
+
         if path == "/api/desktop":
             from . import desktop
             _json_response(self, desktop.status())
@@ -866,6 +884,12 @@ class Handler(BaseHTTPRequestHandler):
             "/api/session/truncate": self.handle_session_truncate,
             "/api/chat/edit": self.handle_chat_edit,
             "/api/chat/regenerate": self.handle_chat_regenerate,
+            "/api/train/install": self.handle_train_install,
+            "/api/train/start": self.handle_train_start,
+            "/api/train/stop": self.handle_train_stop,
+            "/api/train/script": self.handle_train_script,
+            "/api/train/dataset/from_sessions": self.handle_train_ds_sessions,
+            "/api/train/dataset/append": self.handle_train_ds_append,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -1519,6 +1543,35 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, {"ok": False, "error": "не удалось определить исходный текст запроса"}, 400)
             return
         self.handle_chat({"session": sid, "text": prompt_text, "mode": body.get("mode", "chat")})
+
+    def handle_train_install(self, body):
+        _json_response(self, train_mod.install_unsloth_env())
+
+    def handle_train_start(self, body):
+        res = train_mod.start_training(body)
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_stop(self, body):
+        _json_response(self, train_mod.stop_job())
+
+    def handle_train_script(self, body):
+        _json_response(self, {"ok": True, "script": train_mod.generate_unsloth_script(body)})
+
+    def handle_train_ds_sessions(self, body):
+        _json_response(self, train_mod.export_sessions_to_dataset(
+            dataset_name=body.get("name", "sessions_sft.jsonl"),
+            min_chars=int(body.get("min_chars", 8)),
+            max_sessions=int(body.get("max_sessions", 100)),
+        ))
+
+    def handle_train_ds_append(self, body):
+        res = train_mod.append_dataset_example(
+            dataset_name=body.get("name", "custom_sft.jsonl"),
+            instruction=body.get("instruction", ""),
+            output=body.get("output", ""),
+            inp=body.get("input", ""),
+        )
+        _json_response(self, res, 200 if res.get("ok") else 400)
 
     def stream_events(self, sid, since):
         self.close_connection = True
