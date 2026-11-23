@@ -643,10 +643,19 @@
 
         <div class="cluster-box">
           <div class="plate-title-row">
-            <div class="plate-title">2. Датасеты для обучения (JSONL)</div>
-            <button id="trainFromSessionsBtn" class="ghost small-btn" type="button">📥 Собрать датасет из моих чатов</button>
+            <div class="plate-title">2. Датасеты для обучения (JSONL / CSV / HuggingFace / Синтетика ИИ)</div>
+            <div class="sched-actions">
+              <button id="trainFromSessionsBtn" class="ghost small-btn" type="button">📥 Из моих чатов</button>
+              <label class="ghost small-btn file-pick" style="cursor:pointer;">📂 Загрузить файл<input type="file" id="trainDsUpload" accept=".jsonl,.json,.csv" hidden></label>
+            </div>
           </div>
           <div id="trainDatasetsList" class="cluster-list" style="margin-top:6px;"></div>
+          <div class="urlrow" style="margin-top:8px;">
+            <input type="text" id="trainSynthTopic" class="field grow" placeholder="✨ ИИ-генератор датасета: введи тему (напр. Python FastAPI советы или стиль общения)…">
+            <input type="number" id="trainSynthCount" class="field" style="min-width:65px;max-width:75px;" min="3" max="50" value="10" title="Количество примеров">
+            <button id="trainSynthBtn" class="ghost small-btn" type="button">✨ Сгенерировать</button>
+          </div>
+          <div id="trainSynthStatus" class="page-sub" style="margin-top:4px;"></div>
           <details class="remote-adv" style="margin-top:8px;">
             <summary>➕ Добавить пример вручную в датасет</summary>
             <div class="urlrow" style="margin-top:6px;">
@@ -659,7 +668,13 @@
         </div>
 
         <div class="cluster-box">
-          <div class="plate-title">3. Параметры обучения (Unsloth 4-bit QLoRA)</div>
+          <div class="plate-title-row">
+            <div class="plate-title">3. Параметры обучения (Unsloth 4-bit QLoRA)</div>
+            <div class="sched-actions">
+              <span class="sec-chip" id="trainVramChip">VRAM: расчёт…</span>
+              <button id="trainAutotuneBtn" class="ghost small-btn" type="button" title="Подобрать безопасные параметры под твою GPU">⚡ Автоподбор под GPU</button>
+            </div>
+          </div>
           <div class="train-grid">
             <label class="tcfg-item">
               <span>Базовая модель (Unsloth / HuggingFace)</span>
@@ -675,10 +690,11 @@
                 <option value="sft">SFT (Инструкции / LoRA 4-bit)</option>
                 <option value="grpo">GRPO (Reasoning RL — как DeepSeek-R1)</option>
                 <option value="dpo">DPO (Выравнивание предпочтений)</option>
+                <option value="vision">Vision SFT (FastVisionModel · VLM)</option>
               </select>
             </label>
             <label class="tcfg-item">
-              <span>Датасет (.jsonl)</span>
+              <span>Датасет (локальный .jsonl или HuggingFace)</span>
               <select id="trainDatasetSelect" class="compact"></select>
             </label>
             <label class="tcfg-item">
@@ -706,9 +722,39 @@
               </select>
             </label>
           </div>
+          <details class="remote-adv" style="margin-top:8px;">
+            <summary>⚙️ Расширенные гиперпараметры Unsloth (Batch, Chat Template, rsLoRA, Packing)</summary>
+            <div class="train-grid" style="margin-top:8px;">
+              <label class="tcfg-item"><span>Chat Template</span>
+                <select id="trainChatTemplate" class="compact">
+                  <option value="alpaca">alpaca (универсальный)</option>
+                  <option value="chatml">chatml</option>
+                  <option value="qwen-2.5">qwen-2.5</option>
+                  <option value="llama-3.1">llama-3.1</option>
+                  <option value="gemma-3">gemma-3</option>
+                  <option value="mistral">mistral</option>
+                </select>
+              </label>
+              <label class="tcfg-item"><span>Batch Size</span><input type="number" id="trainBatchSize" class="field" min="1" max="32" value="2"></label>
+              <label class="tcfg-item"><span>Grad Accum Steps</span><input type="number" id="trainGradAccum" class="field" min="1" max="64" value="4"></label>
+              <label class="tcfg-item"><span>Epochs</span><input type="number" id="trainEpochs" class="field" min="1" max="20" value="1"></label>
+              <label class="tcfg-item"><span>LoRA Alpha</span><input type="number" id="trainLoraAlpha" class="field" min="4" max="256" value="16"></label>
+              <label class="tcfg-item"><span>LR Scheduler</span>
+                <select id="trainScheduler" class="compact">
+                  <option value="cosine">cosine</option>
+                  <option value="linear">linear</option>
+                </select>
+              </label>
+            </div>
+            <div class="thermal-action-row" style="margin-top:8px;">
+              <label class="check-pill"><input type="checkbox" id="trainUseRslora"><span>rsLoRA</span></label>
+              <label class="check-pill"><input type="checkbox" id="trainPacking"><span>Sequence Packing</span></label>
+              <label class="check-pill"><input type="checkbox" id="trainThermalGuard" checked><span>🛡️ Термозащита GPU при обучении</span></label>
+            </div>
+          </details>
           <div class="thermal-action-row" style="margin-top:8px;">
-            <label class="check-pill"><input type="checkbox" id="trainExportGguf" checked><span>Экспортировать в GGUF</span></label>
-            <label class="check-pill"><input type="checkbox" id="trainAutoImport" checked><span>Импортировать GGUF в LM Studio</span></label>
+            <label class="check-pill"><input type="checkbox" id="trainExportGguf" checked><span>Экспортировать в GGUF + Ollama Modelfile</span></label>
+            <label class="check-pill"><input type="checkbox" id="trainAutoImport" checked><span>Автоимпорт GGUF в LM Studio</span></label>
           </div>
           <div class="thermal-action-row" style="margin-top:10px;">
             <button id="trainStartBtn" class="primary" type="button">▶ Запустить обучение Unsloth</button>
@@ -719,22 +765,31 @@
 
         <div class="cluster-box">
           <div class="plate-title-row">
-            <div class="plate-title">4. Прогресс и живой лог</div>
+            <div class="plate-title">4. Прогресс, график Loss и живой лог</div>
             <span class="sec-chip" id="trainJobChip">ожидание</span>
           </div>
           <div class="train-metrics-row">
             <div class="train-metric"><span>Шаг</span><b id="trainMetStep">0 / 0</b></div>
             <div class="train-metric"><span>Loss</span><b id="trainMetLoss">—</b></div>
             <div class="train-metric"><span>Эпоха</span><b id="trainMetEpoch">0.0</b></div>
-            <div class="train-metric"><span>Метод</span><b id="trainMetMethod">SFT</b></div>
+            <div class="train-metric"><span>GPU t°</span><b id="trainMetGpu">—</b></div>
           </div>
           <div class="train-progress-track"><div class="train-progress-fill" id="trainProgressFill" style="width:0%"></div></div>
+          <div class="train-chart-wrap" id="trainLossChartWrap">
+            <svg id="trainLossChart" viewBox="0 0 600 120" preserveAspectRatio="none"></svg>
+          </div>
           <pre id="trainLogBox" class="train-log">Готов к запуску обучения Unsloth…</pre>
         </div>
 
         <div class="cluster-box">
-          <div class="plate-title">История обученных моделей и адаптеров</div>
+          <div class="plate-title">5. История обучений и тест LoRA-адаптера (Playground)</div>
           <div id="trainHistoryList" class="cluster-list"></div>
+          <div class="urlrow" style="margin-top:10px;">
+            <input type="text" id="trainEvalDir" class="field" style="min-width:180px;max-width:260px;" placeholder="Путь к папке адаптера (data/training/...)">
+            <input type="text" id="trainEvalPrompt" class="field grow" placeholder="Тестовый промпт для проверки дообученной модели…">
+            <button id="trainEvalBtn" class="ghost small-btn" type="button">🧪 Тест</button>
+          </div>
+          <pre id="trainEvalOut" class="train-log" style="margin-top:6px;max-height:140px;" hidden></pre>
         </div>
       </div>
     </section>

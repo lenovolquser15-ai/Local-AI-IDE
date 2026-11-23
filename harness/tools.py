@@ -1513,6 +1513,12 @@ class Toolkit:
             return ut.install_unsloth_env()
         if act == "script":
             return {"ok": True, "script": ut.generate_unsloth_script(kw)}
+        if act == "autotune":
+            return ut.autotune_for_gpu(kw.get("model", "unsloth/Qwen3-4B-bnb-4bit"), kw.get("method", "sft"))
+        if act == "synthesize":
+            return ut.generate_synthetic_dataset(kw.get("topic", ""), kw.get("count", 10), kw.get("name", "synthetic_sft.jsonl"), cfg=self.cfg)
+        if act == "eval":
+            return ut.eval_adapter(kw.get("adapter_dir", ""), kw.get("prompt", ""))
         if act == "start":
             return ut.start_training(kw)
         return {"ok": False, "error": "неизвестное действие: %s (env|datasets|script|start|status|stop|install)" % act}

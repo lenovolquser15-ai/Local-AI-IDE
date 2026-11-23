@@ -4839,7 +4839,7 @@ if ($('#input')) {
   });
 }
 
-/* ---------- Unsloth Fine-Tuning Studio ---------- */
+/* ---------- Unsloth Fine-Tuning Studio 2.0 ---------- */
 let trainTimer = null;
 
 function trainCollectParams() {
@@ -4850,13 +4850,67 @@ function trainCollectParams() {
     method: ($('#trainMethod') && $('#trainMethod').value) || 'sft',
     dataset_path: ($('#trainDatasetSelect') && $('#trainDatasetSelect').value) || '',
     lora_r: Number($('#trainLoraR') && $('#trainLoraR').value) || 16,
+    lora_alpha: Number($('#trainLoraAlpha') && $('#trainLoraAlpha').value) || 16,
     max_steps: Number($('#trainMaxSteps') && $('#trainMaxSteps').value) || 60,
+    epochs: Number($('#trainEpochs') && $('#trainEpochs').value) || 1,
+    batch_size: Number($('#trainBatchSize') && $('#trainBatchSize').value) || 2,
+    grad_accum: Number($('#trainGradAccum') && $('#trainGradAccum').value) || 4,
     learning_rate: parseFloat(($('#trainLr') && $('#trainLr').value) || '0.0002') || 0.0002,
     max_seq_length: Number($('#trainMaxSeq') && $('#trainMaxSeq').value) || 2048,
+    chat_template: ($('#trainChatTemplate') && $('#trainChatTemplate').value) || 'alpaca',
+    lr_scheduler: ($('#trainScheduler') && $('#trainScheduler').value) || 'cosine',
+    use_rslora: $('#trainUseRslora') ? !!$('#trainUseRslora').checked : false,
+    packing: $('#trainPacking') ? !!$('#trainPacking').checked : false,
+    thermal_guard: $('#trainThermalGuard') ? !!$('#trainThermalGuard').checked : true,
     gguf_quant: ($('#trainGgufQuant') && $('#trainGgufQuant').value) || 'q4_k_m',
     export_gguf: $('#trainExportGguf') ? !!$('#trainExportGguf').checked : true,
     auto_import_lmstudio: $('#trainAutoImport') ? !!$('#trainAutoImport').checked : true,
   };
+}
+
+function renderTrainLossChart(points) {
+  const svg = $('#trainLossChart');
+  if (!svg) return;
+  const pts = Array.isArray(points) ? points : [];
+  if (pts.length < 2) {
+    svg.innerHTML = '<text x="300" y="64" text-anchor="middle" fill="var(--text-cap)" font-size="13">График Loss появится автоматически после первых шагов обучения</text>';
+    return;
+  }
+  const losses = pts.map((p) => Number(p.loss)).filter((v) => !isNaN(v));
+  const minL = Math.min(...losses);
+  const maxL = Math.max(...losses);
+  const span = Math.max(0.001, maxL - minL);
+  const W = 600, H = 120, padX = 12, padY = 14;
+  const coords = pts.map((p, idx) => {
+    const x = padX + (idx / Math.max(1, pts.length - 1)) * (W - padX * 2);
+    const y = padY + (1 - ((Number(p.loss) - minL) / span)) * (H - padY * 2);
+    return [x.toFixed(1), y.toFixed(1)];
+  });
+  const poly = coords.map((c) => c.join(',')).join(' ');
+  const area = padX + ',' + (H - padY) + ' ' + poly + ' ' + coords[coords.length - 1][0] + ',' + (H - padY);
+  const last = coords[coords.length - 1];
+  svg.innerHTML =
+    '<line x1="0" y1="' + padY + '" x2="' + W + '" y2="' + padY + '" stroke="rgba(255,255,255,0.08)" stroke-dasharray="4 4"/>' +
+    '<line x1="0" y1="' + (H - padY) + '" x2="' + W + '" y2="' + (H - padY) + '" stroke="rgba(255,255,255,0.08)" stroke-dasharray="4 4"/>' +
+    '<polygon points="' + area + '" fill="rgba(86,134,254,0.16)"/>' +
+    '<polyline fill="none" stroke="var(--accent)" stroke-width="2.5" points="' + poly + '"/>' +
+    '<circle cx="' + last[0] + '" cy="' + last[1] + '" r="4" fill="var(--ok)"/>' +
+    '<text x="8" y="13" fill="var(--text-cap)" font-size="11">max ' + maxL.toFixed(3) + '</text>' +
+    '<text x="8" y="' + (H - 3) + '" fill="var(--text-cap)" font-size="11">min ' + minL.toFixed(3) + '</text>' +
+    '<text x="' + (W - 8) + '" y="13" text-anchor="end" fill="var(--ok-soft)" font-size="11">step ' + pts[pts.length - 1].step + ' · loss ' + Number(pts[pts.length - 1].loss).toFixed(4) + '</text>';
+}
+
+async function updateTrainVramEstimate() {
+  const chip = $('#trainVramChip');
+  if (!chip) return;
+  try {
+    const p = trainCollectParams();
+    const res = await api('/api/train/estimate', p);
+    if (!res || !res.ok) return;
+    chip.className = 'sec-chip ' + (res.fit === 'ok' ? 'ok' : (res.fit === 'tight' ? 'warn' : 'err'));
+    chip.textContent = '~' + res.estimated_vram_gb + ' / ' + (res.gpu_vram_gb || '?') + ' ГБ VRAM';
+    chip.title = res.note || '';
+  } catch (e) {}
 }
 
 async function refreshTrainEnv(force) {
@@ -4885,6 +4939,7 @@ async function refreshTrainEnv(force) {
         ? '🔄 Обновить Unsloth в изолированном venv'
         : '⬇️ Установить Unsloth + PyTorch CUDA (в изолированный venv)';
     }
+    updateTrainVramEstimate();
   } catch (e) {
     if (sum) sum.textContent = 'Ошибка диагностики: ' + e.message;
   }
@@ -4896,7 +4951,6 @@ async function refreshTrain(checkEnv) {
     const data = await api('/api/train/status');
     if (!data || !data.ok) return;
 
-    // Presets
     const mSel = $('#trainModelPreset');
     if (mSel && data.presets && !mSel.options.length) {
       data.presets.forEach((m) => {
@@ -4905,47 +4959,79 @@ async function refreshTrain(checkEnv) {
         opt.textContent = m.label + ' · ~' + m.vram_gb + ' ГБ';
         mSel.appendChild(opt);
       });
+      updateTrainVramEstimate();
     }
 
-    // Datasets list & dropdown
     const dsRows = data.datasets || [];
+    const hfRows = data.hf_datasets || [];
     const dsList = $('#trainDatasetsList');
     const dsSel = $('#trainDatasetSelect');
     const prevDs = dsSel ? dsSel.value : '';
     if (dsSel) {
       dsSel.innerHTML = '';
-      if (!dsRows.length) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = '— нет датасетов (нажми «Собрать из чатов») —';
-        dsSel.appendChild(opt);
-      } else {
+      if (dsRows.length) {
+        const g1 = document.createElement('optgroup');
+        g1.label = 'Локальные датасеты (data/datasets)';
         dsRows.forEach((d) => {
           const opt = document.createElement('option');
           opt.value = d.path;
-          opt.textContent = d.name + ' (' + d.rows + ' прим., ' + d.size_kb + ' КБ)';
-          dsSel.appendChild(opt);
+          opt.textContent = '📄 ' + d.name + ' (' + d.rows + ' прим., ' + d.size_kb + ' КБ)';
+          g1.appendChild(opt);
         });
-        if (prevDs && dsRows.some((d) => d.path === prevDs)) dsSel.value = prevDs;
+        dsSel.appendChild(g1);
+      }
+      if (hfRows.length) {
+        const g2 = document.createElement('optgroup');
+        g2.label = 'HuggingFace Hub (скачаются сами)';
+        hfRows.forEach((h) => {
+          const opt = document.createElement('option');
+          opt.value = h.id;
+          opt.textContent = h.label;
+          g2.appendChild(opt);
+        });
+        dsSel.appendChild(g2);
+      }
+      if (prevDs) {
+        const allVals = dsRows.map((d) => d.path).concat(hfRows.map((h) => h.id));
+        if (allVals.includes(prevDs)) dsSel.value = prevDs;
       }
     }
     if (dsList) {
       dsList.innerHTML = '';
       if (!dsRows.length) {
-        dsList.append(node('div', 'page-sub', 'Датасетов пока нет. Нажми «📥 Собрать датасет из моих чатов» или добавь примеры вручную ниже.'));
+        dsList.append(node('div', 'page-sub', 'Локальных датасетов пока нет — собери из чатов, загрузи файл, сгенерируй ИИ ниже или выбери HuggingFace датасет в п.3.'));
       } else {
         dsRows.forEach((d) => {
           const row = node('div', 'cllm-row');
           const info = node('div', 'cllm-info');
           info.append(node('div', 'cllm-title', '📄 ' + esc(d.name)));
-          info.append(node('div', 'cllm-sub', d.rows + ' примеров · ' + d.size_kb + ' КБ · ' + esc(d.path)));
+          info.append(node('div', 'cllm-sub', d.rows + ' примеров · ' + d.size_kb + ' КБ'));
           row.append(info);
+          const acts = node('div', 'sched-actions');
+          const prevBtn = node('button', 'ghost small-btn', '👁️ Просмотр');
+          prevBtn.type = 'button';
+          prevBtn.onclick = async () => {
+            const pv = await api('/api/train/dataset/preview?name=' + encodeURIComponent(d.name));
+            if (pv && pv.ok && $('#codeDialog')) {
+              $('#codeDialogTitle').textContent = 'Датасет: ' + pv.name;
+              $('#codeDialogMeta').textContent = pv.total + ' строк' + (pv.bad_lines ? (' · битых: ' + pv.bad_lines) : '');
+              $('#codeDialogText').textContent = JSON.stringify(pv.samples, null, 2);
+              $('#codeDialog').showModal();
+            }
+          };
+          const delBtn = node('button', 'ghost small-btn danger-text', '✕');
+          delBtn.type = 'button';
+          delBtn.onclick = async () => {
+            await api('/api/train/dataset/delete', { name: d.name });
+            refreshTrain(false);
+          };
+          acts.append(prevBtn, delBtn);
+          row.append(acts);
           dsList.append(row);
         });
       }
     }
 
-    // Active Job
     const job = data.job || {};
     const isRun = job.status === 'running';
     if ($('#trainJobChip')) {
@@ -4958,16 +5044,16 @@ async function refreshTrain(checkEnv) {
     if ($('#trainMetStep')) $('#trainMetStep').textContent = (job.step || 0) + ' / ' + (job.max_steps || 0);
     if ($('#trainMetLoss')) $('#trainMetLoss').textContent = job.loss != null ? String(job.loss) : '—';
     if ($('#trainMetEpoch')) $('#trainMetEpoch').textContent = job.epoch != null ? String(job.epoch) : '0.0';
-    if ($('#trainMetMethod')) $('#trainMetMethod').textContent = String(job.method || 'sft').toUpperCase();
+    if ($('#trainMetGpu')) $('#trainMetGpu').textContent = job.gpu_temp != null ? (job.gpu_temp + '°C') : '—';
     const pct = job.max_steps > 0 ? Math.min(100, Math.round(((job.step || 0) / job.max_steps) * 100)) : (job.status === 'done' ? 100 : 0);
     if ($('#trainProgressFill')) $('#trainProgressFill').style.width = pct + '%';
+    renderTrainLossChart(job.loss_history || []);
     const logEl = $('#trainLogBox');
     if (logEl && job.lines && job.lines.length) {
       logEl.textContent = job.lines.join('\n');
       logEl.scrollTop = logEl.scrollHeight;
     }
 
-    // History
     const hList = $('#trainHistoryList');
     if (hList) {
       hList.innerHTML = '';
@@ -4980,8 +5066,28 @@ async function refreshTrain(checkEnv) {
           const info = node('div', 'cllm-info');
           const ico = h.status === 'done' ? '✅' : (h.status === 'stopped' ? '⏹️' : '❌');
           info.append(node('div', 'cllm-title', ico + ' ' + esc(h.model || '') + ' (' + esc(String(h.method || '').toUpperCase()) + ')'));
-          info.append(node('div', 'cllm-sub', 'датасет: ' + esc(h.dataset || '—') + ' · loss: ' + (h.loss != null ? h.loss : '—') + ' · GGUF: ' + ((h.gguf_files || []).length ? h.gguf_files[0] : 'адаптер в ' + (h.output_dir || ''))));
+          info.append(node('div', 'cllm-sub', 'датасет: ' + esc(h.dataset || '—') + ' · loss: ' + (h.loss != null ? h.loss : '—') + ' · ' + esc((h.gguf_files && h.gguf_files[0]) || h.output_dir || '')));
           row.append(info);
+          const acts = node('div', 'sched-actions');
+          if (h.output_dir) {
+            const evalPick = node('button', 'ghost small-btn', '🧪 Тест');
+            evalPick.type = 'button';
+            evalPick.onclick = () => {
+              if ($('#trainEvalDir')) $('#trainEvalDir').value = h.output_dir;
+              if ($('#trainEvalPrompt')) $('#trainEvalPrompt').focus();
+            };
+            acts.append(evalPick);
+          }
+          if (h.gguf_files && h.gguf_files.length) {
+            const impBtn = node('button', 'ghost small-btn', '📦 В LM Studio');
+            impBtn.type = 'button';
+            impBtn.onclick = async () => {
+              const r = await api('/api/lms/import', { path: h.gguf_files[0], mode: 'copy' });
+              pushNotice(r && r.ok ? '📦 Импорт GGUF в LM Studio запущен' : ((r && r.error) || 'Ошибка импорта'), r && r.ok ? 'ok' : 'bad');
+            };
+            acts.append(impBtn);
+          }
+          row.append(acts);
           hList.append(row);
         });
       }
@@ -4996,6 +5102,32 @@ async function refreshTrain(checkEnv) {
   }
 }
 
+['#trainModelPreset', '#trainModelCustom', '#trainMethod', '#trainLoraR', '#trainMaxSeq', '#trainBatchSize'].forEach((sel) => {
+  const el = $(sel);
+  if (el) el.addEventListener('change', updateTrainVramEstimate);
+});
+
+if ($('#trainAutotuneBtn')) {
+  $('#trainAutotuneBtn').onclick = async () => {
+    const p = trainCollectParams();
+    const res = await api('/api/train/autotune', { model: p.model, method: p.method });
+    if (res && res.ok && res.recommended) {
+      const r = res.recommended;
+      if ($('#trainBatchSize')) $('#trainBatchSize').value = r.batch_size;
+      if ($('#trainGradAccum')) $('#trainGradAccum').value = r.grad_accum;
+      if ($('#trainMaxSeq')) $('#trainMaxSeq').value = r.max_seq_length;
+      if ($('#trainLoraR')) $('#trainLoraR').value = r.lora_r;
+      if ($('#trainLoraAlpha')) $('#trainLoraAlpha').value = r.lora_alpha;
+      if ($('#trainLr')) $('#trainLr').value = String(r.learning_rate);
+      if ($('#trainScheduler')) $('#trainScheduler').value = r.lr_scheduler;
+      if ($('#trainUseRslora')) $('#trainUseRslora').checked = !!r.use_rslora;
+      if ($('#trainPacking')) $('#trainPacking').checked = !!r.packing;
+      if ($('#trainGgufQuant')) $('#trainGgufQuant').value = r.gguf_quant;
+      updateTrainVramEstimate();
+      pushNotice('⚡ Параметры подобраны под GPU (' + res.gpu_vram_gb + ' ГБ VRAM): batch=' + r.batch_size + ', seq=' + r.max_seq_length + ', r=' + r.lora_r, 'ok');
+    }
+  };
+}
 if ($('#trainEnvCheckBtn')) $('#trainEnvCheckBtn').onclick = () => refreshTrainEnv(true);
 if ($('#trainInstallBtn')) {
   $('#trainInstallBtn').onclick = async () => {
@@ -5022,6 +5154,50 @@ if ($('#trainFromSessionsBtn')) {
       }
     } catch (err) {
       pushNotice(err.message, 'bad');
+    }
+  };
+}
+if ($('#trainDsUpload')) {
+  $('#trainDsUpload').onchange = async (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const res = await api('/api/train/dataset/import', { filename: file.name, text });
+      if (res && res.ok) {
+        pushNotice('📂 Импортировано ' + res.count + ' примеров в ' + res.name, 'ok');
+        refreshTrain(false);
+      } else {
+        pushNotice((res && res.error) || 'Ошибка импорта', 'bad');
+      }
+    } catch (err) {
+      pushNotice(err.message, 'bad');
+    } finally {
+      e.target.value = '';
+    }
+  };
+}
+if ($('#trainSynthBtn')) {
+  $('#trainSynthBtn').onclick = async () => {
+    const topic = ($('#trainSynthTopic') && $('#trainSynthTopic').value.trim()) || '';
+    const count = Number($('#trainSynthCount') && $('#trainSynthCount').value) || 10;
+    const stEl = $('#trainSynthStatus');
+    if (!topic) { pushNotice('Введи тему для генерации синтетического датасета', 'warn'); return; }
+    if (stEl) stEl.textContent = '✨ Локальная модель генерирует ' + count + ' примеров по теме «' + topic + '»…';
+    $('#trainSynthBtn').disabled = true;
+    try {
+      const res = await api('/api/train/dataset/synthesize', { topic, count, name: 'synthetic_sft.jsonl' });
+      if (res && res.ok) {
+        if (stEl) stEl.textContent = '✅ Сгенерировано ' + res.added + ' примеров в ' + res.name;
+        $('#trainSynthTopic').value = '';
+        refreshTrain(false);
+      } else if (stEl) {
+        stEl.textContent = '❌ ' + ((res && res.error) || 'Ошибка генерации');
+      }
+    } catch (err) {
+      if (stEl) stEl.textContent = '❌ ' + err.message;
+    } finally {
+      $('#trainSynthBtn').disabled = false;
     }
   };
 }
@@ -5056,7 +5232,7 @@ if ($('#trainStartBtn')) {
   $('#trainStartBtn').onclick = async () => {
     const params = trainCollectParams();
     if (!params.dataset_path) {
-      pushNotice('Сначала выбери датасет или нажми «Собрать датасет из моих чатов»', 'warn');
+      pushNotice('Сначала выбери датасет или собери/сгенерируй его выше', 'warn');
       return;
     }
     try {
@@ -5077,6 +5253,24 @@ if ($('#trainStopBtn')) {
     await api('/api/train/stop', {}).catch(() => {});
     pushNotice('🛑 Задача обучения остановлена', 'warn');
     refreshTrain(false);
+  };
+}
+if ($('#trainEvalBtn')) {
+  $('#trainEvalBtn').onclick = async () => {
+    const adapter_dir = ($('#trainEvalDir') && $('#trainEvalDir').value.trim()) || '';
+    const prompt = ($('#trainEvalPrompt') && $('#trainEvalPrompt').value.trim()) || '';
+    const outEl = $('#trainEvalOut');
+    if (!adapter_dir || !prompt) { pushNotice('Укажи папку адаптера и тестовый промпт', 'warn'); return; }
+    if (outEl) { outEl.hidden = false; outEl.textContent = '🧪 Загружаю адаптер Unsloth и генерирую ответ…'; }
+    $('#trainEvalBtn').disabled = true;
+    try {
+      const res = await api('/api/train/eval', { adapter_dir, prompt });
+      if (outEl) outEl.textContent = res && res.ok ? res.answer : ('❌ ' + ((res && res.error) || 'Ошибка'));
+    } catch (err) {
+      if (outEl) outEl.textContent = '❌ ' + err.message;
+    } finally {
+      $('#trainEvalBtn').disabled = false;
+    }
   };
 }
 

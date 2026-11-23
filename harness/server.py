@@ -633,7 +633,14 @@ class Handler(BaseHTTPRequestHandler):
                 **train_mod.job_status(),
                 "datasets": train_mod.list_datasets().get("datasets", []),
                 "presets": train_mod.PRESET_MODELS,
+                "hf_datasets": train_mod.PRESET_HF_DATASETS,
+                "chat_templates": train_mod.CHAT_TEMPLATES,
             })
+            return
+
+        if path == "/api/train/dataset/preview":
+            name = query.get("name", [""])[0]
+            _json_response(self, train_mod.preview_dataset(name))
             return
 
         if path == "/api/train/env":
@@ -890,6 +897,12 @@ class Handler(BaseHTTPRequestHandler):
             "/api/train/script": self.handle_train_script,
             "/api/train/dataset/from_sessions": self.handle_train_ds_sessions,
             "/api/train/dataset/append": self.handle_train_ds_append,
+            "/api/train/dataset/delete": self.handle_train_ds_delete,
+            "/api/train/dataset/import": self.handle_train_ds_import,
+            "/api/train/dataset/synthesize": self.handle_train_ds_synthesize,
+            "/api/train/autotune": self.handle_train_autotune,
+            "/api/train/estimate": self.handle_train_estimate,
+            "/api/train/eval": self.handle_train_eval,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -1570,6 +1583,45 @@ class Handler(BaseHTTPRequestHandler):
             instruction=body.get("instruction", ""),
             output=body.get("output", ""),
             inp=body.get("input", ""),
+        )
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_ds_delete(self, body):
+        _json_response(self, train_mod.delete_dataset(body.get("name", "")))
+
+    def handle_train_ds_import(self, body):
+        res = train_mod.import_dataset_file(body.get("filename", "imported.jsonl"), body.get("text", ""))
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_ds_synthesize(self, body):
+        res = train_mod.generate_synthetic_dataset(
+            topic=body.get("topic", ""),
+            count=body.get("count", 10),
+            dataset_name=body.get("name", "synthetic_sft.jsonl"),
+            cfg=load(),
+        )
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_autotune(self, body):
+        _json_response(self, train_mod.autotune_for_gpu(
+            model_id=body.get("model", "unsloth/Qwen3-4B-bnb-4bit"),
+            method=body.get("method", "sft"),
+        ))
+
+    def handle_train_estimate(self, body):
+        _json_response(self, train_mod.estimate_training_vram(
+            model_id=body.get("model", "unsloth/Qwen3-4B-bnb-4bit"),
+            max_seq_length=int(body.get("max_seq_length") or 2048),
+            batch_size=int(body.get("batch_size") or 2),
+            lora_r=int(body.get("lora_r") or 16),
+            method=body.get("method", "sft"),
+        ))
+
+    def handle_train_eval(self, body):
+        res = train_mod.eval_adapter(
+            adapter_dir=body.get("adapter_dir", ""),
+            prompt=body.get("prompt", ""),
+            max_new_tokens=int(body.get("max_new_tokens") or 256),
         )
         _json_response(self, res, 200 if res.get("ok") else 400)
 
