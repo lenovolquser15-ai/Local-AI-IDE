@@ -66,7 +66,7 @@ class SpeedMeter:
         try:
             from . import dashboard
             if snap.get("tokens"):
-                dashboard.record_tokens(snap["tokens"])
+                dashboard.record_tokens(snap["tokens"], tps=snap.get("tps"))
         except Exception:
             pass
         if self.cb:

@@ -1350,7 +1350,17 @@ function renderPlugins() {
     };
     actions.push(pubBtn);
 
-    const editBtn = node('button', 'ghost small-btn', '✏️ Редактировать');
+    const runBtn = node('button', 'primary small-btn', '⚡ Запуск / Настройки');
+    runBtn.title = 'Интерактивный запуск инструментов и настройки плагина';
+    runBtn.onclick = () => openPluginInteractiveModal(p);
+    actions.push(runBtn);
+
+    const codeQuickBtn = node('button', 'ghost small-btn', '💻 Код');
+    codeQuickBtn.title = 'Быстрое редактирование кода плагина с горячей перезагрузкой';
+    codeQuickBtn.onclick = () => editPluginInModal(p);
+    actions.push(codeQuickBtn);
+
+    const editBtn = node('button', 'ghost small-btn', '✏️ Конструктор');
     editBtn.title = 'Открыть и редактировать плагин в Конструкторе';
     editBtn.onclick = async () => {
       try {
@@ -1495,14 +1505,150 @@ function reportRow(label, value, mono) {
   return [rowLabel, rowValue];
 }
 
-function openCodeDialog(title, meta) {
+let currentEditingPluginFile = '';
+
+function openCodeDialog(title, meta, editableFile) {
   const dlg = $('#codeDialog');
   if (!dlg) return;
+  currentEditingPluginFile = editableFile || '';
   $('#codeDialogTitle').textContent = title;
   $('#codeDialogMeta').textContent = meta || '';
-  $('#codeDialogText').textContent = 'Загрузка кода…';
+  const pre = $('#codeDialogText');
+  const ed = $('#codeDialogEditor');
+  const saveBtn = $('#codeDialogSave');
+  if (editableFile && ed) {
+    pre.hidden = true;
+    ed.hidden = false;
+    ed.value = 'Загрузка кода…';
+    if (saveBtn) saveBtn.hidden = false;
+  } else {
+    pre.hidden = false;
+    pre.textContent = 'Загрузка кода…';
+    if (ed) ed.hidden = true;
+    if (saveBtn) saveBtn.hidden = true;
+  }
   if (typeof dlg.showModal === 'function') dlg.showModal();
   else dlg.setAttribute('open', '');
+}
+
+async function editPluginInModal(p) {
+  openCodeDialog(p.file, 'Горячее редактирование · AST-проверка', p.file);
+  try {
+    const res = await api('/api/plugins/code?file=' + encodeURIComponent(p.file));
+    if ($('#codeDialogEditor')) $('#codeDialogEditor').value = res.ok ? (res.code || '') : ('# Ошибка: ' + res.error);
+  } catch (err) {
+    if ($('#codeDialogEditor')) $('#codeDialogEditor').value = '# Ошибка загрузки: ' + err.message;
+  }
+}
+
+async function openPluginInteractiveModal(p) {
+  const dlg = $('#plugToolDialog');
+  const body = $('#plugToolDialogBody');
+  if (!dlg || !body) return;
+  $('#plugToolDialogTitle').textContent = '🧩 ' + (p.name || p.file);
+  $('#plugToolDialogMeta').textContent = p.file + (p.version ? ' · v' + p.version : '');
+  body.innerHTML = '<div class="page-sub">Загрузка параметров плагина…</div>';
+  if (typeof dlg.showModal === 'function') dlg.showModal();
+
+  let setRes = null;
+  try {
+    setRes = await api('/api/plugins/settings?file=' + encodeURIComponent(p.file));
+  } catch (e) {}
+  body.innerHTML = '';
+
+  if (setRes && setRes.ok && Array.isArray(setRes.schema) && setRes.schema.length) {
+    const sBox = node('div', 'cluster-box');
+    sBox.append(node('div', 'plate-title', '⚙️ Настройки плагина'));
+    const inputs = {};
+    setRes.schema.forEach((field) => {
+      const row = node('label', 'tcfg-item');
+      row.style.marginTop = '6px';
+      row.append(node('span', null, (field.label || field.key)));
+      const inp = document.createElement('input');
+      inp.className = 'field';
+      inp.type = field.type === 'number' ? 'number' : 'text';
+      inp.value = setRes.values && setRes.values[field.key] != null ? setRes.values[field.key] : (field.default != null ? field.default : '');
+      inputs[field.key] = { el: inp, type: field.type };
+      row.append(inp);
+      sBox.append(row);
+    });
+    const saveSBtn = node('button', 'primary small-btn', '💾 Сохранить настройки');
+    saveSBtn.style.marginTop = '8px';
+    saveSBtn.onclick = async () => {
+      const vals = {};
+      Object.keys(inputs).forEach((k) => {
+        const it = inputs[k];
+        vals[k] = it.type === 'number' ? Number(it.el.value) : it.el.value;
+      });
+      const r = await api('/api/plugins/settings', { file: p.file, values: vals });
+      pushNotice(r && r.ok ? 'Настройки плагина сохранены' : ((r && r.error) || 'Ошибка'), r && r.ok ? 'ok' : 'bad');
+    };
+    sBox.append(saveSBtn);
+    body.append(sBox);
+  }
+
+  const specs = Array.isArray(p.tool_specs) && p.tool_specs.length
+    ? p.tool_specs
+    : (p.tools || []).map((t) => ({ name: t, desc: '', params: {}, required: [] }));
+  if (!specs.length) {
+    body.append(node('div', 'empty-note', 'У плагина нет активных инструментов (возможно он выключен).'));
+    return;
+  }
+  specs.forEach((sp) => {
+    const tBox = node('div', 'cluster-box');
+    const head = node('div', 'plate-title-row');
+    head.append(node('div', 'plate-title', '🛠️ ' + sp.name));
+    tBox.append(head);
+    if (sp.desc) tBox.append(node('div', 'page-sub', sp.desc));
+
+    const paramEls = {};
+    const pKeys = Object.keys(sp.params || {});
+    pKeys.forEach((pk) => {
+      const meta = sp.params[pk] || {};
+      const req = (sp.required || []).includes(pk);
+      const wrap = node('label', 'tcfg-item');
+      wrap.style.marginTop = '6px';
+      wrap.append(node('span', null, pk + (req ? ' *' : '') + ' — ' + (meta.desc || meta.type || '')));
+      const inp = document.createElement('input');
+      inp.className = 'field';
+      inp.type = String(meta.type || '').startsWith('number') ? 'number' : 'text';
+      inp.placeholder = meta.type || 'string';
+      paramEls[pk] = { el: inp, type: String(meta.type || 'string') };
+      wrap.append(inp);
+      tBox.append(wrap);
+    });
+
+    const outPre = node('pre', 'code-modal-pre');
+    outPre.style.maxHeight = '160px';
+    outPre.style.marginTop = '8px';
+    outPre.hidden = true;
+
+    const runTBtn = node('button', 'primary small-btn', '▶ Выполнить ' + sp.name);
+    runTBtn.style.marginTop = '8px';
+    runTBtn.onclick = async () => {
+      const args = {};
+      Object.keys(paramEls).forEach((pk) => {
+        const raw = paramEls[pk].el.value;
+        if (raw === '') return;
+        if (paramEls[pk].type.startsWith('number')) args[pk] = Number(raw);
+        else if (paramEls[pk].type.startsWith('boolean')) args[pk] = raw === 'true' || raw === '1';
+        else args[pk] = raw;
+      });
+      runTBtn.disabled = true;
+      outPre.hidden = false;
+      outPre.textContent = '⏳ Выполнение в изолированной песочнице…';
+      try {
+        const r = await api('/api/plugins/test_tool', { tool: sp.name, args });
+        outPre.textContent = JSON.stringify(r, null, 2);
+      } catch (err) {
+        outPre.textContent = 'Ошибка: ' + err.message;
+      } finally {
+        runTBtn.disabled = false;
+      }
+    };
+    tBox.append(runTBtn, outPre);
+    body.append(tBox);
+  });
 }
 
 function renderWorkshop() {
@@ -1822,7 +1968,8 @@ if ($('#codeDialog')) {
 }
 if ($('#codeDialogCopy')) {
   $('#codeDialogCopy').onclick = async () => {
-    const text = $('#codeDialogText')?.textContent || '';
+    const ed = $('#codeDialogEditor');
+    const text = (ed && !ed.hidden ? ed.value : $('#codeDialogText')?.textContent) || '';
     if (!text) return;
     try {
       await navigator.clipboard.writeText(text);
@@ -1837,6 +1984,34 @@ if ($('#codeDialogCopy')) {
       pushNotice('Код скопирован в буфер обмена', 'ok');
     }
   };
+}
+if ($('#codeDialogSave')) {
+  $('#codeDialogSave').onclick = async () => {
+    const ed = $('#codeDialogEditor');
+    if (!currentEditingPluginFile || !ed) return;
+    const btn = $('#codeDialogSave');
+    btn.disabled = true;
+    try {
+      const res = await api('/api/plugins/save_code', { file: currentEditingPluginFile, code: ed.value });
+      if (!res.ok) throw new Error(res.error || 'Ошибка сохранения');
+      pushNotice('✅ Плагин ' + res.file + ' сохранён и перезагружен (' + (res.tools || []).length + ' инстр.)', 'ok');
+      $('#codeDialog').close();
+      await refreshPlugins();
+      await refreshState();
+    } catch (err) {
+      alert('Ошибка сохранения: ' + err.message);
+    } finally {
+      btn.disabled = false;
+    }
+  };
+}
+if ($('#plugToolDialogClose')) {
+  $('#plugToolDialogClose').onclick = () => $('#plugToolDialog')?.close();
+}
+if ($('#plugToolDialog')) {
+  $('#plugToolDialog').addEventListener('click', (e) => {
+    if (e.target === $('#plugToolDialog')) $('#plugToolDialog').close();
+  });
 }
 
 document.querySelectorAll('.preset-chip').forEach((chip) => {
@@ -3259,16 +3434,29 @@ function _prepCanvas(canvasId) {
   return { ctx, w, h };
 }
 
-function _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, unit) {
+const _dashChartMeta = {};
+
+function _isLightTheme() {
+  return document.documentElement.dataset.theme === 'light';
+}
+
+function _fmtChartTime(ts) {
+  if (!ts) return '';
+  const d = new Date(ts * 1000);
+  return d.toLocaleTimeString('ru-RU', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+function _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, unit, tMin, tMax) {
   const plotW = w - pad.l - pad.r;
   const plotH = h - pad.t - pad.b;
   const steps = 4;
+  const light = _isLightTheme();
   ctx.save();
   ctx.font = '10px ui-monospace, SFMono-Regular, Menlo, monospace';
-  ctx.fillStyle = 'rgba(255, 255, 255, .45)';
+  ctx.fillStyle = light ? 'rgba(15, 23, 42, .62)' : 'rgba(255, 255, 255, .48)';
   ctx.textAlign = 'right';
   ctx.textBaseline = 'middle';
-  ctx.strokeStyle = 'rgba(255, 255, 255, .07)';
+  ctx.strokeStyle = light ? 'rgba(15, 23, 42, .10)' : 'rgba(255, 255, 255, .07)';
   ctx.lineWidth = 1;
   ctx.setLineDash([3, 4]);
   for (let i = 0; i <= steps; i++) {
@@ -3281,28 +3469,78 @@ function _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, unit) {
     ctx.stroke();
     ctx.fillText(val + (unit || ''), pad.l - 6, y);
   }
+  if (tMin && tMax && tMax > tMin) {
+    ctx.setLineDash([]);
+    ctx.textBaseline = 'bottom';
+    ctx.textAlign = 'left';
+    ctx.fillText(_fmtChartTime(tMin), pad.l, h - 1);
+    ctx.textAlign = 'right';
+    ctx.fillText(_fmtChartTime(tMax), w - pad.r, h - 1);
+  }
   ctx.restore();
   return { plotW, plotH };
 }
 
 function _drawEmptyChart(ctx, w, h) {
+  const light = _isLightTheme();
   ctx.save();
   ctx.font = '12px system-ui, sans-serif';
-  ctx.fillStyle = 'rgba(255, 255, 255, .35)';
+  ctx.fillStyle = light ? 'rgba(15, 23, 42, .45)' : 'rgba(255, 255, 255, .38)';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
   ctx.fillText('Сбор данных…', w / 2, h / 2);
   ctx.restore();
 }
 
+function _bindChartHover(canvasId) {
+  const canvas = document.getElementById(canvasId);
+  if (!canvas || canvas.dataset.hoverBound) return;
+  canvas.dataset.hoverBound = '1';
+  canvas.addEventListener('mousemove', (ev) => {
+    const meta = _dashChartMeta[canvasId];
+    const tip = $('#dashTooltip');
+    if (!meta || !meta.data || !meta.data.length || !tip) return;
+    const rect = canvas.getBoundingClientRect();
+    const mx = ev.clientX - rect.left;
+    const frac = Math.max(0, Math.min(1, (mx - meta.pad.l) / Math.max(1, meta.plotW)));
+    let best = meta.data[0];
+    if (meta.tMax > meta.tMin) {
+      const targetT = meta.tMin + frac * (meta.tMax - meta.tMin);
+      let bestDiff = Infinity;
+      for (let i = 0; i < meta.data.length; i++) {
+        const d = Math.abs((meta.data[i].ts || 0) - targetT);
+        if (d < bestDiff) { bestDiff = d; best = meta.data[i]; }
+      }
+    } else {
+      best = meta.data[Math.min(meta.data.length - 1, Math.round(frac * (meta.data.length - 1)))];
+    }
+    const parts = [_fmtChartTime(best.ts)];
+    meta.keys.forEach((k) => {
+      if (best[k.key] != null) parts.push(k.label + ': ' + best[k.key] + (k.unit || ''));
+    });
+    tip.textContent = parts.join(' · ');
+    tip.hidden = false;
+    tip.style.left = Math.min(window.innerWidth - 220, ev.clientX + 12) + 'px';
+    tip.style.top = Math.max(8, ev.clientY - 32) + 'px';
+  });
+  canvas.addEventListener('mouseleave', () => {
+    const tip = $('#dashTooltip');
+    if (tip) tip.hidden = true;
+  });
+}
+
 function drawLineChart(canvasId, data, key, opts) {
   const prep = _prepCanvas(canvasId);
   if (!prep) return;
+  _bindChartHover(canvasId);
   const { ctx, w, h } = prep;
-  const pad = { l: 46, r: 10, t: 10, b: 14 };
+  const pad = { l: 46, r: 10, t: 10, b: 18 };
   const yMin = opts.yMin != null ? opts.yMin : 0;
   const yMax = opts.yMax != null ? opts.yMax : 100;
-  const { plotW, plotH } = _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, opts.unit);
+  const tMin = data && data.length ? (data[0].ts || 0) : 0;
+  const tMax = data && data.length ? (data[data.length - 1].ts || 0) : 0;
+  const { plotW, plotH } = _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, opts.unit, tMin, tMax);
+  _dashChartMeta[canvasId] = { data: data || [], pad, plotW, tMin, tMax, keys: [{ key, label: opts.label || key, unit: opts.unit || '' }] };
 
   const vals = (data || []).map((d) => d[key]).filter((v) => v != null && Number.isFinite(Number(v)));
   if (!vals.length) {
@@ -3315,7 +3553,6 @@ function drawLineChart(canvasId, data, key, opts) {
     return pad.t + plotH * (1 - (clamped - yMin) / Math.max(1, yMax - yMin));
   };
 
-  // Optional threshold lines
   const drawThresh = (val, color) => {
     if (val == null || val < yMin || val > yMax) return;
     const y = yOf(val);
@@ -3334,10 +3571,12 @@ function drawLineChart(canvasId, data, key, opts) {
 
   const pts = [];
   const n = data.length;
+  const tSpan = tMax - tMin;
   for (let i = 0; i < n; i++) {
     const v = data[i][key];
     if (v == null || !Number.isFinite(Number(v))) continue;
-    const x = n === 1 ? pad.l + plotW / 2 : pad.l + (i / (n - 1)) * plotW;
+    const frac = n === 1 ? 0.5 : (tSpan > 1 ? ((data[i].ts - tMin) / tSpan) : (i / (n - 1)));
+    const x = pad.l + frac * plotW;
     pts.push({ x, y: yOf(v) });
   }
   if (!pts.length) return;
@@ -3383,11 +3622,18 @@ function drawAreaChart(canvasId, data, key, opts) {
 function drawDualLineChart(canvasId, data, key1, key2, opts) {
   const prep = _prepCanvas(canvasId);
   if (!prep) return;
+  _bindChartHover(canvasId);
   const { ctx, w, h } = prep;
-  const pad = { l: 42, r: 10, t: 10, b: 14 };
+  const pad = { l: 42, r: 10, t: 10, b: 18 };
   const yMin = opts.yMin != null ? opts.yMin : 0;
   const yMax = opts.yMax != null ? opts.yMax : 100;
-  const { plotW, plotH } = _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, opts.unit);
+  const tMin = data && data.length ? (data[0].ts || 0) : 0;
+  const tMax = data && data.length ? (data[data.length - 1].ts || 0) : 0;
+  const { plotW, plotH } = _drawGridAndAxes(ctx, w, h, pad, yMin, yMax, opts.unit, tMin, tMax);
+  _dashChartMeta[canvasId] = {
+    data: data || [], pad, plotW, tMin, tMax,
+    keys: [{ key: key1, label: 'RAM', unit: '%' }, { key: key2, label: 'CPU', unit: '%' }]
+  };
 
   if (!data || !data.length) {
     _drawEmptyChart(ctx, w, h);
@@ -3399,13 +3645,15 @@ function drawDualLineChart(canvasId, data, key1, key2, opts) {
     return pad.t + plotH * (1 - (clamped - yMin) / Math.max(1, yMax - yMin));
   };
 
+  const tSpan = tMax - tMin;
   const drawSeries = (key, color) => {
     const pts = [];
     const n = data.length;
     for (let i = 0; i < n; i++) {
       const v = data[i][key];
       if (v == null || !Number.isFinite(Number(v))) continue;
-      const x = n === 1 ? pad.l + plotW / 2 : pad.l + (i / (n - 1)) * plotW;
+      const frac = n === 1 ? 0.5 : (tSpan > 1 ? ((data[i].ts - tMin) / tSpan) : (i / (n - 1)));
+      const x = pad.l + frac * plotW;
       pts.push({ x, y: yOf(v) });
     }
     if (!pts.length) return;
@@ -3452,7 +3700,8 @@ async function refreshDashboard() {
 
     // Cards
     $('#dashGpuTemp').textContent = latest.gpu_temp != null ? latest.gpu_temp + '°C' : '—';
-    $('#dashGpuName').textContent = latest.gpu_name ? latest.gpu_name.replace('NVIDIA GeForce ', '') : 'нет датчика';
+    const gpuBaseName = latest.gpu_name ? latest.gpu_name.replace('NVIDIA GeForce ', '') : 'нет датчика';
+    $('#dashGpuName').textContent = gpuBaseName + (latest.gpu_power_w != null ? (' · ' + Math.round(latest.gpu_power_w) + ' Вт') : '');
 
     const vUsed = Number(latest.vram_used_mb || 0);
     const vTot = Number(latest.vram_total_mb || 0);
@@ -3470,11 +3719,28 @@ async function refreshDashboard() {
     $('#dashCpu').textContent = latest.cpu_pct != null ? Math.round(latest.cpu_pct) + ' %' : '—';
     $('#dashCpuCores').textContent = latest.cpu_cores ? latest.cpu_cores + ' потоков' : 'CPU';
 
+    if ($('#dashTps')) $('#dashTps').textContent = summary.last_tps ? (summary.last_tps + ' tok/s') : '— tok/s';
+    if ($('#dashTpsSub')) $('#dashTpsSub').textContent = 'пик: ' + (summary.peak_tps || '—') + ' tok/s';
+    if ($('#dashDiskNet')) $('#dashDiskNet').textContent = latest.disk_free_gb != null ? (latest.disk_free_gb + ' ГБ своб.') : '—';
+    if ($('#dashDiskNetSub')) $('#dashDiskNetSub').textContent = '↓' + Math.round(latest.net_rx_kbps || 0) + ' ↑' + Math.round(latest.net_tx_kbps || 0) + ' КБ/с';
+
     $('#dashTokens').textContent = (summary.total_tokens || 0).toLocaleString('ru-RU');
     $('#dashSessions').textContent = summary.total_sessions || 0;
+    if ($('#dashSessionsSub')) $('#dashSessionsSub').textContent = 'активно: ' + (summary.active_sessions || 0) + ' · инстр.: ' + (summary.tool_calls || 0);
     $('#dashPeakGpu').textContent = summary.peak_gpu_temp != null ? summary.peak_gpu_temp + '°C' : '--°C';
     $('#dashAvgGpu').textContent = summary.avg_gpu_temp != null ? Math.round(summary.avg_gpu_temp) + '°C' : '--°C';
+    if ($('#dashAvgTps')) $('#dashAvgTps').textContent = summary.avg_tps ? (summary.avg_tps + ' tok/s') : '—';
+    if ($('#dashToolCalls')) $('#dashToolCalls').textContent = (summary.tool_calls || 0) + (summary.tool_errors ? (' (ошиб: ' + summary.tool_errors + ')') : '');
     $('#dashModelLoads').textContent = summary.model_loads || 0;
+
+    // Fetch top processes non-blocking
+    api('/api/dashboard/processes').then((pr) => {
+      const tb = $('#dashProcBody');
+      if (!tb || !pr || !pr.processes) return;
+      tb.innerHTML = pr.processes.map((p) =>
+        '<tr><td>' + p.pid + '</td><td>' + esc(p.name) + '</td><td>' + p.rss_mb + '</td><td>' + p.mem_pct + '%</td><td>' + p.cpu_pct + '%</td></tr>'
+      ).join('') || '<tr><td colspan="5" class="page-sub">Нет данных</td></tr>';
+    }).catch(() => {});
 
     if ($('#chartGpuTempVal')) $('#chartGpuTempVal').textContent = latest.gpu_temp != null ? latest.gpu_temp + '°C' : '—';
     if ($('#chartGpuUtilVal')) $('#chartGpuUtilVal').textContent = latest.gpu_util != null ? latest.gpu_util + '%' : '—';
@@ -3524,6 +3790,19 @@ window.addEventListener('resize', () => {
 
 if ($('#dashRefreshBtn')) $('#dashRefreshBtn').onclick = refreshDashboard;
 if ($('#dashWindow')) $('#dashWindow').onchange = refreshDashboard;
+if ($('#dashExportCsvBtn')) {
+  $('#dashExportCsvBtn').onclick = () => {
+    const mins = ($('#dashWindow') && Number($('#dashWindow').value)) || 60;
+    window.open('/api/dashboard/export.csv?minutes=' + encodeURIComponent(mins), '_blank');
+  };
+}
+if ($('#dashResetBtn')) {
+  $('#dashResetBtn').onclick = async () => {
+    await api('/api/dashboard/reset', {});
+    pushNotice('Счётчики дашборда сброшены', 'ok');
+    refreshDashboard();
+  };
+}
 
 /* ---------- Wi-Fi Cluster ---------- */
 let clusterTimer = null;
@@ -3592,21 +3871,38 @@ async function refreshCluster() {
         nodes.forEach((n) => {
           const row = node('div', 'cllm-row');
           const info = node('div', 'cllm-info');
-          info.append(node('div', 'cllm-title', (n.alive ? '🟢 ' : '🔴 ') + esc(n.label || n.url)));
-          const modelsTxt = (n.models || []).length ? ('моделей: ' + n.models.length + ' (' + n.models.slice(0, 2).join(', ') + ')') : (n.error || 'нет моделей');
+          const on = n.enabled !== false;
+          info.append(node('div', 'cllm-title', (!on ? '⏸️ ' : (n.alive ? '🟢 ' : '🔴 ')) + esc(n.label || n.url)));
+          const modelsTxt = (n.models || []).length ? ('моделей: ' + n.models.length + ' (' + n.models.slice(0, 2).join(', ') + ')') : (n.error || 'ожидание опроса…');
           info.append(node('div', 'cllm-sub', esc(n.url) + (n.latency_ms ? ' · ' + n.latency_ms + ' мс' : '') + ' · ' + esc(modelsTxt)));
           row.append(info);
+          const acts = node('div', 'sched-actions');
+          acts.append(switchEl(on, async () => {
+            await api('/api/cluster/node/toggle', { url: n.url, enabled: !on });
+            refreshCluster();
+          }));
           const del = node('button', 'ghost small-btn', 'Удалить');
           del.type = 'button';
           del.onclick = async () => {
             await api('/api/cluster/node/remove', { url: n.url });
             refreshCluster();
           };
-          row.append(del);
+          acts.append(del);
+          row.append(acts);
           llmList.append(row);
         });
       }
     }
+
+    // Native llama.cpp RPC status
+    const rpc = st.rpc || {};
+    if ($('#clusterRpcChip')) {
+      $('#clusterRpcChip').className = 'sec-chip ' + (rpc.running ? 'ok' : (rpc.available ? '' : 'warn'));
+      $('#clusterRpcChip').textContent = rpc.running ? ('онлайн · PID ' + rpc.pid) : (rpc.available ? 'готов к запуску' : 'бинарник не найден');
+    }
+    if ($('#clusterRpcCliHint')) $('#clusterRpcCliHint').value = rpc.cli_hint || '';
+    if ($('#clusterRpcStartBtn')) $('#clusterRpcStartBtn').disabled = !!rpc.running || !rpc.available;
+    if ($('#clusterRpcStopBtn')) $('#clusterRpcStopBtn').disabled = !rpc.running;
 
     if (clusterTimer) clearTimeout(clusterTimer);
     if (currentView === 'cluster') {
@@ -3621,6 +3917,41 @@ if ($('#clusterRefreshBtn')) $('#clusterRefreshBtn').onclick = refreshCluster;
 if ($('#clusterEnableLanBtn')) {
   $('#clusterEnableLanBtn').onclick = async () => {
     await patchConfig('lan_access', true);
+    setTimeout(refreshCluster, 650);
+  };
+}
+if ($('#clusterTestNodeBtn')) {
+  $('#clusterTestNodeBtn').onclick = async () => {
+    const prompt = ($('#clusterTestPrompt') && $('#clusterTestPrompt').value.trim()) || 'Привет! Ответь одним коротким предложением.';
+    const out = $('#clusterTestOut');
+    if (out) out.textContent = '⏳ Запрос к активному LAN LLM-узлу…';
+    $('#clusterTestNodeBtn').disabled = true;
+    try {
+      const r = await api('/api/cluster/llm_query', { prompt });
+      if (out) {
+        out.textContent = r && r.ok
+          ? ('✅ [' + r.node + ' · ' + r.model + ' · ' + r.elapsed_ms + ' мс]: ' + r.text)
+          : ('❌ ' + ((r && r.error) || 'Нет активных узлов'));
+      }
+    } catch (e) {
+      if (out) out.textContent = '❌ ' + e.message;
+    } finally {
+      $('#clusterTestNodeBtn').disabled = false;
+    }
+  };
+}
+if ($('#clusterRpcStartBtn')) {
+  $('#clusterRpcStartBtn').onclick = async () => {
+    const port = Number($('#clusterRpcPort') && $('#clusterRpcPort').value) || 50052;
+    const r = await api('/api/cluster/rpc/start', { port });
+    pushNotice(r && r.ok ? ('🔗 ggml-rpc-server запущен на порту ' + port) : ((r && r.error) || 'Ошибка RPC'), r && r.ok ? 'ok' : 'bad');
+    refreshCluster();
+  };
+}
+if ($('#clusterRpcStopBtn')) {
+  $('#clusterRpcStopBtn').onclick = async () => {
+    await api('/api/cluster/rpc/stop', {});
+    pushNotice('🛑 ggml-rpc-server остановлен', 'warn');
     refreshCluster();
   };
 }
@@ -3738,26 +4069,20 @@ function syncVoiceButtons() {
 syncVoiceButtons();
 
 function speakAnswer(rawText) {
-  if (!voiceTtsEnabled || !('speechSynthesis' in window)) return;
-  try {
-    window.speechSynthesis.cancel();
-    const cleaned = String(rawText || '')
-      .replace(/```[\s\S]*?```/g, ' код пропущен. ')
-      .replace(/`[^`]+`/g, ' ')
-      .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-      .replace(/[#*_~>|]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim()
-      .slice(0, 1200);
-    if (!cleaned) return;
-    const utter = new SpeechSynthesisUtterance(cleaned);
-    utter.lang = 'ru-RU';
-    utter.rate = 1.05;
-    const voices = window.speechSynthesis.getVoices() || [];
-    const ru = voices.find((v) => /ru/i.test(v.lang));
-    if (ru) utter.voice = ru;
-    window.speechSynthesis.speak(utter);
-  } catch (e) {}
+  if (!voiceTtsEnabled) return;
+  const cleaned = String(rawText || '')
+    .replace(/```[\s\S]*?```/g, ' код пропущен. ')
+    .replace(/`[^`]+`/g, ' ')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/[#*_~>|]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 1500);
+  if (!cleaned) return;
+  if (typeof speakWithServer === 'function') {
+    speakWithServer(cleaned);
+    return;
+  }
 }
 
 if ($('#voiceTtsBtn')) {
@@ -4016,6 +4341,9 @@ function applyTheme(theme, persist) {
   if (chk) chk.checked = t === 'light';
   const meta = document.querySelector('meta[name="theme-color"]');
   if (meta) meta.setAttribute('content', t === 'light' ? '#f4f6fa' : '#121316');
+  if (typeof window._drawAllDashCharts === 'function') {
+    try { window._drawAllDashCharts(); } catch (e) {}
+  }
   if (persist) {
     api('/api/config', { config: { theme: t } }).catch(() => {});
   }
@@ -4267,7 +4595,7 @@ if ($('#mcpAddBtn')) {
   };
 }
 
-/* ---------- Voice Engine (XTTS v2 / SAPI5) & Voice Call Modal ---------- */
+/* ---------- Voice Engine 2.0 (Edge Neural / XTTS v2 / SAPI5) & Voice Call Modal ---------- */
 let voiceAudioEl = null;
 let voiceCallActive = false;
 let voiceCallMuted = false;
@@ -4275,6 +4603,12 @@ let voiceCallTimer = null;
 let voiceCallStartedAt = 0;
 let voiceCallRec = null;
 let voiceCallRecording = false;
+let _callSpeechQueue = [];
+let _callSpeechPlaying = false;
+let _callStreamBuf = '';
+let _callSpokenAnyChunk = false;
+let _orbAudioCtx = null;
+let _orbRaf = null;
 
 function fillVoicePresets(presets, currentId) {
   const list = Array.isArray(presets) ? presets : [];
@@ -4292,7 +4626,44 @@ function fillVoicePresets(presets, currentId) {
   });
 }
 
+function _stopOrbVisualizer() {
+  if (_orbRaf) { cancelAnimationFrame(_orbRaf); _orbRaf = null; }
+  const ring = document.querySelector('#callOrb .call-orb-ring');
+  if (ring) ring.style.transform = '';
+}
+
+function _attachOrbVisualizer(audioEl) {
+  _stopOrbVisualizer();
+  if (!voiceCallActive || !window.AudioContext) return;
+  try {
+    if (!_orbAudioCtx) _orbAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (_orbAudioCtx.state === 'suspended') _orbAudioCtx.resume();
+    const src = _orbAudioCtx.createMediaElementSource(audioEl);
+    const analyser = _orbAudioCtx.createAnalyser();
+    analyser.fftSize = 64;
+    src.connect(analyser);
+    analyser.connect(_orbAudioCtx.destination);
+    const buf = new Uint8Array(analyser.frequencyBinCount);
+    const ring = document.querySelector('#callOrb .call-orb-ring');
+    const tick = () => {
+      if (!voiceAudioEl || voiceAudioEl !== audioEl) { _stopOrbVisualizer(); return; }
+      analyser.getByteFrequencyData(buf);
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) sum += buf[i];
+      const avg = sum / Math.max(1, buf.length);
+      const scale = 1 + Math.min(0.42, avg / 260);
+      if (ring) ring.style.transform = 'scale(' + scale.toFixed(3) + ')';
+      _orbRaf = requestAnimationFrame(tick);
+    };
+    _orbRaf = requestAnimationFrame(tick);
+  } catch (e) {}
+}
+
 function stopVoiceAudio() {
+  _callSpeechQueue = [];
+  _callSpeechPlaying = false;
+  _callStreamBuf = '';
+  _stopOrbVisualizer();
   if (voiceAudioEl) {
     try { voiceAudioEl.pause(); voiceAudioEl.src = ''; } catch (e) {}
     voiceAudioEl = null;
@@ -4300,26 +4671,35 @@ function stopVoiceAudio() {
   if ('speechSynthesis' in window) window.speechSynthesis.cancel();
 }
 
+function _currentVoiceParams() {
+  const voiceId = ($('#callVoiceSelect') && voiceCallActive && $('#callVoiceSelect').value) ||
+    ($('#voicePresetSelect') && $('#voicePresetSelect').value) || 'ru_female_warm';
+  const speed = voiceCallActive && $('#callSpeedSelect')
+    ? parseFloat($('#callSpeedSelect').value || '1.0')
+    : parseFloat(($('#voiceSpeedRange') && $('#voiceSpeedRange').value) || '1.0');
+  const pitch = parseInt(($('#voicePitchRange') && $('#voicePitchRange').value) || '0', 10) || 0;
+  return { voice: voiceId, speed, pitch };
+}
+
 async function speakWithServer(text, onEnd) {
   const clean = String(text || '').trim();
-  if (!clean) { if (onEnd) onEnd(); return; }
+  if (!clean) { if (onEnd) onEnd(); return null; }
   stopVoiceAudio();
-  const voiceId = ($('#callVoiceSelect') && $('#callVoiceSelect').value) ||
-    ($('#voicePresetSelect') && $('#voicePresetSelect').value) || 'ru_female_warm';
+  const vp = _currentVoiceParams();
   try {
-    const res = await api('/api/voice/speak', { text: clean, voice: voiceId });
+    const res = await api('/api/voice/speak', { text: clean, voice: vp.voice, speed: vp.speed, pitch: vp.pitch });
     if (res && res.ok && res.audio_b64) {
       const audio = new Audio(res.audio_b64);
       voiceAudioEl = audio;
-      audio.onended = () => { voiceAudioEl = null; if (onEnd) onEnd(); };
-      audio.onerror = () => { voiceAudioEl = null; if (onEnd) onEnd(); };
+      _attachOrbVisualizer(audio);
+      audio.onended = () => { _stopOrbVisualizer(); voiceAudioEl = null; if (onEnd) onEnd(); };
+      audio.onerror = () => { _stopOrbVisualizer(); voiceAudioEl = null; if (onEnd) onEnd(); };
       await audio.play();
       return res;
     }
   } catch (e) {
     console.warn('Server TTS fallback to WebSpeech:', e);
   }
-  // Fallback to browser WebSpeech API
   if ('speechSynthesis' in window) {
     const utter = new SpeechSynthesisUtterance(clean.slice(0, 1200));
     utter.lang = 'ru-RU';
@@ -4332,6 +4712,143 @@ async function speakWithServer(text, onEnd) {
   return null;
 }
 
+async function _drainCallSpeechQueue(onAllDone) {
+  if (_callSpeechPlaying) return;
+  _callSpeechPlaying = true;
+  while (_callSpeechQueue.length && voiceCallActive && !voiceCallMuted) {
+    const chunkText = _callSpeechQueue.shift();
+    const vp = _currentVoiceParams();
+    try {
+      const res = await api('/api/voice/speak', { text: chunkText, voice: vp.voice, speed: vp.speed, pitch: vp.pitch });
+      if (!voiceCallActive || voiceCallMuted) break;
+      if (res && res.ok && res.audio_b64) {
+        setCallState('speaking', 'Агент говорит…');
+        await new Promise((resolve) => {
+          const audio = new Audio(res.audio_b64);
+          voiceAudioEl = audio;
+          _attachOrbVisualizer(audio);
+          audio.onended = () => { _stopOrbVisualizer(); voiceAudioEl = null; resolve(); };
+          audio.onerror = () => { _stopOrbVisualizer(); voiceAudioEl = null; resolve(); };
+          audio.play().catch(() => resolve());
+        });
+      }
+    } catch (e) {}
+  }
+  _callSpeechPlaying = false;
+  if (!_callSpeechQueue.length && !running && voiceCallActive) {
+    setCallState('idle', 'Готов к разговору');
+    if (onAllDone) onAllDone();
+    else if ($('#callHandsFree') && $('#callHandsFree').checked && !pendingCallAsk) {
+      setTimeout(() => { if (voiceCallActive && !running && !pendingCallAsk && !_callSpeechPlaying) callStartListening(); }, 420);
+    }
+  }
+}
+
+function enqueueCallSpeech(sentence, onAllDone) {
+  const s = String(sentence || '').replace(/\s+/g, ' ').trim();
+  if (!s || voiceCallMuted || !voiceCallActive) return;
+  _callSpokenAnyChunk = true;
+  _callSpeechQueue.push(s);
+  _drainCallSpeechQueue(onAllDone);
+}
+
+function _encodePcmToWav(samples, sampleRate) {
+  const buf = new ArrayBuffer(44 + samples.length * 2);
+  const view = new DataView(buf);
+  const writeStr = (off, str) => { for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i)); };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + samples.length * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, samples.length * 2, true);
+  let offset = 44;
+  for (let i = 0; i < samples.length; i++, offset += 2) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Uint8Array(buf);
+}
+
+if ($('#voiceSpeedRange')) {
+  $('#voiceSpeedRange').oninput = (e) => {
+    if ($('#voiceSpeedVal')) $('#voiceSpeedVal').textContent = Number(e.target.value).toFixed(2).replace(/\.00$/, '.0') + '×';
+  };
+}
+if ($('#voicePitchRange')) {
+  $('#voicePitchRange').oninput = (e) => {
+    const v = Number(e.target.value) || 0;
+    if ($('#voicePitchVal')) $('#voicePitchVal').textContent = (v > 0 ? '+' : '') + v + 'Hz';
+  };
+}
+if ($('#voiceRecordSampleBtn')) {
+  let recStream = null;
+  let recCtx = null;
+  $('#voiceRecordSampleBtn').onclick = async () => {
+    const btn = $('#voiceRecordSampleBtn');
+    const stEl = $('#voiceSettingsStatus');
+    if (recStream) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      if (stEl) stEl.textContent = '❌ Браузер не дал доступ к микрофону';
+      return;
+    }
+    try {
+      recStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      recCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      const src = recCtx.createMediaStreamSource(recStream);
+      const proc = recCtx.createScriptProcessor(4096, 1, 1);
+      const chunks = [];
+      proc.onaudioprocess = (e) => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+      src.connect(proc);
+      proc.connect(recCtx.destination);
+      let left = 7;
+      btn.textContent = '⏹️ ' + left + 'с…';
+      if (stEl) stEl.textContent = '🔴 Говорите чётко в микрофон (7 сек) для создания WAV-образца клона…';
+      const iv = setInterval(() => {
+        left--;
+        if (left > 0) btn.textContent = '⏹️ ' + left + 'с…';
+      }, 1000);
+      await new Promise((r) => setTimeout(r, 7000));
+      clearInterval(iv);
+      proc.disconnect();
+      src.disconnect();
+      recStream.getTracks().forEach((t) => t.stop());
+      const sr = recCtx.sampleRate || 24000;
+      await recCtx.close();
+      recStream = null;
+      recCtx = null;
+      btn.textContent = '🔴 Запись WAV';
+
+      const totalLen = chunks.reduce((a, c) => a + c.length, 0);
+      const merged = new Float32Array(totalLen);
+      let pos = 0;
+      chunks.forEach((c) => { merged.set(c, pos); pos += c.length; });
+      const wavBytes = _encodePcmToWav(merged, sr);
+      let bin = '';
+      for (let i = 0; i < wavBytes.length; i += 0x8000) bin += String.fromCharCode.apply(null, wavBytes.subarray(i, i + 0x8000));
+      const name = ($('#voiceCloneName') && $('#voiceCloneName').value.trim()) || ('mic_clone_' + new Date().toTimeString().slice(0, 5).replace(':', ''));
+      const res = await api('/api/voice/sample/upload', { name, data_b64: btoa(bin) });
+      if (res && res.ok) {
+        fillVoicePresets(res.presets, res.id);
+        if (stEl) stEl.textContent = '✅ Записан и сохранён WAV-клон: ' + res.file + ' (' + res.size_kb + ' КБ)';
+      } else if (stEl) {
+        stEl.textContent = '❌ ' + ((res && res.error) || 'Ошибка сохранения');
+      }
+    } catch (err) {
+      if (recStream) { recStream.getTracks().forEach((t) => t.stop()); recStream = null; }
+      btn.textContent = '🔴 Запись WAV';
+      if (stEl) stEl.textContent = '❌ Ошибка микрофона: ' + err.message;
+    }
+  };
+}
+
 if ($('#voiceSaveBtn')) {
   $('#voiceSaveBtn').onclick = async () => {
     const cfgPatch = {
@@ -4339,13 +4856,17 @@ if ($('#voiceSaveBtn')) {
       voice_language: ($('#voiceLangSelect') && $('#voiceLangSelect').value) || 'ru',
       voice_xtts_url: ($('#voiceXttsUrl') && $('#voiceXttsUrl').value.trim()) || 'http://127.0.0.1:8020',
       voice_preset: ($('#voicePresetSelect') && $('#voicePresetSelect').value) || 'ru_female_warm',
+      voice_speed: parseFloat(($('#voiceSpeedRange') && $('#voiceSpeedRange').value) || '1.0') || 1.0,
+      voice_pitch: parseInt(($('#voicePitchRange') && $('#voicePitchRange').value) || '0', 10) || 0,
     };
     await api('/api/config', { config: cfgPatch });
     const st = await api('/api/voice/status');
     const stEl = $('#voiceSettingsStatus');
-    if (stEl) stEl.textContent = st.xtts_alive
-      ? '✅ XTTS v2 сервер активен (' + st.xtts_url + ')'
-      : 'ℹ️ XTTS v2 офлайн — активен встроенный Windows SAPI5';
+    if (stEl) {
+      stEl.textContent = st.xtts_alive
+        ? ('✅ XTTS v2 активен (' + st.xtts_url + ')')
+        : (st.edge_available ? '✅ Активен студийный Microsoft Edge Neural TTS (24 кГц)' : 'ℹ️ Активен встроенный офлайн Windows SAPI5');
+    }
     refreshState();
   };
 }
@@ -4535,6 +5056,8 @@ function callSendPrompt(text) {
     }
     return;
   }
+  _callStreamBuf = '';
+  _callSpokenAnyChunk = false;
   pushCallSubtitle('user', clean);
   setCallState('thinking', 'Агент работает…');
   if ($('#callStopAgentBtn')) $('#callStopAgentBtn').disabled = false;
@@ -4555,6 +5078,17 @@ function callSendPrompt(text) {
 function onVoiceCallEvent(ev) {
   if (!voiceCallActive || !ev) return;
   switch (ev.type) {
+    case 'delta':
+      if (!voiceCallMuted && $('#callStreamToggle') && $('#callStreamToggle').checked && ev.text) {
+        _callStreamBuf += ev.text;
+        const m = _callStreamBuf.match(/^([\s\S]{24,}?[.!?…])(\s+[\s\S]*)$/);
+        if (m) {
+          const readySentence = m[1];
+          _callStreamBuf = m[2].trimStart();
+          enqueueCallSpeech(readySentence);
+        }
+      }
+      break;
     case 'tool_start':
       setCallState('thinking', 'Выполняю инструмент…');
       setCallToolPill('⚙️ ' + (ev.tool || 'tool') + '…');
@@ -4627,9 +5161,10 @@ async function openVoiceCall() {
     fillVoicePresets(st.presets, st.voice_preset);
     if ($('#callEngineMeta')) {
       const toolsCnt = (stateCache && stateCache.tools ? stateCache.tools.length : 0);
-      $('#callEngineMeta').textContent = (st.xtts_alive
-        ? ('XTTS v2 онлайн · ' + st.voice_language.toUpperCase())
-        : ('Windows SAPI5 (офлайн) · ' + st.voice_language.toUpperCase())) +
+      const engLabel = st.xtts_alive
+        ? 'XTTS v2 онлайн'
+        : (st.edge_available ? 'Edge Neural 24kHz' : 'Windows SAPI5 (офлайн)');
+      $('#callEngineMeta').textContent = engLabel + ' · ' + st.voice_language.toUpperCase() +
         (toolsCnt ? (' · ' + toolsCnt + ' инстр.') : '');
     }
     setCallState('idle', 'Нажми 🎤 или напиши — доступны все функции');
@@ -4703,6 +5238,18 @@ function onVoiceCallAnswer(rawText) {
   pushCallSubtitle('ai', clean.slice(0, 420));
   if (voiceCallMuted) {
     setCallState('idle', 'Звук выключен (Mute)');
+    return true;
+  }
+  if (_callSpokenAnyChunk) {
+    const rem = _callStreamBuf.trim();
+    _callStreamBuf = '';
+    if (rem) enqueueCallSpeech(rem);
+    else if (!_callSpeechPlaying) {
+      setCallState('idle', 'Готов к разговору');
+      if ($('#callHandsFree') && $('#callHandsFree').checked && !pendingCallAsk) {
+        setTimeout(() => { if (voiceCallActive && !running && !pendingCallAsk) callStartListening(); }, 420);
+      }
+    }
     return true;
   }
   setCallState('speaking', 'Агент говорит…');
@@ -4816,6 +5363,15 @@ function syncExtendedState(st) {
     if ($('#voiceEngineChip')) $('#voiceEngineChip').textContent = st.voice.engine || 'auto';
     if ($('#voiceEngineSelect')) $('#voiceEngineSelect').value = st.voice.engine || 'auto';
     if ($('#voiceLangSelect')) $('#voiceLangSelect').value = st.voice.voice_language || 'ru';
+    if ($('#voiceSpeedRange') && st.voice.voice_speed != null) {
+      $('#voiceSpeedRange').value = st.voice.voice_speed;
+      if ($('#voiceSpeedVal')) $('#voiceSpeedVal').textContent = Number(st.voice.voice_speed).toFixed(2).replace(/\.00$/, '.0') + '×';
+    }
+    if ($('#voicePitchRange') && st.voice.voice_pitch != null) {
+      $('#voicePitchRange').value = st.voice.voice_pitch;
+      const pv = Number(st.voice.voice_pitch) || 0;
+      if ($('#voicePitchVal')) $('#voicePitchVal').textContent = (pv > 0 ? '+' : '') + pv + 'Hz';
+    }
     if ($('#voiceXttsUrl') && document.activeElement !== $('#voiceXttsUrl')) {
       $('#voiceXttsUrl').value = st.voice.xtts_url || 'http://127.0.0.1:8020';
     }
@@ -4839,13 +5395,15 @@ if ($('#input')) {
   });
 }
 
-/* ---------- Unsloth Fine-Tuning Studio 2.0 ---------- */
+/* ---------- LoRA & Unsloth Fine-Tuning Studio 3.0 ---------- */
 let trainTimer = null;
 
 function trainCollectParams() {
   const custom = ($('#trainModelCustom') && $('#trainModelCustom').value.trim()) || '';
   const preset = ($('#trainModelPreset') && $('#trainModelPreset').value) || 'unsloth/Qwen3-4B-bnb-4bit';
+  const checkedLayers = Array.from(document.querySelectorAll('#trainLayersChecks input[type="checkbox"]:checked')).map((el) => el.value);
   return {
+    backend: ($('#trainBackend') && $('#trainBackend').value) || 'auto',
     model: custom || preset,
     method: ($('#trainMethod') && $('#trainMethod').value) || 'sft',
     dataset_path: ($('#trainDatasetSelect') && $('#trainDatasetSelect').value) || '',
@@ -4865,6 +5423,7 @@ function trainCollectParams() {
     gguf_quant: ($('#trainGgufQuant') && $('#trainGgufQuant').value) || 'q4_k_m',
     export_gguf: $('#trainExportGguf') ? !!$('#trainExportGguf').checked : true,
     auto_import_lmstudio: $('#trainAutoImport') ? !!$('#trainAutoImport').checked : true,
+    target_modules: checkedLayers.length ? checkedLayers : undefined,
   };
 }
 
@@ -4952,14 +5511,38 @@ async function refreshTrain(checkEnv) {
     if (!data || !data.ok) return;
 
     const mSel = $('#trainModelPreset');
-    if (mSel && data.presets && !mSel.options.length) {
+    const localModels = data.local_models || [];
+    const presetSig = (data.presets || []).length + ':' + localModels.length;
+    if (mSel && data.presets && mSel.dataset.sig !== presetSig) {
+      const prevM = mSel.value;
+      mSel.dataset.sig = presetSig;
+      mSel.innerHTML = '';
+      if (localModels.length) {
+        const gLoc = document.createElement('optgroup');
+        gLoc.label = 'Скачанные локальные модели (data/models)';
+        localModels.forEach((lm) => {
+          const opt = document.createElement('option');
+          opt.value = lm.path;
+          opt.textContent = '💾 ' + lm.name + ' (' + lm.size_gb + ' ГБ)';
+          gLoc.appendChild(opt);
+        });
+        mSel.appendChild(gLoc);
+      }
+      const gPre = document.createElement('optgroup');
+      gPre.label = 'Рекомендованные пресеты (Unsloth / HF)';
       data.presets.forEach((m) => {
         const opt = document.createElement('option');
         opt.value = m.id;
         opt.textContent = m.label + ' · ~' + m.vram_gb + ' ГБ';
-        mSel.appendChild(opt);
+        gPre.appendChild(opt);
       });
+      mSel.appendChild(gPre);
+      if (prevM) mSel.value = prevM;
       updateTrainVramEstimate();
+    }
+    if ($('#trainQuantChip')) {
+      $('#trainQuantChip').className = 'sec-chip ' + (data.llama_quantize_available ? 'ok' : 'warn');
+      $('#trainQuantChip').textContent = data.llama_quantize_available ? 'llama-quantize готов' : 'llama-quantize не найден';
     }
 
     const dsRows = data.datasets || [];
@@ -5013,10 +5596,8 @@ async function refreshTrain(checkEnv) {
           prevBtn.onclick = async () => {
             const pv = await api('/api/train/dataset/preview?name=' + encodeURIComponent(d.name));
             if (pv && pv.ok && $('#codeDialog')) {
-              $('#codeDialogTitle').textContent = 'Датасет: ' + pv.name;
-              $('#codeDialogMeta').textContent = pv.total + ' строк' + (pv.bad_lines ? (' · битых: ' + pv.bad_lines) : '');
+              openCodeDialog('Датасет: ' + pv.name, pv.total + ' строк' + (pv.bad_lines ? (' · битых: ' + pv.bad_lines) : ''));
               $('#codeDialogText').textContent = JSON.stringify(pv.samples, null, 2);
-              $('#codeDialog').showModal();
             }
           };
           const delBtn = node('button', 'ghost small-btn danger-text', '✕');
@@ -5044,6 +5625,8 @@ async function refreshTrain(checkEnv) {
     if ($('#trainMetStep')) $('#trainMetStep').textContent = (job.step || 0) + ' / ' + (job.max_steps || 0);
     if ($('#trainMetLoss')) $('#trainMetLoss').textContent = job.loss != null ? String(job.loss) : '—';
     if ($('#trainMetEpoch')) $('#trainMetEpoch').textContent = job.epoch != null ? String(job.epoch) : '0.0';
+    if ($('#trainMetSpeed')) $('#trainMetSpeed').textContent = job.speed_it_s != null ? (job.speed_it_s + ' шаг/с') : '—';
+    if ($('#trainMetEta')) $('#trainMetEta').textContent = job.eta_min != null ? (job.eta_min + ' мин') : '—';
     if ($('#trainMetGpu')) $('#trainMetGpu').textContent = job.gpu_temp != null ? (job.gpu_temp + '°C') : '—';
     const pct = job.max_steps > 0 ? Math.min(100, Math.round(((job.step || 0) / job.max_steps) * 100)) : (job.status === 'done' ? 100 : 0);
     if ($('#trainProgressFill')) $('#trainProgressFill').style.width = pct + '%';
@@ -5221,10 +5804,123 @@ if ($('#trainScriptBtn')) {
     const params = trainCollectParams();
     const res = await api('/api/train/script', params);
     if (res && res.ok && $('#codeDialog')) {
-      $('#codeDialogTitle').textContent = 'Скрипт обучения Unsloth (' + params.method.toUpperCase() + ')';
-      $('#codeDialogMeta').textContent = params.model;
+      openCodeDialog('Скрипт обучения (' + (params.backend || 'auto') + ' · ' + params.method.toUpperCase() + ')', params.model);
       $('#codeDialogText').textContent = res.script || '';
-      $('#codeDialog').showModal();
+    }
+  };
+}
+if ($('#trainInspectLayersBtn')) {
+  $('#trainInspectLayersBtn').onclick = async () => {
+    const p = trainCollectParams();
+    const box = $('#trainLayersBox');
+    const wrap = $('#trainLayersChecks');
+    const archEl = $('#trainLayersArch');
+    if (!box || !wrap) return;
+    box.hidden = false;
+    wrap.innerHTML = '<span class="page-sub">🔍 Сканирование архитектуры слоёв ' + esc(p.model) + '…</span>';
+    try {
+      const res = await api('/api/train/layers', { model: p.model });
+      wrap.innerHTML = '';
+      if (!res || !res.ok) {
+        wrap.innerHTML = '<span class="page-sub">❌ ' + esc((res && res.error) || 'Ошибка') + '</span>';
+        return;
+      }
+      if (archEl) archEl.textContent = 'Слои LoRA (' + (res.architecture || 'auto') + ' · ' + (res.source || '') + '):';
+      const recSet = new Set(res.recommended || []);
+      (res.layers || []).forEach((layer) => {
+        const lbl = document.createElement('label');
+        lbl.className = 'check-pill';
+        const chk = document.createElement('input');
+        chk.type = 'checkbox';
+        chk.value = layer;
+        chk.checked = recSet.has(layer);
+        const sp = document.createElement('span');
+        sp.textContent = layer;
+        lbl.append(chk, sp);
+        wrap.appendChild(lbl);
+      });
+    } catch (err) {
+      wrap.innerHTML = '<span class="page-sub">❌ ' + esc(err.message) + '</span>';
+    }
+  };
+}
+if ($('#trainLayersAllBtn')) {
+  $('#trainLayersAllBtn').onclick = () => {
+    document.querySelectorAll('#trainLayersChecks input[type="checkbox"]').forEach((c) => { c.checked = true; });
+  };
+}
+if ($('#trainLayersAttnBtn')) {
+  $('#trainLayersAttnBtn').onclick = () => {
+    document.querySelectorAll('#trainLayersChecks input[type="checkbox"]').forEach((c) => {
+      c.checked = /^(q_proj|k_proj|v_proj|o_proj|qkv_proj|c_attn|query_key_value)$/.test(c.value);
+    });
+  };
+}
+if ($('#trainHfSearchBtn')) {
+  $('#trainHfSearchBtn').onclick = async () => {
+    const query = ($('#trainHfQuery') && $('#trainHfQuery').value.trim()) || 'Qwen2.5 Instruct';
+    const max_size = parseFloat(($('#trainHfMaxB') && $('#trainHfMaxB').value) || '0') || 0;
+    const out = $('#trainHfResults');
+    if (!out) return;
+    out.innerHTML = '<div class="page-sub">🔎 Поиск на HuggingFace Hub…</div>';
+    try {
+      const res = await api('/api/train/hf/search', { query, max_size, limit: 12 });
+      out.innerHTML = '';
+      const models = (res && res.models) || [];
+      if (!models.length) {
+        out.append(node('div', 'page-sub', 'Ничего не найдено по запросу «' + query + '».'));
+        return;
+      }
+      models.forEach((m) => {
+        const row = node('div', 'cllm-row');
+        const info = node('div', 'cllm-info');
+        info.append(node('div', 'cllm-title', '🤗 ' + esc(m.id) + (m.params_b ? (' · ' + m.params_b + 'B') : '')));
+        info.append(node('div', 'cllm-sub', '⬇ ' + (m.downloads || 0).toLocaleString('ru-RU') + ' · ❤ ' + (m.likes || 0)));
+        row.append(info);
+        const acts = node('div', 'sched-actions');
+        const useBtn = node('button', 'ghost small-btn', 'Выбрать');
+        useBtn.type = 'button';
+        useBtn.onclick = () => {
+          if ($('#trainModelCustom')) $('#trainModelCustom').value = m.id;
+          updateTrainVramEstimate();
+          pushNotice('Выбрана модель: ' + m.id, 'ok');
+        };
+        const dlBtn = node('button', 'primary small-btn', '⬇️ Скачать в data/models');
+        dlBtn.type = 'button';
+        dlBtn.onclick = async () => {
+          const r = await api('/api/train/hf/download', { repo_id: m.id });
+          pushNotice(r && r.ok ? ('⬇️ Многопоточное скачивание запущено: ' + m.id + ' (см. лог ниже)') : ((r && r.error) || 'Ошибка'), r && r.ok ? 'ok' : 'bad');
+          refreshTrain(false);
+        };
+        acts.append(useBtn, dlBtn);
+        row.append(acts);
+        out.append(row);
+      });
+    } catch (err) {
+      out.innerHTML = '<div class="page-sub">❌ ' + esc(err.message) + '</div>';
+    }
+  };
+}
+if ($('#trainQuantBtn')) {
+  $('#trainQuantBtn').onclick = async () => {
+    const input_gguf = ($('#trainQuantInput') && $('#trainQuantInput').value.trim()) || '';
+    const quant_type = ($('#trainQuantType') && $('#trainQuantType').value) || 'Q4_K_M';
+    const stEl = $('#trainQuantStatus');
+    if (!input_gguf) { pushNotice('Укажи путь к .gguf файлу для квантования', 'warn'); return; }
+    if (stEl) stEl.textContent = '⏳ Выполняется llama-quantize (' + quant_type + ')…';
+    $('#trainQuantBtn').disabled = true;
+    try {
+      const res = await api('/api/train/quantize', { input_gguf, quant_type });
+      if (res && res.ok) {
+        if (stEl) stEl.textContent = '✅ Готово за ' + res.elapsed_sec + 'с: ' + res.output_gguf + ' (' + res.input_size_mb + ' МБ → ' + res.output_size_mb + ' МБ)';
+        pushNotice('✅ GGUF квантован: ' + res.output_size_mb + ' МБ', 'ok');
+      } else if (stEl) {
+        stEl.textContent = '❌ ' + ((res && res.error) || 'Ошибка квантования');
+      }
+    } catch (err) {
+      if (stEl) stEl.textContent = '❌ ' + err.message;
+    } finally {
+      $('#trainQuantBtn').disabled = false;
     }
   };
 }

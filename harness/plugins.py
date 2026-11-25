@@ -59,6 +59,7 @@ def _load_file(path):
     if not isinstance(raw_tools, list) or not raw_tools:
         raise ValueError("в файле нет списка TOOLS = [{name, desc, params, fn}]")
     names = []
+    tool_specs = []
     for item in raw_tools:
         if not isinstance(item, dict) or not item.get("name") or not callable(item.get("fn")):
             raise ValueError("инструмент плагина обязан иметь name и fn(cfg, args)")
@@ -67,11 +68,36 @@ def _load_file(path):
         REGISTRY[tool] = {"module": module_name, "fn": item["fn"], "spec": entry,
                           "dangerous": bool(item.get("dangerous"))}
         names.append(tool)
+        params_meta = {}
+        for pk, pv in (entry.get("params") or {}).items():
+            if isinstance(pv, (list, tuple)) and len(pv) >= 2:
+                params_meta[pk] = {"type": str(pv[0]), "desc": str(pv[1])}
+            else:
+                params_meta[pk] = {"type": "string", "desc": str(pv)}
+        tool_specs.append({
+            "name": tool,
+            "desc": entry.get("desc", ""),
+            "params": params_meta,
+            "required": list(entry.get("required") or []),
+            "dangerous": bool(item.get("dangerous")),
+        })
         if item.get("dangerous"):
             permissions.PLUGIN_DANGEROUS.add(tool)
-    return {"name": getattr(module, "NAME", module_name), "file": os.path.basename(path),
-            "tools": names, "error": None, "mtime": int(os.path.getmtime(path)),
-            "enabled": True}
+    raw_settings = getattr(module, "SETTINGS", None)
+    settings_schema = raw_settings if isinstance(raw_settings, list) else []
+    return {
+        "name": getattr(module, "NAME", module_name),
+        "file": os.path.basename(path),
+        "desc": getattr(module, "DESC", "") or (ast.get_docstring(ast.parse(open(path, "r", encoding="utf-8", errors="replace").read())) or "")[:240],
+        "version": str(getattr(module, "VERSION", "") or ""),
+        "author": str(getattr(module, "AUTHOR", "") or ""),
+        "tools": names,
+        "tool_specs": tool_specs,
+        "settings_schema": settings_schema,
+        "error": None,
+        "mtime": int(os.path.getmtime(path)),
+        "enabled": True,
+    }
 
 
 def scan(force=False):
@@ -627,7 +653,86 @@ def get_plugin_code(fname):
         "desc": docstring,
         "code": code,
         "tools": tools,
+        "installed": os.path.dirname(os.path.abspath(src_path)) == os.path.abspath(PLUGIN_DIR),
     }
+
+
+def update_plugin_code(fname, code):
+    """Сохранить отредактированный исходный код плагина с AST-проверкой и горячей перезагрузкой."""
+    from . import virustotal
+    code = str(code or "")
+    if not code.strip():
+        return {"ok": False, "error": "Исходный код плагина пуст"}
+    if len(code) > 1_000_000:
+        return {"ok": False, "error": "Размер кода превышает 1 МБ"}
+
+    safe_fname = _safe_name(fname)
+    try:
+        ast.parse(code, filename=safe_fname)
+    except SyntaxError as exc:
+        return {"ok": False, "error": f"Синтаксическая ошибка в строке {exc.lineno}: {exc.msg}"}
+
+    sec = virustotal.scan_plugin(code)
+    if sec.get("verdict") == "malicious":
+        return {"ok": False, "error": "Код заблокирован проверкой безопасности", "security": sec}
+
+    res = install_code(code, safe_fname)
+    # Keep _workshop copy in sync if this is a workshop/author plugin
+    w_path = os.path.join(WORKSHOP_DIR, safe_fname)
+    if os.path.isfile(w_path) and res.get("ok"):
+        try:
+            with open(w_path, "w", encoding="utf-8") as fh:
+                fh.write(code)
+        except OSError:
+            pass
+    res["security"] = sec
+    return res
+
+
+def get_plugin_settings(fname):
+    """Получить схему настроек плагина (SETTINGS) и текущие сохранённые значения."""
+    scan()
+    base = os.path.basename(str(fname or "").strip())
+    if base and not base.endswith(".py"):
+        base += ".py"
+    info = PLUGINS.get(base)
+    if not info:
+        for k, v in PLUGINS.items():
+            if v.get("name") == fname or k == fname:
+                info = v
+                base = k
+                break
+    if not info:
+        return {"ok": False, "error": f"Плагин '{fname}' не найден"}
+    key = info.get("name") or os.path.splitext(base)[0]
+    cfg = load_cfg()
+    all_settings = cfg.get("plugin_settings") or {}
+    saved = dict(all_settings.get(key) or {})
+    schema = list(info.get("settings_schema") or [])
+    for field in schema:
+        fk = field.get("key")
+        if fk and fk not in saved and "default" in field:
+            saved[fk] = field["default"]
+    return {"ok": True, "plugin": key, "file": base, "schema": schema, "values": saved}
+
+
+def save_plugin_settings(fname, values):
+    """Сохранить пользовательские настройки плагина в config.json."""
+    cur = get_plugin_settings(fname)
+    if not cur.get("ok"):
+        return cur
+    key = cur["plugin"]
+    if not isinstance(values, dict):
+        return {"ok": False, "error": "values должен быть словарём"}
+    with _lock:
+        cfg = load_cfg()
+        all_settings = dict(cfg.get("plugin_settings") or {})
+        merged = dict(all_settings.get(key) or {})
+        merged.update(values)
+        all_settings[key] = merged
+        cfg["plugin_settings"] = all_settings
+        save_cfg(cfg)
+    return {"ok": True, "plugin": key, "values": merged}
 
 
 TOOL_SANDBOX_TIMEOUT = 30

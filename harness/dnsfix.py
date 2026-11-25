@@ -176,3 +176,34 @@ def connection_for(url, timeout=30.0):
     if scheme == "https":
         return PinHTTPSConnection(hostname, int(port), timeout=timeout)
     return PinHTTPConnection(hostname, int(port), timeout=timeout)
+
+
+_ORIG_GETADDRINFO = socket.getaddrinfo
+_PATCHED = False
+
+
+def install_getaddrinfo_fallback():
+    """Fallback wrapper around socket.getaddrinfo for Windows machines with broken Winsock DNS (error 11001).
+    Makes aiohttp (edge-tts), huggingface_hub, requests, and urllib work transparently."""
+    global _PATCHED
+    if _PATCHED:
+        return
+    _PATCHED = True
+
+    def _patched_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+        try:
+            return _ORIG_GETADDRINFO(host, port, family, type, proto, flags)
+        except socket.gaierror:
+            h_str = host.decode("utf-8", "ignore") if isinstance(host, bytes) else str(host or "")
+            if not h_str or h_str in ("localhost", "127.0.0.1", "::1") or re.match(r"^\d+(\.\d+){3}$", h_str):
+                raise
+            try:
+                ip = resolve(h_str, timeout=4.0)
+                return _ORIG_GETADDRINFO(ip, port, socket.AF_INET, type, proto, flags)
+            except Exception:
+                raise
+
+    socket.getaddrinfo = _patched_getaddrinfo
+
+
+install_getaddrinfo_fallback()

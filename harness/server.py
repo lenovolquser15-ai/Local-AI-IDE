@@ -102,6 +102,39 @@ class SseBridge(Bridge):
         self.run.broadcast(event)
 
 
+_DNS_PROBE = {"value": None, "at": 0.0, "busy": False, "lock": threading.Lock()}
+_DNS_PROBE_TTL = 60.0
+
+
+def cached_dns_probe():
+    now = time.time()
+    if _DNS_PROBE["value"] is not None and now - _DNS_PROBE["at"] < _DNS_PROBE_TTL:
+        return _DNS_PROBE["value"]
+
+    def _refresh():
+        try:
+            val = {"ok": True, "ip": dnsfix.resolve("html.duckduckgo.com")}
+        except Exception as exc:
+            val = {"ok": False, "error": str(exc)}
+        with _DNS_PROBE["lock"]:
+            _DNS_PROBE["value"] = val
+            _DNS_PROBE["at"] = time.time()
+            _DNS_PROBE["busy"] = False
+
+    with _DNS_PROBE["lock"]:
+        if _DNS_PROBE["value"] is not None and now - _DNS_PROBE["at"] < _DNS_PROBE_TTL:
+            return _DNS_PROBE["value"]
+        if not _DNS_PROBE["busy"]:
+            _DNS_PROBE["busy"] = True
+            t = threading.Thread(target=_refresh, daemon=True)
+            t.start()
+        else:
+            t = None
+    if _DNS_PROBE["value"] is None and t is not None:
+        t.join(timeout=1.5)
+    return _DNS_PROBE["value"] or {"ok": True, "ip": "cached"}
+
+
 def cached_provider_status(cfg):
     now = time.time()
     if _PROBE["value"] is not None and now - _PROBE["at"] < _PROBE_TTL:
@@ -471,10 +504,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/state":
             cfg = load()
             ps = cached_provider_status(cfg)
-            try:
-                dns_probe = {"ok": True, "ip": dnsfix.resolve("html.duckduckgo.com")}
-            except Exception as exc:
-                dns_probe = {"ok": False, "error": str(exc)}
+            dns_probe = cached_dns_probe()
             pl = plugins.status()
             tools_list = [spec["name"] for spec in schemas.entries(cfg.get("tool_profile", "core"), cfg)]
             loaded_items, _ = lms_mod.loaded_models(cfg) if cfg.get("provider") == "lmstudio" else ([], "")
@@ -529,9 +559,11 @@ class Handler(BaseHTTPRequestHandler):
                 "voice": {
                     "engine": cfg.get("voice_engine", "auto"),
                     "xtts_url": cfg.get("voice_xtts_url", "http://127.0.0.1:8020"),
+                    "edge_available": voice_mod.edge_tts_available(),
                     "voice_preset": cfg.get("voice_preset", "ru_female_warm"),
                     "voice_language": cfg.get("voice_language", "ru"),
                     "voice_speed": cfg.get("voice_speed", 1.0),
+                    "voice_pitch": cfg.get("voice_pitch", 0),
                     "voice_auto_speak": cfg.get("voice_auto_speak", False),
                     "presets": voice_mod.list_presets(cfg),
                 },
@@ -562,6 +594,26 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/dashboard/latest":
             _json_response(self, dashboard_mod.get_latest())
+            return
+
+        if path == "/api/dashboard/processes":
+            _json_response(self, dashboard_mod.get_top_processes())
+            return
+
+        if path == "/api/dashboard/export.csv":
+            try:
+                mins = float(query.get("minutes", ["60"])[0])
+            except (TypeError, ValueError):
+                mins = 60.0
+            csv_bytes = dashboard_mod.export_csv(minutes=max(1.0, min(60.0, mins))).encode("utf-8-sig")
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/csv; charset=utf-8")
+            self.send_header("Content-Disposition", f'attachment; filename="localharness-telemetry-{stamp}.csv"')
+            self.send_header("Content-Length", str(len(csv_bytes)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(csv_bytes)
             return
 
         if path == "/api/cluster/status":
@@ -632,10 +684,17 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, {
                 **train_mod.job_status(),
                 "datasets": train_mod.list_datasets().get("datasets", []),
+                "local_models": train_mod.list_local_models().get("models", []),
                 "presets": train_mod.PRESET_MODELS,
                 "hf_datasets": train_mod.PRESET_HF_DATASETS,
                 "chat_templates": train_mod.CHAT_TEMPLATES,
+                "quant_types": train_mod.QUANT_TYPES,
+                "llama_quantize_available": bool(train_mod.find_llama_tool("llama-quantize")),
             })
+            return
+
+        if path == "/api/train/local_models":
+            _json_response(self, train_mod.list_local_models())
             return
 
         if path == "/api/train/dataset/preview":
@@ -718,6 +777,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/plugins/code":
             fname = os.path.basename(query.get("file", [""])[0])
             _json_response(self, plugins.get_plugin_code(fname))
+            return
+
+        if path == "/api/plugins/settings":
+            fname = query.get("file", [""])[0]
+            _json_response(self, plugins.get_plugin_settings(fname))
             return
 
         if path == "/api/plugins/download":
@@ -846,6 +910,9 @@ class Handler(BaseHTTPRequestHandler):
             "/api/plugins/workshop/install": self.handle_plugin_workshop_install,
             "/api/plugins/convert_repo": self.handle_plugin_convert_repo,
             "/api/plugins/virustotal": self.handle_plugin_virustotal,
+            "/api/plugins/save_code": self.handle_plugin_save_code,
+            "/api/plugins/settings": self.handle_plugin_save_settings,
+            "/api/dashboard/reset": self.handle_dashboard_reset,
             "/api/lms/load": self.handle_lms_load,
             "/api/lms/unload": self.handle_lms_unload,
             "/api/lms/download": self.handle_lms_download,
@@ -867,8 +934,11 @@ class Handler(BaseHTTPRequestHandler):
             "/api/cluster/map": self.handle_cluster_map,
             "/api/cluster/scan": self.handle_cluster_scan,
             "/api/cluster/node/add": self.handle_cluster_node_add,
+            "/api/cluster/node/toggle": self.handle_cluster_node_toggle,
             "/api/cluster/node/remove": self.handle_cluster_node_remove,
             "/api/cluster/llm_query": self.handle_cluster_llm_query,
+            "/api/cluster/rpc/start": self.handle_cluster_rpc_start,
+            "/api/cluster/rpc/stop": self.handle_cluster_rpc_stop,
             "/api/obscura/test": self.handle_obscura_test,
             "/api/backup/import": self.handle_backup_import,
             "/api/scheduler/add": self.handle_scheduler_add,
@@ -903,6 +973,10 @@ class Handler(BaseHTTPRequestHandler):
             "/api/train/autotune": self.handle_train_autotune,
             "/api/train/estimate": self.handle_train_estimate,
             "/api/train/eval": self.handle_train_eval,
+            "/api/train/layers": self.handle_train_layers,
+            "/api/train/hf/search": self.handle_train_hf_search,
+            "/api/train/hf/download": self.handle_train_hf_download,
+            "/api/train/quantize": self.handle_train_quantize,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -1212,6 +1286,17 @@ class Handler(BaseHTTPRequestHandler):
     def handle_plugin_virustotal(self, body):
         _json_response(self, plugins.scan_virustotal(body.get("file") or body.get("code", "")))
 
+    def handle_plugin_save_code(self, body):
+        res = plugins.update_plugin_code(body.get("file", ""), body.get("code", ""))
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_plugin_save_settings(self, body):
+        res = plugins.save_plugin_settings(body.get("file", ""), body.get("values") or {})
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_dashboard_reset(self, body):
+        _json_response(self, dashboard_mod.reset_counters())
+
     def handle_lms_load(self, body):
         cfg = load()
         model = body.get("model")
@@ -1371,6 +1456,15 @@ class Handler(BaseHTTPRequestHandler):
                 save(cfg)
         _json_response(self, res)
 
+    def handle_cluster_node_toggle(self, body):
+        res = cluster_mod.toggle_llm_node(body.get("url", ""), body.get("enabled", True))
+        if res.get("ok"):
+            with CONFIG_LOCK:
+                cfg = load()
+                cfg["cluster_llm_nodes"] = cluster_mod.export_nodes_for_config()
+                save(cfg)
+        _json_response(self, res)
+
     def handle_cluster_node_remove(self, body):
         res = cluster_mod.remove_llm_node(body.get("url", ""))
         with CONFIG_LOCK:
@@ -1385,6 +1479,16 @@ class Handler(BaseHTTPRequestHandler):
             node_url=body.get("node_url"),
             model=body.get("model"),
         ))
+
+    def handle_cluster_rpc_start(self, body):
+        res = cluster_mod.start_rpc_server(
+            host=body.get("host", "0.0.0.0"),
+            port=int(body.get("port") or 50052),
+        )
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_cluster_rpc_stop(self, body):
+        _json_response(self, cluster_mod.stop_rpc_server())
 
     def handle_obscura_test(self, body):
         cfg = load()
@@ -1500,6 +1604,7 @@ class Handler(BaseHTTPRequestHandler):
             voice=body.get("voice"),
             language=body.get("language"),
             speed=body.get("speed"),
+            pitch=body.get("pitch"),
             engine=body.get("engine"),
             save_file=bool(body.get("save_file", False)),
         ))
@@ -1622,6 +1727,30 @@ class Handler(BaseHTTPRequestHandler):
             adapter_dir=body.get("adapter_dir", ""),
             prompt=body.get("prompt", ""),
             max_new_tokens=int(body.get("max_new_tokens") or 256),
+        )
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_layers(self, body):
+        _json_response(self, train_mod.inspect_model_layers(body.get("model", "")))
+
+    def handle_train_hf_search(self, body):
+        res = train_mod.search_hf_models(
+            query=body.get("query", ""),
+            min_size=body.get("min_size", 0),
+            max_size=body.get("max_size", 0),
+            limit=int(body.get("limit") or 15),
+        )
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_hf_download(self, body):
+        res = train_mod.download_hf_model(body.get("repo_id", ""))
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_quantize(self, body):
+        res = train_mod.quantize_gguf_standalone(
+            input_gguf=body.get("input_gguf", ""),
+            output_gguf=body.get("output_gguf", ""),
+            quant_type=body.get("quant_type", "Q4_K_M"),
         )
         _json_response(self, res, 200 if res.get("ok") else 400)
 

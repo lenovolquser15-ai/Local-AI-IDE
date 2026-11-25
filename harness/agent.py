@@ -678,6 +678,11 @@ class Agent:
                 return name, args, {"ok": False,
                                     "error": "ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ (%s). Сделай иначе или спроси, что именно нужно." % reason}
         result = self.tools.call(name, args)
+        try:
+            from . import dashboard as _dash
+            _dash.record_tool_call(ok=bool(isinstance(result, dict) and result.get("ok", True)))
+        except Exception:
+            pass
         if isinstance(result, dict) and result.get("ok"):
             self._real_tools += 1
         return name, args, result

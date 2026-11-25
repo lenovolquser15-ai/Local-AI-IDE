@@ -37,3 +37,6 @@ venv/
 .backup*/
 *.zip
 .wrangler/
+
+# bundled llama.cpp native binaries in reference dir (kept locally & copied by build-exe.cmd)
+lora_train_reference/llama.cpp/

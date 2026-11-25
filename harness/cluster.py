@@ -1,5 +1,6 @@
-"""LAN Mesh & Compute Cluster: offload compute tasks to Wi-Fi devices (phones/browsers)
-and discover/route LLM inference across LAN PCs (Ollama / LM Studio / llama.cpp).
+"""LAN Mesh & Compute Cluster 2.0: offload compute tasks to Wi-Fi devices (phones/browsers),
+auto-probe & route LLM inference across LAN PCs (Ollama / LM Studio / llama.cpp),
+and manage native llama.cpp RPC tensor-parallel servers (ggml-rpc-server).
 """
 import collections
 import concurrent.futures
@@ -7,11 +8,18 @@ import hashlib
 import ipaddress
 import json
 import math
+import os
+import shutil
 import socket
+import subprocess
 import threading
 import time
 import urllib.request
 import uuid
+
+from . import config as config_mod
+
+NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
 _LOCK = threading.RLock()
 _QUEUE_COND = threading.Condition(_LOCK)
@@ -27,8 +35,26 @@ _TOTAL_TASKS_DONE = 0
 
 # Discovered or manually added LAN LLM nodes: url -> dict
 _LLM_NODES = {}
+_NODE_PROBE_TTL = 20.0
+_PROBE_IN_FLIGHT = False
 
-SAFE_TASK_KINDS = ("compute_bench", "text_search", "hash_batch", "json_transform")
+# Native llama.cpp ggml-rpc-server state
+_RPC_STATE = {
+    "proc": None,
+    "host": "0.0.0.0",
+    "port": 50052,
+    "started_at": None,
+    "logs": [],
+}
+
+SAFE_TASK_KINDS = (
+    "compute_bench",
+    "text_search",
+    "hash_batch",
+    "json_transform",
+    "rag_chunk_score",
+    "matrix_ops",
+)
 
 
 def _prune_workers_locked(now=None):
@@ -36,7 +62,6 @@ def _prune_workers_locked(now=None):
     dead = [wid for wid, w in _WORKERS.items() if now - w.get("last_seen", 0) > _WORKER_TTL]
     for wid in dead:
         _WORKERS.pop(wid, None)
-        # Re-queue any in-flight tasks assigned to a dropped worker
         for task in _TASKS.values():
             if task.get("worker_id") == wid and not task["done"].is_set():
                 task["worker_id"] = None
@@ -210,22 +235,24 @@ def submit_result(task_id, worker_id, ok=True, result=None, error=None, duration
 def _execute_locally(kind, payload):
     """Safe local fallback when no remote workers are connected."""
     t0 = time.perf_counter()
+    payload = payload or {}
+
     if kind == "compute_bench":
-        iters = max(1000, min(500000, int((payload or {}).get("iterations", 40000))))
-        seed = int((payload or {}).get("seed", 1))
+        iters = max(1000, min(500000, int(payload.get("iterations", 40000))))
+        seed = int(payload.get("seed", 1))
         acc = 0.0
         for i in range(1, iters + 1):
             acc += math.sin(i * 0.001 + seed) * math.cos(i * 0.002)
         return {"checksum": round(acc, 6), "iterations": iters, "seed": seed}, round((time.perf_counter() - t0) * 1000.0, 1)
 
     if kind == "hash_batch":
-        items = (payload or {}).get("items") or []
+        items = payload.get("items") or []
         out = [hashlib.sha256(str(x).encode("utf-8", "replace")).hexdigest() for x in items]
         return {"hashes": out, "count": len(out)}, round((time.perf_counter() - t0) * 1000.0, 1)
 
     if kind == "text_search":
-        query = str((payload or {}).get("query") or "").lower().split()
-        docs = (payload or {}).get("docs") or []
+        query = str(payload.get("query") or "").lower().split()
+        docs = payload.get("docs") or []
         scored = []
         for idx, doc in enumerate(docs):
             text = str(doc.get("text") if isinstance(doc, dict) else doc)
@@ -241,9 +268,9 @@ def _execute_locally(kind, payload):
         return {"matches": scored[:10]}, round((time.perf_counter() - t0) * 1000.0, 1)
 
     if kind == "json_transform":
-        rows = (payload or {}).get("rows") or []
-        field = (payload or {}).get("field")
-        op = (payload or {}).get("op", "count")
+        rows = payload.get("rows") or []
+        field = payload.get("field")
+        op = payload.get("op", "count")
         vals = []
         for r in rows:
             if isinstance(r, dict) and field in r:
@@ -258,6 +285,45 @@ def _execute_locally(kind, payload):
         else:
             res = {"count": len(rows)}
         return res, round((time.perf_counter() - t0) * 1000.0, 1)
+
+    if kind == "rag_chunk_score":
+        terms = [t for t in str(payload.get("query") or "").lower().split() if len(t) >= 2]
+        chunks = payload.get("chunks") or []
+        scored = []
+        for idx, ch in enumerate(chunks):
+            text = str(ch.get("text") if isinstance(ch, dict) else ch)
+            low = text.lower()
+            doc_len = max(10, len(low.split()))
+            score = 0.0
+            for term in terms:
+                tf = low.count(term)
+                if tf > 0:
+                    score += (tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * (doc_len / 120.0)))
+            if score > 0:
+                scored.append({
+                    "id": ch.get("id", idx) if isinstance(ch, dict) else idx,
+                    "file": ch.get("file", "") if isinstance(ch, dict) else "",
+                    "score": round(score, 4),
+                    "preview": text[:200],
+                })
+        scored.sort(key=lambda r: r["score"], reverse=True)
+        return {"matches": scored[:int(payload.get("top_k") or 10)]}, round((time.perf_counter() - t0) * 1000.0, 1)
+
+    if kind == "matrix_ops":
+        q = [float(x) for x in (payload.get("query_vec") or [])]
+        vecs = payload.get("vectors") or []
+        q_norm = math.sqrt(sum(x * x for x in q)) or 1.0
+        sims = []
+        for idx, v in enumerate(vecs):
+            if not isinstance(v, (list, tuple)) or not v:
+                sims.append({"index": idx, "cosine": 0.0})
+                continue
+            n = min(len(q), len(v))
+            dot = sum(q[i] * float(v[i]) for i in range(n))
+            v_norm = math.sqrt(sum(float(x) * float(x) for x in v)) or 1.0
+            sims.append({"index": idx, "cosine": round(dot / (q_norm * v_norm), 6)})
+        sims.sort(key=lambda r: r["cosine"], reverse=True)
+        return {"top": sims[:int(payload.get("top_k") or 10)], "count": len(vecs)}, round((time.perf_counter() - t0) * 1000.0, 1)
 
     return {"error": "unsupported kind: %s" % kind}, round((time.perf_counter() - t0) * 1000.0, 1)
 
@@ -342,7 +408,6 @@ def map_tasks(kind, items, timeout=60.0, allow_local_fallback=True):
             "executed_locally": True,
         }
 
-    # Enqueue all tasks simultaneously so workers pick them up concurrently
     tasks = []
     with _QUEUE_COND:
         for payload in items:
@@ -482,10 +547,22 @@ def add_llm_node(url, label="", enabled=True):
         "latency_ms": probe.get("latency_ms"),
         "error": probe.get("error", ""),
         "checked_at": probe.get("checked_at", time.time()),
+        "auto_probe": True,
     }
     with _LOCK:
         _LLM_NODES[norm] = node
     return {"ok": True, "node": dict(node)}
+
+
+def toggle_llm_node(url, enabled=True):
+    """Enable or disable a LAN LLM node without removing it."""
+    norm = _normalize_llm_url(url)
+    with _LOCK:
+        node = _LLM_NODES.get(norm)
+        if not node:
+            return {"ok": False, "error": "узел не найден: %s" % url}
+        node["enabled"] = bool(enabled)
+        return {"ok": True, "node": dict(node)}
 
 
 def remove_llm_node(url):
@@ -495,9 +572,48 @@ def remove_llm_node(url):
     return {"ok": True, "removed": bool(removed)}
 
 
+def _maybe_background_probe_nodes():
+    """Asynchronously refresh stale config-loaded LAN LLM nodes so restarts don't leave them offline."""
+    global _PROBE_IN_FLIGHT
+    now = time.time()
+    with _LOCK:
+        if _PROBE_IN_FLIGHT:
+            return
+        stale_urls = [
+            u for u, n in _LLM_NODES.items()
+            if n.get("auto_probe") and n.get("enabled", True) and (now - float(n.get("checked_at") or 0.0) > _NODE_PROBE_TTL)
+        ]
+        if not stale_urls:
+            return
+        _PROBE_IN_FLIGHT = True
+
+    def _worker():
+        global _PROBE_IN_FLIGHT
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(6, len(stale_urls))) as ex:
+                futs = {ex.submit(probe_llm_node, u, 1.2): u for u in stale_urls}
+                for fut in concurrent.futures.as_completed(futs):
+                    u = futs[fut]
+                    res = fut.result()
+                    with _LOCK:
+                        if u in _LLM_NODES:
+                            _LLM_NODES[u]["alive"] = res.get("alive", False)
+                            if res.get("models"):
+                                _LLM_NODES[u]["models"] = res["models"]
+                            _LLM_NODES[u]["latency_ms"] = res.get("latency_ms")
+                            _LLM_NODES[u]["error"] = res.get("error", "")
+                            _LLM_NODES[u]["checked_at"] = res.get("checked_at", time.time())
+        finally:
+            with _LOCK:
+                _PROBE_IN_FLIGHT = False
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def load_nodes_from_config(cfg):
-    """Ensure persisted cluster_llm_nodes from config are registered."""
+    """Ensure persisted cluster_llm_nodes from config are registered and auto-probed."""
     nodes = (cfg or {}).get("cluster_llm_nodes") or []
+    added = False
     with _LOCK:
         for item in nodes:
             if isinstance(item, dict) and item.get("url"):
@@ -512,7 +628,11 @@ def load_nodes_from_config(cfg):
                         "latency_ms": None,
                         "error": "",
                         "checked_at": 0.0,
+                        "auto_probe": True,
                     }
+                    added = True
+    if added:
+        _maybe_background_probe_nodes()
 
 
 def export_nodes_for_config():
@@ -541,8 +661,15 @@ def list_llm_nodes(cfg=None, refresh=False):
                         _LLM_NODES[u]["latency_ms"] = res.get("latency_ms")
                         _LLM_NODES[u]["error"] = res.get("error", "")
                         _LLM_NODES[u]["checked_at"] = res.get("checked_at", time.time())
+    else:
+        _maybe_background_probe_nodes()
     with _LOCK:
-        return [dict(n) for n in _LLM_NODES.values()]
+        out = []
+        for n in _LLM_NODES.values():
+            d = dict(n)
+            d.pop("auto_probe", None)
+            out.append(d)
+        return out
 
 
 def _check_tcp_and_probe(ip, port, timeout=0.35):
@@ -596,6 +723,7 @@ def scan_lan_llm_nodes(lan_ip, ports=(11434, 1234, 8080), timeout=0.35):
                         "latency_ms": res.get("latency_ms"),
                         "error": "",
                         "checked_at": res.get("checked_at", time.time()),
+                        "auto_probe": True,
                     }
     return {
         "ok": True,
@@ -613,6 +741,7 @@ def pick_llm_node(cfg, thermal_status=None):
     if thermal_status and thermal_status.get("status") not in ("hot", "critical"):
         return None
     load_nodes_from_config(cfg)
+    _maybe_background_probe_nodes()
     with _LOCK:
         candidates = [
             dict(n) for n in _LLM_NODES.values()
@@ -642,6 +771,11 @@ def query_remote_llm(prompt, node_url=None, model=None, timeout=60.0):
                 return {"ok": False, "error": "нет активных LLM-узлов в Wi-Fi сети"}
             alive.sort(key=lambda n: n.get("latency_ms") or 9999.0)
             node = dict(alive[0])
+
+    if not node.get("models") and not model:
+        p = probe_llm_node(node["url"], timeout=1.5)
+        if p.get("models"):
+            node = dict(node, models=p["models"])
 
     target_model = model or (node.get("models") or [None])[0]
     if not target_model:
@@ -675,6 +809,112 @@ def query_remote_llm(prompt, node_url=None, model=None, timeout=60.0):
         return {"ok": False, "node": node["url"], "error": str(exc)}
 
 
+# ---------- Native llama.cpp RPC Tensor-Parallel Server ----------
+
+def find_rpc_binary():
+    """Locate bundled ggml-rpc-server executable."""
+    exe = "ggml-rpc-server.exe" if os.name == "nt" else "ggml-rpc-server"
+    candidates = [
+        os.path.join(config_mod.ROOT, "lora_train_reference", "llama.cpp", exe),
+        os.path.join(config_mod.ROOT, "llama.cpp", exe),
+        os.path.join(config_mod.data_dir(), "llama.cpp", exe),
+    ]
+    for c in candidates:
+        if os.path.isfile(c):
+            return c
+    return shutil.which("ggml-rpc-server")
+
+
+def rpc_status(lan_ip=""):
+    bin_path = find_rpc_binary()
+    with _LOCK:
+        proc = _RPC_STATE.get("proc")
+        running = bool(proc is not None and proc.poll() is None)
+        if not running and proc is not None:
+            _RPC_STATE["proc"] = None
+        port = int(_RPC_STATE.get("port") or 50052)
+        endpoint = "%s:%d" % (lan_ip or "127.0.0.1", port)
+        return {
+            "available": bool(bin_path),
+            "binary": bin_path or "",
+            "running": running,
+            "pid": proc.pid if running and proc else None,
+            "host": _RPC_STATE.get("host", "0.0.0.0"),
+            "port": port,
+            "endpoint": endpoint,
+            "cli_hint": "llama-server -m model.gguf --rpc %s -ngl 99" % endpoint,
+            "logs": list(_RPC_STATE.get("logs") or [])[-30:],
+        }
+
+
+def start_rpc_server(host="0.0.0.0", port=50052):
+    """Start local ggml-rpc-server to share GPU/RAM tensor memory over LAN."""
+    bin_path = find_rpc_binary()
+    if not bin_path:
+        return {"ok": False, "error": "ggml-rpc-server не найден (ожидается в lora_train_reference/llama.cpp/)"}
+    port = max(1024, min(65535, int(port or 50052)))
+    host = str(host or "0.0.0.0").strip()
+    with _LOCK:
+        proc = _RPC_STATE.get("proc")
+        if proc is not None and proc.poll() is None:
+            return {"ok": True, "already_running": True, **rpc_status()}
+        cmd = [bin_path, "-H", host, "-p", str(port)]
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                cwd=os.path.dirname(bin_path),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=NO_WINDOW,
+            )
+        except Exception as exc:
+            return {"ok": False, "error": "Не удалось запустить ggml-rpc-server: %s" % exc}
+
+        _RPC_STATE.update({
+            "proc": proc,
+            "host": host,
+            "port": port,
+            "started_at": time.time(),
+            "logs": ["[LocalHarness] Запуск: %s" % " ".join(cmd)],
+        })
+
+        def _reader(p):
+            try:
+                for line in p.stdout:
+                    s = line.rstrip()
+                    if s:
+                        with _LOCK:
+                            _RPC_STATE["logs"].append(s)
+                            if len(_RPC_STATE["logs"]) > 80:
+                                _RPC_STATE["logs"] = _RPC_STATE["logs"][-80:]
+            except Exception:
+                pass
+
+        threading.Thread(target=_reader, args=(proc,), daemon=True).start()
+    time.sleep(0.25)
+    return {"ok": True, **rpc_status()}
+
+
+def stop_rpc_server():
+    with _LOCK:
+        proc = _RPC_STATE.get("proc")
+        _RPC_STATE["proc"] = None
+    if proc is not None and proc.poll() is None:
+        try:
+            proc.terminate()
+            proc.wait(timeout=3)
+        except Exception:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+    return {"ok": True, **rpc_status()}
+
+
 def status(cfg=None, lan_ip="", port=7788):
     """Full cluster snapshot for the UI and tools."""
     workers = list_workers()
@@ -692,14 +932,17 @@ def status(cfg=None, lan_ip="", port=7788):
         "total_worker_threads": total_threads,
         "total_tasks_done": _TOTAL_TASKS_DONE,
         "pending_tasks": len(_PENDING),
+        "safe_task_kinds": list(SAFE_TASK_KINDS),
         "llm_nodes": llm_nodes,
         "llm_nodes_alive": sum(1 for n in llm_nodes if n.get("alive")),
+        "rpc": rpc_status(lan_ip=lan_ip),
     }
 
 
 def _reset():
     """Reset in-memory state (for unit tests)."""
-    global _TOTAL_TASKS_DONE
+    global _TOTAL_TASKS_DONE, _PROBE_IN_FLIGHT
+    stop_rpc_server()
     with _LOCK:
         _WORKERS.clear()
         _PENDING.clear()
@@ -708,3 +951,4 @@ def _reset():
         _TASKS.clear()
         _LLM_NODES.clear()
         _TOTAL_TASKS_DONE = 0
+        _PROBE_IN_FLIGHT = False

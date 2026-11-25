@@ -1,0 +1,66 @@
+[2026-11-23 06.02.05] ИНФО: Приложение запущено
+[2026-11-23 06.02.05] ИНФО: venv уже прописан: D:\AI VIDEO\local-LORA-train-llm-script-main\.venv\Scripts\python.exe
+[2026-11-23 06.02.34] ИНФО: библиотеки подготовлены
+[2026-11-23 06.02.34] ИНФО: Запуск GUI
+[2026-11-23 06.02.34] ИНФО: usr_console: === ПРОВЕРКА ПК ===
+[2026-11-23 06.02.34] ИНФО: usr_console: Пожалуйста дождитесь сообщения об окончании проверки.
+[2026-11-23 06.02.34] ИНФО: usr_console: ПРОЦЕССОР: Intel(R) Core(TM) i5-4210U CPU @ 1.70GHz
+[2026-11-23 06.02.34] ИНФО: usr_console: ОПЕРАТИВНАЯ ПАМЯТЬ:
+[2026-11-23 06.02.34] ИНФО: usr_console: Всего: 15.89 ГБ
+[2026-11-23 06.02.35] ИНФО: usr_console: Видеокарта: NVIDIA GeForce 840M
+[2026-11-23 06.02.35] ИНФО: usr_console: Видео память: 2.15 ГБ
+[2026-11-23 06.02.35] ИНФО: usr_console: CUDA: 12.4
+[2026-11-23 06.02.35] ИНФО: usr_console: 
+
+[2026-11-23 06.02.35] ИНФО: usr_console: === Проверка и установка библиотек ===
+[2026-11-23 06.02.35] ИНФО: usr_console: Для корректной работы приложения пожалуйста дождитесь окончания проверки.
+[2026-11-23 06.02.59] ИНФО: usr_console: Базовые библиотеки установлены корректно!
+[2026-11-23 06.02.59] ИНФО: usr_console: Можно начинать обучение.
+[2026-11-23 06.04.13] ИНФО: usr_console: не удалось проанализировать выбранную модель: Unrecognized model in D:/AI VIDEO/local-LORA-train-llm-script-main/Ami_Model. Should have a `model_type` key in its config.json.
+[2026-11-23 06.04.18] ИНФО: usr_console: 
+
+[2026-11-23 06.04.18] ИНФО: usr_console: === Предварительная проверка Lora ===
+[2026-11-23 06.04.18] ИНФО: usr_console: Библиотеки для конвертации подготовлены
+[2026-11-23 06.04.18] ИНФО: usr_console: Все библиотеки прошли проверку.
+[2026-11-23 06.04.18] ИНФО: usr_console: 
+
+[2026-11-23 06.04.18] ИНФО: usr_console: === Запуск обучения Lora ===
+[2026-11-23 06.04.19] ИНФО: usr_console: GPU тест OK
+[2026-11-23 06.04.19] ИНФО: usr_console: Device: cuda
+[2026-11-23 06.04.19] ИНФО: usr_console: Модель: D:/AI VIDEO/local-LORA-train-llm-script-main/Ami_Model
+[2026-11-23 06.04.19] ИНФО: usr_console: Датасет: D:/AI VIDEO/local-LORA-train-llm-script-main/dataset_Ami.jsonl
+[2026-11-23 06.04.19] ИНФО: usr_console: Новые веса LorA: D:\AI VIDEO\local-LORA-train-llm-script-main\process\lora_adapter
+[2026-11-23 06.04.19] ИНФО: usr_console: Токенизатор...
+[2026-11-23 06.04.19] ОШИБКА: Traceback (most recent call last):
+  File "D:\AI VIDEO\local-LORA-train-llm-script-main\Project_V1.0.py", line 752, in Lora_learn
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH)
+  File "D:\AI VIDEO\local-LORA-train-llm-script-main\.venv\Lib\site-packages\transformers\models\auto\tokenization_auto.py", line 1013, in from_pretrained
+    return tokenizer_class.from_pretrained(pretrained_model_name_or_path, *inputs, **kwargs)
+           ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "D:\AI VIDEO\local-LORA-train-llm-script-main\.venv\Lib\site-packages\transformers\tokenization_utils_base.py", line 1767, in from_pretrained
+    return cls._from_pretrained(
+           ~~~~~~~~~~~~~~~~~~~~^
+        resolved_vocab_files,
+        ^^^^^^^^^^^^^^^^^^^^^
+    ...<8 lines>...
+        **kwargs,
+        ^^^^^^^^^
+    )
+    ^
+  File "D:\AI VIDEO\local-LORA-train-llm-script-main\.venv\Lib\site-packages\transformers\tokenization_utils_base.py", line 1961, in _from_pretrained
+    tokenizer = cls(*init_inputs, **init_kwargs)
+  File "D:\AI VIDEO\local-LORA-train-llm-script-main\.venv\Lib\site-packages\transformers\tokenization_utils_tokenizers.py", line 414, in __init__
+    raise ValueError(
+    ...<5 lines>...
+    )
+ValueError: Couldn't instantiate the backend tokenizer from one of: 
+(1) a `tokenizers` library serialization file, 
+(2) a slow tokenizer instance to convert or 
+(3) an equivalent slow tokenizer class to instantiate and convert. 
+You need to have sentencepiece or tiktoken installed to convert a slow tokenizer to a fast one.
+
+[2026-11-23 06.04.19] ИНФО: usr_console: КРИТИЧЕСКАЯ ОШИБКА: Couldn't instantiate the backend tokenizer from one of: 
+(1) a `tokenizers` library serialization file, 
+(2) a slow tokenizer instance to convert or 
+(3) an equivalent slow tokenizer class to instantiate and convert. 
+You need to have sentencepiece or tiktoken installed to convert a slow tokenizer to a fast one.

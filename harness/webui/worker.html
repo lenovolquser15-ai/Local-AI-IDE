@@ -305,6 +305,51 @@ self.onmessage = async (e) => {
       if (op === 'sum') result = { sum: Number(vals.reduce((a, b) => a + b, 0).toFixed(4)), count: vals.length };
       else if (op === 'avg') result = { avg: vals.length ? Number((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(4)) : 0, count: vals.length };
       else result = { count: rows.length };
+    } else if (kind === 'rag_chunk_score') {
+      const terms = String(payload.query || '').toLowerCase().split(/\\s+/).filter(t => t.length >= 2);
+      const chunks = payload.chunks || [];
+      const topK = Number(payload.top_k || 10);
+      const scored = [];
+      chunks.forEach((ch, idx) => {
+        const text = typeof ch === 'object' ? String(ch.text || '') : String(ch);
+        const low = text.toLowerCase();
+        const docLen = Math.max(10, low.split(/\\s+/).length);
+        let score = 0;
+        for (const term of terms) {
+          let tf = 0, pos = 0;
+          while ((pos = low.indexOf(term, pos)) !== -1) { tf++; pos += term.length; }
+          if (tf > 0) score += (tf * 2.2) / (tf + 1.2 * (0.25 + 0.75 * (docLen / 120)));
+        }
+        if (score > 0) {
+          scored.push({
+            id: (typeof ch === 'object' && ch.id != null) ? ch.id : idx,
+            file: (typeof ch === 'object' && ch.file) ? ch.file : '',
+            score: Number(score.toFixed(4)),
+            preview: text.slice(0, 200)
+          });
+        }
+      });
+      scored.sort((a, b) => b.score - a.score);
+      result = { matches: scored.slice(0, topK) };
+    } else if (kind === 'matrix_ops') {
+      const q = (payload.query_vec || []).map(Number);
+      const vecs = payload.vectors || [];
+      const topK = Number(payload.top_k || 10);
+      const qNorm = Math.sqrt(q.reduce((s, x) => s + x * x, 0)) || 1;
+      const sims = vecs.map((v, index) => {
+        if (!Array.isArray(v) || !v.length) return { index, cosine: 0 };
+        const n = Math.min(q.length, v.length);
+        let dot = 0, vSq = 0;
+        for (let i = 0; i < v.length; i++) {
+          const val = Number(v[i]);
+          vSq += val * val;
+          if (i < n) dot += q[i] * val;
+        }
+        const vNorm = Math.sqrt(vSq) || 1;
+        return { index, cosine: Number((dot / (qNorm * vNorm)).toFixed(6)) };
+      });
+      sims.sort((a, b) => b.cosine - a.cosine);
+      result = { top: sims.slice(0, topK), count: vecs.length };
     } else {
       throw new Error('unsupported task kind: ' + kind);
     }

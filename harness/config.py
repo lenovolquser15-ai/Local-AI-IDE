@@ -60,6 +60,7 @@ DEFAULTS = {
     "image_gen_enabled": False,
     "comfyui_url": "http://127.0.0.1:8188",
     "lan_access": False,
+    "mobile_files": {"root": "", "read": True, "write": True, "ttl_hours": 24},
     "game_failsafe": True,
     "virustotal_api_key": "",
     "gpu_thermal_enabled": True,
@@ -83,7 +84,9 @@ DEFAULTS = {
     "voice_speaker_wav": "",
     "voice_language": "ru",
     "voice_speed": 1.0,
+    "voice_pitch": 0,
     "voice_auto_speak": False,
+    "plugin_settings": {},
     "remote": {
         "auto_start": False,
         "code_ttl": 28800,

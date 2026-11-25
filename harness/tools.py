@@ -1488,7 +1488,11 @@ class Toolkit:
             if not prompt:
                 return {"ok": False, "error": "нужен prompt для LAN LLM"}
             return cluster.query_remote_llm(prompt, node_url=node_url)
-        return {"ok": False, "error": "неизвестное действие: %s (status|map|bench|llm)" % act}
+        if act == "rpc_start":
+            return cluster.start_rpc_server(port=int(kw.get("port") or 50052))
+        if act == "rpc_stop":
+            return cluster.stop_rpc_server()
+        return {"ok": False, "error": "неизвестное действие: %s (status|map|bench|llm|rpc_start|rpc_stop)" % act}
 
     def rag_search(self, query=None, top_k=5, **kw):
         from . import rag as rag_mod
@@ -1519,9 +1523,15 @@ class Toolkit:
             return ut.generate_synthetic_dataset(kw.get("topic", ""), kw.get("count", 10), kw.get("name", "synthetic_sft.jsonl"), cfg=self.cfg)
         if act == "eval":
             return ut.eval_adapter(kw.get("adapter_dir", ""), kw.get("prompt", ""))
+        if act == "layers":
+            return ut.inspect_model_layers(kw.get("model", ""))
+        if act == "quantize":
+            return ut.quantize_gguf_standalone(kw.get("input_gguf", ""), output_gguf=kw.get("output_gguf", ""), quant_type=kw.get("quant_type", "Q4_K_M"))
+        if act == "hf_search":
+            return ut.search_hf_models(kw.get("query", ""))
         if act == "start":
             return ut.start_training(kw)
-        return {"ok": False, "error": "неизвестное действие: %s (env|datasets|script|start|status|stop|install)" % act}
+        return {"ok": False, "error": "неизвестное действие: %s (env|datasets|script|start|status|stop|install|layers|quantize|hf_search)" % act}
 
     def dataset_from_sessions(self, name="sessions_sft.jsonl", max_sessions=100, **kw):
         from . import unsloth_trainer as ut

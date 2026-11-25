@@ -4,7 +4,7 @@
 > tool use (shell, files, browser via CDP, multi-engine web search), goal mode with
 > automatic context compaction, session history with Markdown export, Windows build via PyInstaller.
 >
-> **Quick start (Windows):** download `LocalHarness-Setup-v1.0.6.exe` from
+> **Quick start (Windows):** download `LocalHarness-Setup-v1.0.8.exe` from
 > [Releases](https://github.com/lenovolquser15-ai/Local-AI-IDE/releases) (or use the portable zip),
 > install LM Studio and load a model. The UI opens at `http://127.0.0.1:7788`.
 > From source: Python 3.10+, deps from `requirements.txt`, `python -m harness serve`.
@@ -12,23 +12,25 @@
 >
 > **Telegram-канал:** [t.me/RemingOstai](https://t.me/RemingOstai)
 
-## Скриншоты
+## Скриншоты (v1.0.8)
 
-![Чат: сессии, датчик GPU, голосовой ввод/озвучка, шкала контекста, траектория](docs/screenshots/ui-chat.png)
+![Чат: сессии, персоны агента, датчик GPU, голосовой созвон и шкала контекста](docs/screenshots/ui-chat.png)
 
-![Дашборд системы: живые Canvas-графики температуры GPU, загрузки, VRAM, RAM и CPU](docs/screenshots/ui-dashboard.png)
+![LoRA & Unsloth Studio 3.0: дообучение Unsloth 4-bit QLoRA + Universal PEFT (CUDA/ROCm/CPU), инспектор слоёв, HF Hub и GGUF-квантизатор](docs/screenshots/ui-train.png)
 
-![Wi-Fi Кластер: подключение телефонов по QR-коду, распределение нагрузки и LAN LLM-узлы](docs/screenshots/ui-cluster.png)
+![Голосовой созвон 2.0: студийный Edge Neural 24 кГц / XTTS v2, потоковая речь по предложениям и вызов любых инструментов](docs/screenshots/ui-voice-call.png)
+
+![Дашборд системы 2.0: 60-минутные графики с тултипами, энергопотребление GPU, tok/s, сеть/диск, топ процессов и экспорт CSV](docs/screenshots/ui-dashboard.png)
+
+![Wi-Fi Кластер 2.0: мобильные воркеры по QR, авто-опрос LAN LLM-узлов и нативный llama.cpp ggml-rpc-server](docs/screenshots/ui-cluster.png)
+
+![Плагины 2.0: горячее редактирование кода, интерактивный запуск инструментов, настройки плагинов и авторский GGUF Toolkit](docs/screenshots/ui-plugins.png)
+
+![Светлая тема интерфейса](docs/screenshots/ui-light.png)
 
 ![Планировщик и Автоматизации: расписание промптов агента и команд Shell](docs/screenshots/ui-schedule.png)
 
-![Настройки в шторке: термозащита GPU, Obscura stealth-поиск, .zip бэкап, память и удалённый доступ](docs/screenshots/ui-settings.png)
-
-![Мобильный и удалённый доступ: адрес, временный код и QR](docs/screenshots/ui-lan.png)
-
-![Вкладка плагинов: установленные, включая Codex Security, мастерская и каталог](docs/screenshots/ui-plugins.png)
-
-![Конвертер: любой GitHub-репозиторий в плагин с живыми инструментами](docs/screenshots/ui-converter.png)
+![Настройки в шторке: Голос 2.0 (запись WAV-клона с микрофона, скорость и тон), локальная база знаний RAG, MCP-серверы и термозащита GPU](docs/screenshots/ui-settings.png)
 
 <details>
 <summary>Архив: скриншоты версии 1.0.5</summary>
@@ -66,7 +68,7 @@
 
 | как | что делает |
 |---|---|
-| `LocalHarness-Setup-v1.0.6.exe` (из Releases) | установщик: без прав администратора, ярлык в меню Пуск, опциональный автозапуск; обновление и удаление не трогают `data` и `config.json` |
+| `LocalHarness-Setup-v1.0.8.exe` (из Releases) | установщик: без прав администратора, ярлык в меню Пуск, опциональный автозапуск; обновление и удаление не трогают `data` и `config.json` |
 | `LocalHarness.exe` (после сборки) или `lh.cmd` | поднимает сервер на `127.0.0.1:7788` и открывает окно Chrome в режиме приложения |
 | `python -m harness serve` | то же из исходников |
 | `python -m harness cli "сделай X"` | разовый запрос в терминале |

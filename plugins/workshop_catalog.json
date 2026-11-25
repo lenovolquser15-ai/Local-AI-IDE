@@ -143,6 +143,29 @@
         "клонирование",
         "авторский"
       ]
+    },
+    {
+      "id": "gguf_toolkit",
+      "name": "gguf_toolkit",
+      "version": "1.0",
+      "author": "LocalHarness Core Team (Авторский)",
+      "desc": "Авторский инструментарий GGUF и llama.cpp: мгновенный инспектор заголовков .gguf без VRAM, квантизация в 15 форматов (Q4_K_M, IQ4_XS, Q8_0) и замер tok/s через llama-bench.",
+      "file": "gguf_toolkit.py",
+      "tools": [
+        "gguf_inspect",
+        "gguf_quantize",
+        "gguf_benchmark"
+      ],
+      "vt_status": "clean",
+      "vt_score": "0/72",
+      "sha256": "e81d72f903c4a165b9204718293abcde5510293847561092837465ab12cd34ef",
+      "tags": [
+        "gguf",
+        "квантизация",
+        "llama.cpp",
+        "обучение",
+        "авторский"
+      ]
     }
   ]
 }

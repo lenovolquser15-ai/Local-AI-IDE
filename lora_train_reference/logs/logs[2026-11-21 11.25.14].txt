@@ -1,0 +1,2 @@
+[2026-11-21 11.25.14] ИНФО: Приложение запущено
+[2026-11-21 11.25.14] ИНФО: Перезапуск в venv: E:\local-LORA-train-llm-script-main\.venv\Scripts\python.exe

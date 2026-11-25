@@ -407,7 +407,11 @@
               <option value="2">2 мин</option>
               <option value="5">5 мин</option>
               <option value="10" selected>10 мин</option>
+              <option value="30">30 мин</option>
+              <option value="60">60 мин</option>
             </select>
+            <button id="dashExportCsvBtn" class="ghost small-btn" type="button" title="Скачать историю телеметрии в CSV">📥 CSV</button>
+            <button id="dashResetBtn" class="ghost small-btn" type="button" title="Сбросить счётчики сессии">↺ Сброс</button>
             <button id="dashRefreshBtn" class="ghost" type="button">Обновить</button>
           </div>
         </div>
@@ -434,14 +438,24 @@
             <div class="dash-card-sub" id="dashCpuCores">— ядер</div>
           </div>
           <div class="dash-card">
+            <div class="dash-card-title">Скорость LLM</div>
+            <div class="dash-card-val" id="dashTps">— tok/s</div>
+            <div class="dash-card-sub" id="dashTpsSub">пик: —</div>
+          </div>
+          <div class="dash-card">
             <div class="dash-card-title">Токены</div>
             <div class="dash-card-val" id="dashTokens">0</div>
             <div class="dash-card-sub" id="dashTokensSub">сгенерировано</div>
           </div>
           <div class="dash-card">
-            <div class="dash-card-title">Сессии</div>
+            <div class="dash-card-title">Сессии и Инстр.</div>
             <div class="dash-card-val" id="dashSessions">0</div>
-            <div class="dash-card-sub" id="dashSessionsSub">запросов</div>
+            <div class="dash-card-sub" id="dashSessionsSub">инстр.: 0</div>
+          </div>
+          <div class="dash-card">
+            <div class="dash-card-title">Диск и Сеть</div>
+            <div class="dash-card-val" id="dashDiskNet">-- ГБ</div>
+            <div class="dash-card-sub" id="dashDiskNetSub">↓0 ↑0 КБ/с</div>
           </div>
         </div>
 
@@ -489,10 +503,32 @@
             <span class="dash-peak-val" id="dashAvgGpu">--°C</span>
           </div>
           <div class="dash-peak">
+            <span class="dash-peak-label">Средн. tok/s:</span>
+            <span class="dash-peak-val" id="dashAvgTps">—</span>
+          </div>
+          <div class="dash-peak">
+            <span class="dash-peak-label">Вызовов инстр.:</span>
+            <span class="dash-peak-val" id="dashToolCalls">0</span>
+          </div>
+          <div class="dash-peak">
             <span class="dash-peak-label">Загрузок модели:</span>
             <span class="dash-peak-val" id="dashModelLoads">0</span>
           </div>
         </div>
+
+        <div class="cluster-box" style="margin-top:12px;">
+          <div class="plate-title-row">
+            <div class="plate-title">⚙️ Топ процессов системы (RAM / CPU)</div>
+            <span class="page-sub">наведи курсор на графики выше для просмотра точных значений</span>
+          </div>
+          <div class="dash-proc-wrap">
+            <table class="dash-proc-table">
+              <thead><tr><th>PID</th><th>Процесс</th><th>Память (МБ)</th><th>RAM %</th><th>CPU %</th></tr></thead>
+              <tbody id="dashProcBody"><tr><td colspan="5" class="page-sub">Загрузка процессов…</td></tr></tbody>
+            </table>
+          </div>
+        </div>
+        <div id="dashTooltip" class="dash-tooltip" hidden></div>
       </div>
     </section>
 
@@ -554,6 +590,25 @@
             </div>
             <div id="clusterScanStatus" class="page-sub"></div>
             <div id="clusterLlmList" class="cluster-list"></div>
+            <div class="urlrow" style="margin-top:8px;">
+              <input type="text" id="clusterTestPrompt" class="field grow" placeholder="💬 Проверить активный узел (напр. Ответь в 1 предложении кто ты)…">
+              <button id="clusterTestNodeBtn" class="ghost small-btn" type="button">Тест LLM</button>
+            </div>
+            <div id="clusterTestOut" class="page-sub" style="margin-top:4px;"></div>
+          </div>
+        </div>
+
+        <div class="cluster-box" id="clusterRpcBox">
+          <div class="plate-title-row">
+            <div class="plate-title">🔗 Нативный Tensor-Parallel RPC узел (llama.cpp ggml-rpc-server)</div>
+            <span class="sec-chip" id="clusterRpcChip">проверка…</span>
+          </div>
+          <div class="page-sub">Позволяет расшарить VRAM/RAM этого компьютера в локальную сеть для распределения слоёв больших GGUF-моделей между несколькими ПК через <code>llama-server --rpc</code>.</div>
+          <div class="urlrow" style="margin-top:8px;">
+            <input type="number" id="clusterRpcPort" class="field" style="max-width:110px;" min="1024" max="65535" value="50052" title="TCP порт RPC">
+            <input type="text" id="clusterRpcCliHint" class="field grow monospace" readonly placeholder="llama-server -m model.gguf --rpc ...">
+            <button id="clusterRpcStartBtn" class="primary small-btn" type="button">▶ Запустить RPC</button>
+            <button id="clusterRpcStopBtn" class="danger small-btn" type="button" disabled>🛑 Стоп</button>
           </div>
         </div>
 
@@ -623,11 +678,11 @@
       <div class="page-inner sched-page">
         <div class="page-head">
           <div class="page-head-text">
-            <div class="page-title">🧬 Unsloth Fine-Tuning Studio</div>
-            <div class="page-sub">Локальное дообучение моделей в 2× быстрее и на 70% меньше VRAM (4-bit QLoRA · SFT / GRPO / DPO · экспорт GGUF)</div>
+            <div class="page-title">🧬 LoRA &amp; Unsloth Studio 3.0</div>
+            <div class="page-sub">Профессиональное дообучение моделей: Unsloth 4-bit QLoRA + Universal PEFT (NVIDIA CUDA · AMD ROCm · CPU) + Инспектор слоёв + Квантизатор GGUF</div>
           </div>
           <span class="grow"></span>
-          <button id="trainEnvCheckBtn" class="ghost" type="button">🔄 Проверить CUDA / Unsloth</button>
+          <button id="trainEnvCheckBtn" class="ghost" type="button">🔄 Проверить окружение</button>
         </div>
 
         <div class="cluster-box">
@@ -669,25 +724,34 @@
 
         <div class="cluster-box">
           <div class="plate-title-row">
-            <div class="plate-title">3. Параметры обучения (Unsloth 4-bit QLoRA)</div>
+            <div class="plate-title">3. Параметры обучения (Unsloth QLoRA / Universal PEFT)</div>
             <div class="sched-actions">
               <span class="sec-chip" id="trainVramChip">VRAM: расчёт…</span>
+              <button id="trainInspectLayersBtn" class="ghost small-btn" type="button" title="Просканировать архитектуру модели и выбрать слои LoRA (target_modules)">🔍 Слои модели</button>
               <button id="trainAutotuneBtn" class="ghost small-btn" type="button" title="Подобрать безопасные параметры под твою GPU">⚡ Автоподбор под GPU</button>
             </div>
           </div>
           <div class="train-grid">
             <label class="tcfg-item">
-              <span>Базовая модель (Unsloth / HuggingFace)</span>
+              <span>Движок обучения</span>
+              <select id="trainBackend" class="compact">
+                <option value="auto">Авто (Unsloth → Universal PEFT)</option>
+                <option value="unsloth">Unsloth 4-bit QLoRA (NVIDIA CUDA · 2× быстрее)</option>
+                <option value="peft_universal">Universal PEFT (CUDA / AMD ROCm / CPU + OOM fallback)</option>
+              </select>
+            </label>
+            <label class="tcfg-item">
+              <span>Базовая модель (Пресеты + Локальные)</span>
               <select id="trainModelPreset" class="compact"></select>
             </label>
             <label class="tcfg-item">
-              <span>Свой ID модели (опционально)</span>
-              <input type="text" id="trainModelCustom" class="field" placeholder="unsloth/Qwen3-4B-bnb-4bit">
+              <span>Свой ID или путь к папке модели</span>
+              <input type="text" id="trainModelCustom" class="field" placeholder="unsloth/Qwen3-4B-bnb-4bit или C:\Models\Qwen">
             </label>
             <label class="tcfg-item">
               <span>Метод обучения</span>
               <select id="trainMethod" class="compact">
-                <option value="sft">SFT (Инструкции / LoRA 4-bit)</option>
+                <option value="sft">SFT (Инструкции / Мульти-диалог с маской -100)</option>
                 <option value="grpo">GRPO (Reasoning RL — как DeepSeek-R1)</option>
                 <option value="dpo">DPO (Выравнивание предпочтений)</option>
                 <option value="vision">Vision SFT (FastVisionModel · VLM)</option>
@@ -711,17 +775,47 @@
             </label>
             <label class="tcfg-item">
               <span>Контекст (max_seq_length)</span>
-              <input type="number" id="trainMaxSeq" class="field" min="512" max="16384" value="2048">
+              <input type="number" id="trainMaxSeq" class="field" min="256" max="16384" value="2048">
             </label>
             <label class="tcfg-item">
-              <span>GGUF квантование</span>
+              <span>GGUF квантование (15 форматов)</span>
               <select id="trainGgufQuant" class="compact">
-                <option value="q4_k_m">q4_k_m (оптимально для 8 ГБ)</option>
-                <option value="q8_0">q8_0 (высокое качество)</option>
-                <option value="f16">f16 (без сжатия)</option>
+                <option value="q4_k_m">Q4_K_M — оптимальный баланс (рекомендуется)</option>
+                <option value="q5_k_m">Q5_K_M — повышенная точность</option>
+                <option value="q6_k">Q6_K — почти без потерь</option>
+                <option value="q8_0">Q8_0 — максимальное качество 8-bit</option>
+                <option value="iq4_xs">IQ4_XS — компактный 4-bit</option>
+                <option value="q4_k_s">Q4_K_S — быстрый 4-bit</option>
+                <option value="q5_k_s">Q5_K_S — компактный 5-bit</option>
+                <option value="q3_k_m">Q3_K_M — для малого VRAM</option>
+                <option value="q3_k_l">Q3_K_L — 3-bit расширенный</option>
+                <option value="q2_k">Q2_K — экстремальное сжатие</option>
+                <option value="f16">F16 — оригинал 16-bit</option>
+                <option value="bf16">BF16 — оригинал BFloat16</option>
               </select>
             </label>
           </div>
+
+          <div id="trainLayersBox" class="train-layers-box" hidden>
+            <div class="plate-title-row">
+              <span class="page-sub"><b id="trainLayersArch">Целевые слои LoRA (target_modules):</b></span>
+              <div class="sched-actions">
+                <button type="button" id="trainLayersAllBtn" class="ghost small-btn">Все реком.</button>
+                <button type="button" id="trainLayersAttnBtn" class="ghost small-btn">Только Attention</button>
+              </div>
+            </div>
+            <div id="trainLayersChecks" class="train-layers-checks"></div>
+          </div>
+
+          <details class="remote-adv" style="margin-top:8px;">
+            <summary>🤗 Поиск и многопоточное скачивание базовых моделей с HuggingFace Hub</summary>
+            <div class="urlrow" style="margin-top:8px;">
+              <input type="text" id="trainHfQuery" class="field grow" placeholder="Поиск модели на HuggingFace (напр. Qwen2.5-3B-Instruct, SmolLM2, Llama-3.2)…">
+              <input type="number" id="trainHfMaxB" class="field" style="max-width:95px;" min="0" max="70" step="0.5" placeholder="Макс B (8)">
+              <button type="button" id="trainHfSearchBtn" class="ghost small-btn">🔎 Найти</button>
+            </div>
+            <div id="trainHfResults" class="cluster-list" style="margin-top:6px;"></div>
+          </details>
           <details class="remote-adv" style="margin-top:8px;">
             <summary>⚙️ Расширенные гиперпараметры Unsloth (Batch, Chat Template, rsLoRA, Packing)</summary>
             <div class="train-grid" style="margin-top:8px;">
@@ -768,10 +862,12 @@
             <div class="plate-title">4. Прогресс, график Loss и живой лог</div>
             <span class="sec-chip" id="trainJobChip">ожидание</span>
           </div>
-          <div class="train-metrics-row">
+          <div class="train-metrics-row train-metrics-6">
             <div class="train-metric"><span>Шаг</span><b id="trainMetStep">0 / 0</b></div>
             <div class="train-metric"><span>Loss</span><b id="trainMetLoss">—</b></div>
             <div class="train-metric"><span>Эпоха</span><b id="trainMetEpoch">0.0</b></div>
+            <div class="train-metric"><span>Скорость</span><b id="trainMetSpeed">—</b></div>
+            <div class="train-metric"><span>ETA</span><b id="trainMetEta">—</b></div>
             <div class="train-metric"><span>GPU t°</span><b id="trainMetGpu">—</b></div>
           </div>
           <div class="train-progress-track"><div class="train-progress-fill" id="trainProgressFill" style="width:0%"></div></div>
@@ -790,6 +886,29 @@
             <button id="trainEvalBtn" class="ghost small-btn" type="button">🧪 Тест</button>
           </div>
           <pre id="trainEvalOut" class="train-log" style="margin-top:6px;max-height:140px;" hidden></pre>
+        </div>
+
+        <div class="cluster-box">
+          <div class="plate-title-row">
+            <div class="plate-title">6. Автономный квантизатор GGUF (llama.cpp · 15 форматов)</div>
+            <span class="sec-chip ok" id="trainQuantChip">llama-quantize готов</span>
+          </div>
+          <div class="page-sub">Сожми любой локальный <code>.gguf</code> файл (F16 / BF16 / Q8_0) в компактный формат под свою видеокарту без запуска обучения.</div>
+          <div class="urlrow" style="margin-top:8px;">
+            <input type="text" id="trainQuantInput" class="field grow" placeholder="Путь к исходному .gguf файлу (напр. C:\Models\model-f16.gguf)">
+            <select id="trainQuantType" class="compact">
+              <option value="Q4_K_M">Q4_K_M (реком.)</option>
+              <option value="Q5_K_M">Q5_K_M</option>
+              <option value="Q6_K">Q6_K</option>
+              <option value="Q8_0">Q8_0</option>
+              <option value="IQ4_XS">IQ4_XS</option>
+              <option value="Q4_K_S">Q4_K_S</option>
+              <option value="Q3_K_M">Q3_K_M</option>
+              <option value="Q2_K">Q2_K</option>
+            </select>
+            <button id="trainQuantBtn" class="primary small-btn" type="button">⚙️ Квантовать</button>
+          </div>
+          <div id="trainQuantStatus" class="page-sub" style="margin-top:6px;"></div>
         </div>
       </div>
     </section>
@@ -948,20 +1067,29 @@
     </div>
     <div class="settings-block" id="voiceSettingsBlock">
       <div class="plate-title-row">
-        <div class="plate-title">Голосовой движок (XTTS v2 / Созвон)</div>
+        <div class="plate-title">Голосовой движок 2.0 (Edge Neural / XTTS v2)</div>
         <span class="sec-chip" id="voiceEngineChip">auto</span>
       </div>
-      <div class="page-sub">Поддерживает локальный Coqui XTTS v2 (клонирование голоса по WAV) и встроенный офлайн Windows SAPI5.</div>
+      <div class="page-sub">Поддерживает студийные нейронные голоса Microsoft Edge Neural (24 кГц), клонирование голоса Coqui XTTS v2 и офлайн Windows SAPI5.</div>
       <div class="urlrow" style="margin-top:8px;">
         <select id="voiceEngineSelect" class="compact">
-          <option value="auto">Авто (XTTS v2 → SAPI5)</option>
-          <option value="xtts">XTTS v2 сервер</option>
-          <option value="sapi">Windows SAPI5 (офлайн)</option>
+          <option value="auto">Авто (XTTS v2 → Edge Neural → SAPI5)</option>
+          <option value="edge">Edge Neural TTS (Студийный 24 кГц)</option>
+          <option value="xtts">XTTS v2 сервер (Клон голоса)</option>
+          <option value="sapi">Windows SAPI5 (Офлайн)</option>
         </select>
         <select id="voiceLangSelect" class="compact">
           <option value="ru">Русский (ru)</option>
           <option value="en">English (en)</option>
         </select>
+      </div>
+      <div class="urlrow" style="margin-top:6px;">
+        <label class="page-sub" style="display:flex;align-items:center;gap:6px;flex:1;">Скорость <b id="voiceSpeedVal">1.0×</b>
+          <input type="range" id="voiceSpeedRange" min="0.6" max="1.8" step="0.05" value="1.0" style="flex:1;">
+        </label>
+        <label class="page-sub" style="display:flex;align-items:center;gap:6px;flex:1;">Тон <b id="voicePitchVal">0Hz</b>
+          <input type="range" id="voicePitchRange" min="-20" max="20" step="2" value="0" style="flex:1;">
+        </label>
       </div>
       <div class="urlrow" style="margin-top:6px;">
         <input type="text" id="voiceXttsUrl" class="field grow" placeholder="http://127.0.0.1:8020">
@@ -972,8 +1100,9 @@
         <button id="voiceTestSpeakBtn" class="ghost" type="button">🔊 Тест</button>
       </div>
       <div class="urlrow" style="margin-top:6px;">
-        <input type="text" id="voiceCloneName" class="field" style="min-width:110px;max-width:140px;" placeholder="Имя клона">
-        <label class="ghost file-pick small-btn" style="cursor:pointer;">🎙️ Загрузить WAV<input type="file" id="voiceCloneFile" accept=".wav,audio/wav" hidden></label>
+        <input type="text" id="voiceCloneName" class="field" style="min-width:95px;max-width:125px;" placeholder="Имя клона">
+        <button id="voiceRecordSampleBtn" class="ghost small-btn" type="button" title="Записать 7 секунд голоса с микрофона в WAV для клонирования">🔴 Запись WAV</button>
+        <label class="ghost file-pick small-btn" style="cursor:pointer;">🎙️ Файл<input type="file" id="voiceCloneFile" accept=".wav,audio/wav" hidden></label>
         <button id="voiceOpenCallFromDrawer" class="primary small-btn" type="button">📞 Созвон</button>
       </div>
       <div id="voiceSettingsStatus" class="page-sub" style="margin-top:4px;"></div>
@@ -1166,12 +1295,25 @@
       <span class="modal-meta" id="codeDialogMeta"></span>
     </div>
     <span class="grow"></span>
+    <button id="codeDialogSave" class="primary small-btn" type="button" hidden>💾 Сохранить и перезагрузить</button>
     <button id="codeDialogCopy" class="ghost small-btn" type="button">Копировать</button>
     <button id="codeDialogClose" class="icon" type="button" title="Закрыть">✕</button>
   </div>
   <div class="modal-body">
     <pre id="codeDialogText" class="code-modal-pre"></pre>
+    <textarea id="codeDialogEditor" class="creator-code-area" rows="18" spellcheck="false" hidden></textarea>
   </div>
+</dialog>
+<dialog id="plugToolDialog" class="code-modal">
+  <div class="modal-head">
+    <div class="modal-head-text">
+      <span class="modal-title" id="plugToolDialogTitle">Плагин</span>
+      <span class="modal-meta" id="plugToolDialogMeta">инструменты и настройки</span>
+    </div>
+    <span class="grow"></span>
+    <button id="plugToolDialogClose" class="icon" type="button" title="Закрыть">✕</button>
+  </div>
+  <div class="modal-body" id="plugToolDialogBody" style="display:flex;flex-direction:column;gap:12px;"></div>
 </dialog>
 <dialog id="gpuThermalDialog" class="code-modal thermal-modal">
   <div class="modal-head">
@@ -1281,8 +1423,18 @@
       <div class="call-tool-pill" id="callToolPill" hidden></div>
     </div>
     <div class="call-settings-bar">
-      <select id="callVoiceSelect" class="compact grow" title="Голос собеседника (XTTS v2 / SAPI5)"></select>
+      <select id="callVoiceSelect" class="compact grow" title="Голос собеседника (Edge Neural / XTTS v2 / SAPI5)"></select>
+      <select id="callSpeedSelect" class="compact" title="Темп речи в звонке">
+        <option value="0.9">0.9×</option>
+        <option value="1.0" selected>1.0×</option>
+        <option value="1.15">1.15×</option>
+        <option value="1.3">1.3×</option>
+      </select>
       <select id="callPersonaSelect" class="compact" title="Персона агента в звонке"></select>
+      <label class="check-pill" title="Озвучивать предложения сразу по мере генерации без ожидания конца ответа">
+        <input type="checkbox" id="callStreamToggle" checked>
+        <span>⚡ Поток</span>
+      </label>
       <label class="check-pill" title="Автоматически слушать после ответа агента">
         <input type="checkbox" id="callHandsFree" checked>
         <span>Hands-Free</span>
