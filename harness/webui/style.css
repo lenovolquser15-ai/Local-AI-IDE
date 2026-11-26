@@ -2852,3 +2852,115 @@ html[data-theme="light"] .cbench-cnt {
   border-color: var(--accent);
   color: var(--text-1);
 }
+
+/* ---------- IDE Workspace File Explorer & Slash Command Palette ---------- */
+.ide-split {
+  display: grid;
+  grid-template-columns: 300px minmax(0, 1fr);
+  gap: 14px;
+  min-height: 68vh;
+}
+@media (max-width: 860px) {
+  .ide-split { grid-template-columns: 1fr; }
+}
+.ide-tree-box, .ide-editor-box {
+  background: var(--layer-1);
+  border: 1px solid var(--l1);
+  border-radius: 14px;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ide-crumbs {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--accent);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+  background: var(--layer-2);
+}
+.ide-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  max-height: 60vh;
+}
+.ide-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  font-size: 12.8px;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.ide-item:hover, .ide-item.active {
+  background: var(--layer-2);
+  color: var(--text-1);
+}
+.ide-editor-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--l1);
+}
+.ide-textarea {
+  flex: 1;
+  min-height: 56vh;
+  width: 100%;
+  resize: vertical;
+  border-radius: 10px;
+  border: 1px solid var(--l1);
+  background: var(--code-bg);
+  color: var(--text-1);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 12px;
+}
+.slash-menu {
+  margin-bottom: 6px;
+  background: var(--layer-2);
+  border: 1px solid var(--l2);
+  border-radius: 12px;
+  padding: 6px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, .28);
+}
+.slash-item {
+  background: var(--layer-1);
+  border: 1px solid var(--l1);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--text-1);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.slash-item:hover {
+  border-color: var(--accent);
+}
+.slash-item code {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-weight: 600;
+}
+.call-live-interim {
+  font-size: 12.5px;
+  color: var(--accent);
+  font-style: italic;
+  max-width: 90%;
+  text-align: center;
+  margin-top: 2px;
+}

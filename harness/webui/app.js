@@ -861,6 +861,7 @@ function setView(name) {
   if ($('#viewCluster')) $('#viewCluster').hidden = name !== 'cluster';
   if ($('#viewSchedule')) $('#viewSchedule').hidden = name !== 'schedule';
   if ($('#viewTrain')) $('#viewTrain').hidden = name !== 'train';
+  if ($('#viewFiles')) $('#viewFiles').hidden = name !== 'files';
   const composer = document.querySelector('.composer');
   if (composer) composer.style.display = chat ? '' : 'none';
   const quick = document.querySelector('.quick-controls');
@@ -883,6 +884,9 @@ function setView(name) {
     if (typeof refreshTrain === 'function') refreshTrain(true);
   } else if (typeof trainTimer !== 'undefined' && trainTimer) {
     clearTimeout(trainTimer); trainTimer = null;
+  }
+  if (name === 'files' && typeof refreshIdeFiles === 'function') {
+    refreshIdeFiles();
   }
 }
 
@@ -5202,28 +5206,40 @@ function callStartListening() {
   const rec = new SpeechRec();
   const lang = ($('#voiceLangSelect') && $('#voiceLangSelect').value) || 'ru';
   rec.lang = lang === 'en' ? 'en-US' : 'ru-RU';
-  rec.interimResults = false;
+  rec.interimResults = true;
   rec.continuous = false;
   voiceCallRec = rec;
   voiceCallRecording = true;
   if ($('#callMicBtn')) $('#callMicBtn').classList.add('recording');
-  setCallState('listening', pendingCallAsk ? 'Слушаю ваш ответ…' : 'Слушаю вас…');
+  if ($('#callLiveInterim')) { $('#callLiveInterim').hidden = true; $('#callLiveInterim').textContent = ''; }
+  setCallState('listening', pendingCallAsk ? 'Слушаю ваш ответ…' : 'Слушаю вас (говорите)…');
 
   let captured = '';
   rec.onresult = (ev) => {
+    let finalChunk = '';
+    let interimChunk = '';
     for (let i = 0; i < ev.results.length; i++) {
-      captured += ev.results[i][0].transcript;
+      if (ev.results[i].isFinal) finalChunk += ev.results[i][0].transcript;
+      else interimChunk += ev.results[i][0].transcript;
+    }
+    captured = finalChunk || interimChunk;
+    if ($('#callLiveInterim')) {
+      const liveTxt = (finalChunk + ' ' + interimChunk).trim();
+      $('#callLiveInterim').textContent = liveTxt ? ('🎙️ «' + liveTxt + '»') : '';
+      $('#callLiveInterim').hidden = !liveTxt;
     }
   };
   rec.onerror = (ev) => {
+    if ($('#callLiveInterim')) $('#callLiveInterim').hidden = true;
     setCallState('idle', 'Микрофон: ' + (ev.error || 'пауза'));
   };
   rec.onend = async () => {
     voiceCallRecording = false;
     if ($('#callMicBtn')) $('#callMicBtn').classList.remove('recording');
+    if ($('#callLiveInterim')) $('#callLiveInterim').hidden = true;
     const text = captured.trim();
     if (!text) {
-      if (voiceCallActive) setCallState('idle', 'Ничего не услышал — нажми 🎤');
+      if (voiceCallActive) setCallState('idle', 'Ничего не услышал — нажми 🎤 или Пробел');
       return;
     }
     callSendPrompt(text);
@@ -5600,13 +5616,25 @@ async function refreshTrain(checkEnv) {
               $('#codeDialogText').textContent = JSON.stringify(pv.samples, null, 2);
             }
           };
+          const cleanBtn = node('button', 'ghost small-btn', '🧹 Очистка');
+          cleanBtn.type = 'button';
+          cleanBtn.title = 'Проверить JSONL, удалить дубликаты и посчитать статистику токенов';
+          cleanBtn.onclick = async () => {
+            const cr = await api('/api/train/dataset/clean', { name: d.name });
+            if (cr && cr.ok) {
+              pushNotice('🧹 ' + cr.name + ' (' + cr.format + '): ' + cr.before + ' → ' + cr.after + ' строк (дублей: ' + cr.removed_duplicates + ', ср. ~' + cr.avg_tokens + ' ток.)', 'ok');
+              refreshTrain(false);
+            } else {
+              pushNotice((cr && cr.error) || 'Ошибка очистки датасета', 'bad');
+            }
+          };
           const delBtn = node('button', 'ghost small-btn danger-text', '✕');
           delBtn.type = 'button';
           delBtn.onclick = async () => {
             await api('/api/train/dataset/delete', { name: d.name });
             refreshTrain(false);
           };
-          acts.append(prevBtn, delBtn);
+          acts.append(prevBtn, cleanBtn, delBtn);
           row.append(acts);
           dsList.append(row);
         });
@@ -5923,6 +5951,270 @@ if ($('#trainQuantBtn')) {
       $('#trainQuantBtn').disabled = false;
     }
   };
+}
+if ($('#trainBenchGgufBtn')) {
+  $('#trainBenchGgufBtn').onclick = async () => {
+    const gguf_path = ($('#trainQuantInput') && $('#trainQuantInput').value.trim()) || '';
+    const stEl = $('#trainQuantStatus');
+    if (!gguf_path) { pushNotice('Укажи путь к .gguf файлу для замера скорости', 'warn'); return; }
+    if (stEl) stEl.textContent = '⚡ Запуск llama-bench на ' + gguf_path + '…';
+    $('#trainBenchGgufBtn').disabled = true;
+    try {
+      const r = await api('/api/train/benchmark_gguf', { gguf_path });
+      if (r && r.ok) {
+        if (stEl) stEl.textContent = '⚡ ' + r.size_mb + ' МБ · Prompt (pp128): ' + (r.pp128_tps || '—') + ' tok/s · Генерация (tg64): ' + (r.tg64_tps || '—') + ' tok/s' + (r.gpu_info ? (' · ' + r.gpu_info) : '');
+        pushNotice('⚡ Скорость генерации: ' + (r.tg64_tps || '—') + ' tok/s', 'ok');
+      } else if (stEl) {
+        stEl.textContent = '❌ ' + ((r && r.error) || 'Ошибка бенчмарка');
+      }
+    } catch (err) {
+      if (stEl) stEl.textContent = '❌ ' + err.message;
+    } finally {
+      $('#trainBenchGgufBtn').disabled = false;
+    }
+  };
+}
+
+/* ---------- IDE Workspace File Explorer (#viewFiles) & Slash-Command Palette ---------- */
+let ideCurDir = '';
+let ideCurFile = '';
+let ideCurRev = null;
+let ideRootAbs = '';
+
+async function refreshIdeFiles(dirPath) {
+  if (dirPath !== undefined) ideCurDir = dirPath;
+  try {
+    const st = await api('/api/files/status');
+    if (st && st.ok) {
+      ideRootAbs = st.root || '';
+      if ($('#filesRootLabel')) $('#filesRootLabel').textContent = 'рабочая папка: ' + (st.root || 'work');
+      if ($('#filesPairChip')) {
+        if (st.lan_access && st.display) {
+          $('#filesPairChip').className = 'sec-chip ok';
+          $('#filesPairChip').textContent = '📱 Код: ' + st.display;
+          $('#filesPairChip').style.cursor = 'pointer';
+          $('#filesPairChip').onclick = () => {
+            if (st.pair_url && navigator.clipboard) navigator.clipboard.writeText(st.pair_url);
+            pushNotice('Ссылка с кодом для телефона скопирована: ' + (st.pair_url || st.display), 'ok');
+          };
+          if ($('#filesRotateCodeBtn')) $('#filesRotateCodeBtn').hidden = false;
+        } else {
+          $('#filesPairChip').className = 'sec-chip';
+          $('#filesPairChip').textContent = '📱 Wi-Fi редактор: включи LAN в Настройках';
+          if ($('#filesRotateCodeBtn')) $('#filesRotateCodeBtn').hidden = true;
+        }
+      }
+    }
+    if ($('#filesCrumbs')) {
+      $('#filesCrumbs').textContent = '📁 /' + ideCurDir + (ideCurDir ? '  (клик — вверх ↑)' : '');
+    }
+    const listing = await api('/api/files/list?path=' + encodeURIComponent(ideCurDir));
+    const box = $('#filesList');
+    if (!box) return;
+    box.innerHTML = '';
+    if (!listing || !listing.ok) {
+      box.append(node('div', 'page-sub', (listing && listing.error) || 'Ошибка чтения папки'));
+      return;
+    }
+    const entries = listing.entries || [];
+    if (!entries.length) {
+      box.append(node('div', 'page-sub', 'Папка пуста — нажми +📄 чтобы создать файл.'));
+      return;
+    }
+    entries.forEach((e) => {
+      const item = node('div', 'ide-item' + (e.path === ideCurFile ? ' active' : ''));
+      const ico = e.type === 'dir' ? '📁 ' : '📄 ';
+      const sz = e.type === 'file' ? (e.size > 1024 ? (e.size / 1024).toFixed(1) + ' КБ' : e.size + ' Б') : '';
+      item.append(node('span', null, ico + e.name), node('span', 'page-sub', sz));
+      item.onclick = () => {
+        if (e.type === 'dir') refreshIdeFiles(e.path);
+        else openIdeFile(e.path);
+      };
+      box.append(item);
+    });
+  } catch (err) {
+    if ($('#filesList')) $('#filesList').innerHTML = '<div class="page-sub">❌ ' + esc(err.message) + '</div>';
+  }
+}
+
+async function openIdeFile(relPath) {
+  try {
+    const r = await api('/api/files/read?path=' + encodeURIComponent(relPath));
+    if (!r || !r.ok) {
+      pushNotice((r && r.error) || 'Не удалось открыть файл', 'warn');
+      return;
+    }
+    ideCurFile = r.path;
+    ideCurRev = r.revision;
+    if ($('#filesCurrentPath')) $('#filesCurrentPath').textContent = r.path;
+    const linesCnt = (r.text || '').split('\n').length;
+    if ($('#filesMetaInfo')) $('#filesMetaInfo').textContent = linesCnt + ' стр. · ' + r.size + ' Б';
+    const ta = $('#filesEditorArea');
+    if (ta) { ta.disabled = false; ta.value = r.text; }
+    ['#filesSaveBtn', '#filesDeleteBtn', '#filesAskAiBtn', '#filesIndexRagBtn'].forEach((s) => {
+      if ($(s)) $(s).disabled = false;
+    });
+    refreshIdeFiles();
+  } catch (err) {
+    pushNotice(err.message, 'bad');
+  }
+}
+
+if ($('#filesCrumbs')) {
+  $('#filesCrumbs').onclick = () => {
+    if (!ideCurDir) return;
+    const parts = ideCurDir.split('/');
+    parts.pop();
+    refreshIdeFiles(parts.join('/'));
+  };
+}
+if ($('#filesRefreshBtn')) $('#filesRefreshBtn').onclick = () => refreshIdeFiles();
+if ($('#filesRotateCodeBtn')) {
+  $('#filesRotateCodeBtn').onclick = async () => {
+    await api('/api/files/rotate', {});
+    pushNotice('🔄 Код сопряжения мобильного редактора обновлён', 'ok');
+    refreshIdeFiles();
+  };
+}
+if ($('#filesSaveBtn')) {
+  $('#filesSaveBtn').onclick = async () => {
+    if (!ideCurFile || !$('#filesEditorArea')) return;
+    const text = $('#filesEditorArea').value;
+    const r = await api('/api/files/save', { path: ideCurFile, text, revision: ideCurRev });
+    if (r && r.ok) {
+      ideCurRev = r.revision;
+      if ($('#filesMetaInfo')) $('#filesMetaInfo').textContent = '✓ сохранено · ' + r.size + ' Б';
+      pushNotice('💾 Файл сохранён: ' + ideCurFile, 'ok');
+    } else {
+      pushNotice((r && r.error) || 'Ошибка сохранения', 'bad');
+    }
+  };
+}
+if ($('#filesNewFileBtn')) {
+  $('#filesNewFileBtn').onclick = async () => {
+    const name = prompt('Имя нового файла:', 'script.py');
+    if (!name || !name.trim()) return;
+    const rel = (ideCurDir ? ideCurDir + '/' : '') + name.trim();
+    const r = await api('/api/files/save', { path: rel, text: '', revision: null });
+    if (r && r.ok) {
+      await refreshIdeFiles();
+      openIdeFile(rel);
+    } else {
+      pushNotice((r && r.error) || 'Ошибка создания файла', 'bad');
+    }
+  };
+}
+if ($('#filesNewDirBtn')) {
+  $('#filesNewDirBtn').onclick = async () => {
+    const name = prompt('Имя новой папки:', 'new_folder');
+    if (!name || !name.trim()) return;
+    const rel = (ideCurDir ? ideCurDir + '/' : '') + name.trim();
+    const r = await api('/api/files/mkdir', { path: rel });
+    if (r && r.ok) refreshIdeFiles(rel);
+    else pushNotice((r && r.error) || 'Ошибка создания папки', 'bad');
+  };
+}
+if ($('#filesDeleteBtn')) {
+  $('#filesDeleteBtn').onclick = async () => {
+    if (!ideCurFile || !confirm('Удалить файл ' + ideCurFile + '?')) return;
+    const r = await api('/api/files/delete', { path: ideCurFile });
+    if (r && r.ok) {
+      ideCurFile = '';
+      ideCurRev = null;
+      if ($('#filesEditorArea')) { $('#filesEditorArea').value = ''; $('#filesEditorArea').disabled = true; }
+      if ($('#filesCurrentPath')) $('#filesCurrentPath').textContent = 'Выберите файл слева';
+      ['#filesSaveBtn', '#filesDeleteBtn', '#filesAskAiBtn', '#filesIndexRagBtn'].forEach((s) => { if ($(s)) $(s).disabled = true; });
+      refreshIdeFiles();
+    } else {
+      pushNotice((r && r.error) || 'Ошибка удаления', 'bad');
+    }
+  };
+}
+if ($('#filesAskAiBtn')) {
+  $('#filesAskAiBtn').onclick = () => {
+    if (!ideCurFile || !$('#filesEditorArea')) return;
+    const snippet = $('#filesEditorArea').value.slice(0, 6000);
+    setView('chat');
+    if ($('#input')) {
+      $('#input').value = 'Разбери и улучши файл `' + ideCurFile + '`:\n```\n' + snippet + '\n```\n';
+      $('#input').focus();
+    }
+  };
+}
+if ($('#filesIndexRagBtn')) {
+  $('#filesIndexRagBtn').onclick = async () => {
+    if (!ideCurFile || !ideRootAbs) return;
+    const fullPath = ideRootAbs.replace(/[\\/]+$/, '') + '/' + ideCurFile;
+    const r = await api('/api/rag/index', { path: fullPath });
+    pushNotice(r && r.ok ? ('📚 Файл добавлен в базу знаний RAG (' + r.chunks_count + ' чанков)') : ((r && r.error) || 'Ошибка RAG'), r && r.ok ? 'ok' : 'bad');
+  };
+}
+if ($('#filesSearchInput')) {
+  $('#filesSearchInput').oninput = async (e) => {
+    const q = e.target.value.trim();
+    if (!q) { refreshIdeFiles(); return; }
+    const r = await api('/api/files/search?q=' + encodeURIComponent(q));
+    const box = $('#filesList');
+    if (!box) return;
+    box.innerHTML = '';
+    (r.matches || []).forEach((m) => {
+      const item = node('div', 'ide-item');
+      item.append(node('span', null, '📄 ' + m.path));
+      item.onclick = () => openIdeFile(m.path);
+      box.append(item);
+    });
+  };
+}
+
+// Global Ctrl+S in IDE Files view + Spacebar Push-to-Talk in Voice Call
+document.addEventListener('keydown', (e) => {
+  if (currentView === 'files' && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    if ($('#filesSaveBtn') && !$('#filesSaveBtn').disabled) $('#filesSaveBtn').click();
+    return;
+  }
+  if (voiceCallActive && e.code === 'Space' && document.activeElement && !['INPUT', 'TEXTAREA', 'SELECT'].includes(document.activeElement.tagName)) {
+    e.preventDefault();
+    callStartListening();
+  }
+});
+
+// Interactive Slash-Command Palette when typing "/" in #input
+const SLASH_COMMANDS = [
+  { cmd: '/goal ', desc: '🎯 Режим автономной цели', run: (inp) => { inp.value = '/goal '; inp.focus(); } },
+  { cmd: '/rag', desc: '📚 Открыть поиск по базе знаний', run: () => { if ($('#gearBtn')) $('#gearBtn').click(); setTimeout(() => $('#ragQueryInput')?.focus(), 200); } },
+  { cmd: '/voice', desc: '📞 Начать голосовой созвон 2.0', run: () => { $('#input').value = ''; openVoiceCall(); } },
+  { cmd: '/train', desc: '🧬 Открыть LoRA & Unsloth Studio 3.0', run: () => { $('#input').value = ''; setView('train'); } },
+  { cmd: '/files', desc: '📁 Открыть встроенный IDE Редактор', run: () => { $('#input').value = ''; setView('files'); } },
+  { cmd: '/cluster', desc: '📡 Открыть Wi-Fi Кластер и RPC', run: () => { $('#input').value = ''; setView('cluster'); } },
+  { cmd: '/clear', desc: '✨ Создать чистую сессию', run: () => { $('#input').value = ''; $('#newChat')?.click(); } },
+];
+
+if ($('#input') && $('#slashMenu')) {
+  $('#input').addEventListener('input', () => {
+    const menu = $('#slashMenu');
+    const val = $('#input').value;
+    if (!val.startsWith('/') || val.includes(' ') || val.length > 14) {
+      menu.hidden = true;
+      return;
+    }
+    const q = val.toLowerCase();
+    const hits = SLASH_COMMANDS.filter((c) => c.cmd.trim().startsWith(q));
+    if (!hits.length) { menu.hidden = true; return; }
+    menu.innerHTML = '';
+    hits.forEach((c) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'slash-item';
+      btn.innerHTML = '<code>' + c.cmd.trim() + '</code><span>' + c.desc + '</span>';
+      btn.onclick = () => {
+        menu.hidden = true;
+        c.run($('#input'));
+      };
+      menu.appendChild(btn);
+    });
+    menu.hidden = false;
+  });
 }
 if ($('#trainStartBtn')) {
   $('#trainStartBtn').onclick = async () => {

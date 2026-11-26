@@ -31,6 +31,7 @@ from . import rag as rag_mod
 from . import mcp_client as mcp_mod
 from . import voice as voice_mod
 from . import unsloth_trainer as train_mod
+from . import files as files_mod
 
 
 def _obscura_status_safe(cfg):
@@ -849,11 +850,56 @@ class Handler(BaseHTTPRequestHandler):
             self.serve_shot(query.get("path", [""])[0])
             return
 
+        if path == "/api/files/status":
+            cfg = load()
+            lan_url = "http://%s:%d" % (get_lan_ip(), int(cfg.get("port", 7788)))
+            try:
+                _json_response(self, files_mod.pair_status(cfg, self.client_address[0], self.headers, lan_url=lan_url))
+            except files_mod.FilesError as exc:
+                _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
+            return
+
+        if path == "/api/files/list":
+            cfg = load()
+            if not files_mod.authorized(self.client_address[0], self.headers, cfg, write=False):
+                _json_response(self, {"ok": False, "error": "требуется код сопряжения редактора файлов"}, 401)
+                return
+            try:
+                _json_response(self, files_mod.list_dir(cfg, query.get("path", [""])[0]))
+            except files_mod.FilesError as exc:
+                _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
+            return
+
+        if path == "/api/files/read":
+            cfg = load()
+            if not files_mod.authorized(self.client_address[0], self.headers, cfg, write=False):
+                _json_response(self, {"ok": False, "error": "требуется код сопряжения редактора файлов"}, 401)
+                return
+            try:
+                _json_response(self, files_mod.read_file(cfg, query.get("path", [""])[0]))
+            except files_mod.FilesError as exc:
+                _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
+            return
+
+        if path == "/api/files/search":
+            cfg = load()
+            if not files_mod.authorized(self.client_address[0], self.headers, cfg, write=False):
+                _json_response(self, {"ok": False, "error": "требуется код сопряжения редактора файлов"}, 401)
+                return
+            try:
+                _json_response(self, files_mod.search_files(cfg, query.get("q", [""])[0]))
+            except files_mod.FilesError as exc:
+                _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
+            return
+
         if path in ("/", "/index.html"):
             self.serve_file("webui/index.html", "text/html")
             return
         if path in ("/worker", "/worker.html"):
             self.serve_file("webui/worker.html", "text/html")
+            return
+        if path in ("/files", "/files.html"):
+            self.serve_file("webui/files.html", "text/html")
             return
         if path == "/app.js":
             self.serve_file("webui/app.js", "application/javascript")
@@ -977,6 +1023,14 @@ class Handler(BaseHTTPRequestHandler):
             "/api/train/hf/search": self.handle_train_hf_search,
             "/api/train/hf/download": self.handle_train_hf_download,
             "/api/train/quantize": self.handle_train_quantize,
+            "/api/train/dataset/clean": self.handle_train_ds_clean,
+            "/api/train/benchmark_gguf": self.handle_train_benchmark_gguf,
+            "/api/files/pair": self.handle_files_pair,
+            "/api/files/rotate": self.handle_files_rotate,
+            "/api/files/config": self.handle_files_config,
+            "/api/files/save": self.handle_files_save,
+            "/api/files/mkdir": self.handle_files_mkdir,
+            "/api/files/delete": self.handle_files_delete,
         }
         if path == "/api/new":
             _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
@@ -1753,6 +1807,86 @@ class Handler(BaseHTTPRequestHandler):
             quant_type=body.get("quant_type", "Q4_K_M"),
         )
         _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_ds_clean(self, body):
+        res = train_mod.clean_and_validate_dataset(body.get("name", ""))
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_train_benchmark_gguf(self, body):
+        res = train_mod.benchmark_gguf_model(
+            gguf_path=body.get("gguf_path", ""),
+            threads=body.get("threads", 6),
+            ngl=body.get("ngl", 99),
+        )
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_files_pair(self, body):
+        cfg = load()
+        try:
+            res = files_mod.pair(cfg, self.client_address[0], body.get("code", ""))
+            payload = json.dumps({"ok": True, "expires": res["expires"]}, ensure_ascii=False).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Set-Cookie", res["cookie"])
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+        except files_mod.FilesError as exc:
+            _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
+
+    def handle_files_rotate(self, body):
+        if not files_mod.is_local(self.client_address[0]):
+            _json_response(self, {"ok": False, "error": "сброс кода доступен только с локального ПК"}, 403)
+            return
+        cfg = load()
+        lan_url = "http://%s:%d" % (get_lan_ip(), int(cfg.get("port", 7788)))
+        res = files_mod.rotate_pair(cfg)
+        res = files_mod.desktop_pair_status(load(), lan_url=lan_url)
+        _json_response(self, res)
+
+    def handle_files_config(self, body):
+        if not files_mod.is_local(self.client_address[0]):
+            _json_response(self, {"ok": False, "error": "настройки редактора меняются только с локального ПК"}, 403)
+            return
+        try:
+            cfg = load()
+            files_mod.set_config(cfg, body)
+            lan_url = "http://%s:%d" % (get_lan_ip(), int(cfg.get("port", 7788)))
+            _json_response(self, files_mod.desktop_pair_status(load(), lan_url=lan_url))
+        except files_mod.FilesError as exc:
+            _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
+
+    def handle_files_save(self, body):
+        cfg = load()
+        if not files_mod.authorized(self.client_address[0], self.headers, cfg, write=True):
+            _json_response(self, {"ok": False, "error": "нет прав на запись или не пройдено сопряжение"}, 403)
+            return
+        try:
+            res = files_mod.save_file(cfg, body.get("path", ""), body.get("text", ""), body.get("revision"))
+            _json_response(self, res)
+        except files_mod.FilesError as exc:
+            _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
+
+    def handle_files_mkdir(self, body):
+        cfg = load()
+        if not files_mod.authorized(self.client_address[0], self.headers, cfg, write=True):
+            _json_response(self, {"ok": False, "error": "нет прав на создание папки"}, 403)
+            return
+        try:
+            _json_response(self, files_mod.create_dir(cfg, body.get("path", "")))
+        except files_mod.FilesError as exc:
+            _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
+
+    def handle_files_delete(self, body):
+        cfg = load()
+        if not files_mod.authorized(self.client_address[0], self.headers, cfg, write=True):
+            _json_response(self, {"ok": False, "error": "нет прав на удаление"}, 403)
+            return
+        try:
+            _json_response(self, files_mod.delete_entry(cfg, body.get("path", "")))
+        except files_mod.FilesError as exc:
+            _json_response(self, {"ok": False, "error": str(exc)}, exc.status)
 
     def stream_events(self, sid, since):
         self.close_connection = True

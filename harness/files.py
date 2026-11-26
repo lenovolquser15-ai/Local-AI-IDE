@@ -40,7 +40,10 @@ def _settings(cfg):
 
 def _root(cfg):
     configured = str(_settings(cfg).get("root") or "").strip()
-    root = os.path.realpath(configured or cfg.get("workspace") or os.path.join(config_mod.ROOT, "work"))
+    fallback_work = os.path.join(config_mod.ROOT, "work")
+    if not configured and not cfg.get("workspace"):
+        os.makedirs(fallback_work, exist_ok=True)
+    root = os.path.realpath(configured or cfg.get("workspace") or fallback_work)
     if not os.path.isdir(root):
         raise FilesError("Папка редактора не найдена: %s" % root, 409)
     protected = [os.path.realpath(config_mod.config_path()), os.path.realpath(config_mod.data_dir())]
@@ -100,13 +103,17 @@ def _secret(cfg):
     value = str(_settings(cfg).get("secret") or "")
     if value:
         return value
-    value = secrets.token_hex(32)
     with config_mod.LOCK:
         current = config_mod.load()
         settings = dict(current.get("mobile_files") or {})
+        value = str(settings.get("secret") or "") or secrets.token_hex(32)
         settings["secret"] = value
         current["mobile_files"] = settings
         config_mod.save(current)
+        if isinstance(cfg, dict):
+            cfg_settings = dict(cfg.get("mobile_files") or {})
+            cfg_settings["secret"] = value
+            cfg["mobile_files"] = cfg_settings
     return value
 
 
@@ -354,3 +361,62 @@ def save_file(cfg, value, text, revision):
             if os.path.exists(tmp):
                 os.remove(tmp)
     return read_file(cfg, rel)
+
+
+def create_dir(cfg, value):
+    """Create a subdirectory inside the configured editor root."""
+    root, rel, target = _safe_path(cfg, value, expect="any")
+    if not rel:
+        raise FilesError("Укажите имя новой папки")
+    if os.path.exists(target):
+        if os.path.isdir(target):
+            return {"ok": True, "root": root, "path": rel, "created": False}
+        raise FilesError("Путь уже занят файлом: %s" % rel, 409)
+    os.makedirs(target, exist_ok=True)
+    return {"ok": True, "root": root, "path": rel, "created": True}
+
+
+def delete_entry(cfg, value):
+    """Delete a file or an empty directory inside the configured editor root."""
+    root, rel, target = _safe_path(cfg, value, expect="any")
+    if not rel:
+        raise FilesError("Нельзя удалить корневую папку редактора", 403)
+    if not os.path.exists(target):
+        raise FilesError("Объект не найден: %s" % rel, 404)
+    if os.path.isdir(target):
+        if os.listdir(target):
+            raise FilesError("Папка не пуста — сначала удалите файлы внутри: %s" % rel, 409)
+        os.rmdir(target)
+        return {"ok": True, "deleted": rel, "type": "dir"}
+    os.remove(target)
+    return {"ok": True, "deleted": rel, "type": "file"}
+
+
+def search_files(cfg, query, limit=60):
+    """Fast filename & text search inside the editor root."""
+    root = _root(cfg)
+    q = str(query or "").strip().lower()
+    if not q:
+        return {"ok": True, "root": root, "matches": []}
+    limit = max(1, min(200, int(limit or 60)))
+    skip_dirs = {".git", "__pycache__", "node_modules", ".venv", "venv", "dist", "build", "_internal"}
+    matches = []
+    for cur, dirs, fnames in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".lh-")]
+        if _protected_path(os.path.realpath(cur)):
+            dirs[:] = []
+            continue
+        for fn in fnames:
+            full = os.path.join(cur, fn)
+            if _protected_path(os.path.realpath(full)):
+                continue
+            rel = os.path.relpath(full, root).replace("\\", "/")
+            if q in fn.lower() or q in rel.lower():
+                try:
+                    sz = os.path.getsize(full)
+                except OSError:
+                    sz = 0
+                matches.append({"name": fn, "path": rel, "size": sz, "match": "filename"})
+                if len(matches) >= limit:
+                    return {"ok": True, "root": root, "matches": matches}
+    return {"ok": True, "root": root, "matches": matches}

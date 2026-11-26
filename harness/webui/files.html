@@ -1,0 +1,244 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<title>LocalHarness · Мобильный IDE Редактор</title>
+<style>
+  :root {
+    --bg: #0c0e14;
+    --card: #151821;
+    --line: rgba(255, 255, 255, .1);
+    --text: #f3f4f6;
+    --muted: #9ca3af;
+    --accent: #38bdf8;
+    --ok: #22c55e;
+    --danger: #ef4444;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    background: rgba(21, 24, 33, .92);
+    position: sticky;
+    top: 0;
+    z-index: 10;
+  }
+  .logo {
+    width: 34px; height: 34px; border-radius: 10px;
+    background: linear-gradient(135deg, #38bdf8, #6366f1);
+    color: #0b0d12; font-weight: 800; display: grid; place-items: center; font-size: 13px;
+  }
+  .title { font-weight: 700; font-size: 15px; }
+  .sub { font-size: 11.5px; color: var(--muted); }
+  .grow { flex: 1; }
+  button, a.btn {
+    height: 36px; padding: 0 12px; border-radius: 10px; border: 1px solid var(--line);
+    background: var(--card); color: var(--text); font-size: 13px; font-weight: 600;
+    cursor: pointer; text-decoration: none; display: inline-flex; align-items: center; gap: 6px;
+  }
+  button.primary { background: linear-gradient(135deg, #38bdf8, #6366f1); color: #0b0d12; border: none; }
+  input[type="text"] {
+    height: 38px; border-radius: 10px; border: 1px solid var(--line);
+    background: rgba(0,0,0,.35); color: var(--text); padding: 0 12px; font-size: 14px;
+  }
+  .pair-box {
+    max-width: 420px; margin: 48px auto; padding: 22px; background: var(--card);
+    border: 1px solid var(--line); border-radius: 16px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .layout {
+    display: grid; grid-template-columns: 280px 1fr; flex: 1; min-height: calc(100vh - 60px);
+  }
+  @media (max-width: 780px) {
+    .layout { grid-template-columns: 1fr; }
+    .pane-tree.hidden-mobile { display: none; }
+  }
+  .pane-tree {
+    border-right: 1px solid var(--line); padding: 12px; display: flex; flex-direction: column; gap: 8px;
+  }
+  .crumbs { font-size: 12px; color: var(--accent); word-break: break-all; cursor: pointer; }
+  .flist { display: flex; flex-direction: column; gap: 3px; overflow-y: auto; max-height: 75vh; }
+  .fitem {
+    padding: 8px 10px; border-radius: 9px; font-size: 13px; cursor: pointer;
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  }
+  .fitem:hover, .fitem.active { background: rgba(56, 189, 248, .12); }
+  .pane-ed { display: flex; flex-direction: column; padding: 12px; gap: 8px; }
+  .ed-bar { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  textarea#editor {
+    flex: 1; min-height: 62vh; width: 100%; border-radius: 12px; border: 1px solid var(--line);
+    background: #090b10; color: #e5e7eb; padding: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 13px; line-height: 1.5; resize: vertical;
+  }
+  .status { font-size: 12px; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo">LH</div>
+  <div>
+    <div class="title">Файлы и Код</div>
+    <div class="sub" id="rootLabel">проверка доступа…</div>
+  </div>
+  <span class="grow"></span>
+  <button id="toggleTreeBtn" type="button">📂 Файлы</button>
+  <a class="btn" href="/">← Чат</a>
+</header>
+
+<div id="pairWrap" class="pair-box" hidden>
+  <div style="font-size:17px;font-weight:700;">🔐 Сопряжение с ПК</div>
+  <div class="sub">Введите 10-значный код из вкладки «📁 Файлы» на компьютере (или отсканируйте QR-код редактора).</div>
+  <input type="text" id="pairCode" placeholder="XXXXX-XXXXX" autocomplete="off">
+  <button id="pairBtn" class="primary" type="button">Подключить редактор</button>
+  <div class="status" id="pairMsg"></div>
+</div>
+
+<div id="mainWrap" class="layout" hidden>
+  <aside class="pane-tree" id="treePane">
+    <div style="display:flex;gap:6px;">
+      <input type="text" id="searchInp" placeholder="Поиск файла…" style="flex:1;height:34px;">
+      <button id="newFileBtn" type="button" title="Новый файл">+</button>
+    </div>
+    <div class="crumbs" id="crumbs">/ (корень)</div>
+    <div class="flist" id="fileList"></div>
+  </aside>
+  <main class="pane-ed">
+    <div class="ed-bar">
+      <strong id="curFileLabel" style="font-family:monospace;font-size:13px;">Выберите файл слева</strong>
+      <span class="grow"></span>
+      <span class="status" id="saveStatus"></span>
+      <button id="saveBtn" class="primary" type="button" disabled>💾 Сохранить</button>
+    </div>
+    <textarea id="editor" spellcheck="false" placeholder="Откройте текстовый файл или создайте новый кнопкой + …" disabled></textarea>
+  </main>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+let curDir = '';
+let curFile = '';
+let curRev = null;
+
+async function api(url, body) {
+  const opts = body ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) } : {};
+  const r = await fetch(url, opts);
+  return r.json();
+}
+
+async function boot() {
+  const hashMatch = location.hash.match(/pair=([A-Za-z0-9-]+)/);
+  if (hashMatch) {
+    const r = await api('/api/files/pair', { code: hashMatch[1] });
+    if (r && r.ok) history.replaceState(null, '', location.pathname);
+  }
+  const st = await api('/api/files/status');
+  if (!st.authorized) {
+    $('#pairWrap').hidden = false;
+    $('#mainWrap').hidden = true;
+    $('#rootLabel').textContent = 'требуется код сопряжения';
+    return;
+  }
+  $('#pairWrap').hidden = true;
+  $('#mainWrap').hidden = false;
+  $('#rootLabel').textContent = st.root || 'workspace';
+  loadDir('');
+}
+
+async function loadDir(rel) {
+  curDir = rel || '';
+  $('#crumbs').textContent = '📁 /' + curDir + (curDir ? ' (нажми для ↑)' : '');
+  const r = await api('/api/files/list?path=' + encodeURIComponent(curDir));
+  const box = $('#fileList');
+  box.innerHTML = '';
+  if (!r.ok) { box.textContent = r.error || 'Ошибка'; return; }
+  (r.entries || []).forEach((e) => {
+    const row = document.createElement('div');
+    row.className = 'fitem' + (e.path === curFile ? ' active' : '');
+    const ico = e.type === 'dir' ? '📁 ' : '📄 ';
+    const sz = e.type === 'file' ? (e.size > 1024 ? (e.size / 1024).toFixed(1) + ' КБ' : e.size + ' Б') : '';
+    row.innerHTML = '<span>' + ico + e.name + '</span><span class="status">' + sz + '</span>';
+    row.onclick = () => e.type === 'dir' ? loadDir(e.path) : openFile(e.path);
+    box.appendChild(row);
+  });
+}
+
+async function openFile(rel) {
+  const r = await api('/api/files/read?path=' + encodeURIComponent(rel));
+  if (!r.ok) { alert(r.error || 'Не удалось открыть файл'); return; }
+  curFile = r.path;
+  curRev = r.revision;
+  $('#curFileLabel').textContent = curFile;
+  $('#editor').value = r.text;
+  $('#editor').disabled = false;
+  $('#saveBtn').disabled = false;
+  $('#saveStatus').textContent = r.size + ' байт';
+  if (innerWidth <= 780) $('#treePane').classList.add('hidden-mobile');
+}
+
+$('#crumbs').onclick = () => {
+  if (!curDir) return;
+  const parts = curDir.split('/');
+  parts.pop();
+  loadDir(parts.join('/'));
+};
+$('#toggleTreeBtn').onclick = () => $('#treePane').classList.toggle('hidden-mobile');
+$('#pairBtn').onclick = async () => {
+  const r = await api('/api/files/pair', { code: $('#pairCode').value });
+  if (r && r.ok) boot();
+  else $('#pairMsg').textContent = (r && r.error) || 'Ошибка кода';
+};
+$('#saveBtn').onclick = async () => {
+  if (!curFile) return;
+  $('#saveStatus').textContent = 'сохраняю…';
+  const r = await api('/api/files/save', { path: curFile, text: $('#editor').value, revision: curRev });
+  if (r && r.ok) {
+    curRev = r.revision;
+    $('#saveStatus').textContent = '✓ сохранено (' + new Date().toLocaleTimeString('ru-RU') + ')';
+  } else {
+    $('#saveStatus').textContent = '✗ ' + ((r && r.error) || 'ошибка');
+  }
+};
+$('#newFileBtn').onclick = async () => {
+  const name = prompt('Имя нового файла (относительно текущей папки):', 'notes.md');
+  if (!name) return;
+  const rel = (curDir ? curDir + '/' : '') + name.trim();
+  const r = await api('/api/files/save', { path: rel, text: '', revision: null });
+  if (r && r.ok) { await loadDir(curDir); openFile(rel); }
+  else alert((r && r.error) || 'Ошибка создания');
+};
+$('#searchInp').oninput = async (e) => {
+  const q = e.target.value.trim();
+  if (!q) { loadDir(curDir); return; }
+  const r = await api('/api/files/search?q=' + encodeURIComponent(q));
+  const box = $('#fileList');
+  box.innerHTML = '';
+  (r.matches || []).forEach((m) => {
+    const row = document.createElement('div');
+    row.className = 'fitem';
+    row.innerHTML = '<span>📄 ' + m.path + '</span>';
+    row.onclick = () => openFile(m.path);
+    box.appendChild(row);
+  });
+};
+document.addEventListener('keydown', (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+    e.preventDefault();
+    if (!$('#saveBtn').disabled) $('#saveBtn').click();
+  }
+});
+boot();
+</script>
+</body>
+</html>

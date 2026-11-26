@@ -16,6 +16,8 @@
 
 ![Чат: сессии, персоны агента, датчик GPU, голосовой созвон и шкала контекста](docs/screenshots/ui-chat.png)
 
+![Встроенный IDE Редактор файлов: дерево рабочей папки, поиск, Ctrl+S, отправка в чат/RAG и мобильный код сопряжения /files.html](docs/screenshots/ui-files.png)
+
 ![LoRA & Unsloth Studio 3.0: дообучение Unsloth 4-bit QLoRA + Universal PEFT (CUDA/ROCm/CPU), инспектор слоёв, HF Hub и GGUF-квантизатор](docs/screenshots/ui-train.png)
 
 ![Голосовой созвон 2.0: студийный Edge Neural 24 кГц / XTTS v2, потоковая речь по предложениям и вызов любых инструментов](docs/screenshots/ui-voice-call.png)

@@ -939,12 +939,14 @@ def generate_synthetic_dataset(topic, count=10, dataset_name="synthetic_sft.json
         "Без markdown-обёрток, без пояснений, только JSON-массив."
     )
     try:
-        resp = client.chat(
-            [{"role": "system", "content": "Ты — эксперт по созданию датасетов для SFT/LoRA. Отвечай строго валидным JSON-массивом."},
-             {"role": "user", "content": prompt}],
-            max_tokens=min(4096, max(1200, count * 220)),
-            temperature=0.6,
-        )
+        msgs = [
+            {"role": "system", "content": "Ты — эксперт по созданию датасетов для SFT/LoRA. Отвечай строго валидным JSON-массивом."},
+            {"role": "user", "content": prompt},
+        ]
+        if hasattr(client, "chat"):
+            resp = client.chat(msgs, max_tokens=min(4096, max(1200, count * 220)), temperature=0.6)
+        else:
+            resp = client.complete(msgs)
         raw = str(resp.get("content") or "").strip()
     except Exception as exc:
         return {"ok": False, "error": "Не удалось обратиться к локальной модели: %s" % exc}
@@ -2027,3 +2029,155 @@ def eval_adapter(adapter_dir, prompt, max_new_tokens=256):
         return {"ok": False, "error": (err or out or "Eval failed")[:400]}
     except Exception as exc:
         return {"ok": False, "error": str(exc)[:300]}
+
+
+def clean_and_validate_dataset(dataset_name):
+    """Deduplicate, strip broken/empty rows, and compute token/format statistics for a local .jsonl dataset."""
+    import hashlib
+    fname = os.path.basename(str(dataset_name or "").strip())
+    if not fname:
+        return {"ok": False, "error": "Укажите имя датасета"}
+    path = os.path.join(datasets_dir(), fname)
+    if not os.path.isfile(path):
+        return {"ok": False, "error": "Датасет не найден: %s" % fname}
+
+    raw_lines = open(path, "r", encoding="utf-8", errors="replace").read().splitlines()
+    before = 0
+    invalid = 0
+    dups = 0
+    seen = set()
+    cleaned = []
+    char_lengths = []
+    detected_fmt = "alpaca"
+
+    for line in raw_lines:
+        s = line.strip()
+        if not s:
+            continue
+        before += 1
+        try:
+            obj = json.loads(s)
+        except ValueError:
+            invalid += 1
+            continue
+        if not isinstance(obj, dict):
+            invalid += 1
+            continue
+
+        # Extract canonical text signature & validate non-empty fields
+        sig = None
+        total_chars = 0
+        if isinstance(obj.get("messages") or obj.get("conversations"), list):
+            detected_fmt = "sharegpt"
+            msgs = obj.get("messages") or obj.get("conversations") or []
+            parts = []
+            has_asst = False
+            for m in msgs:
+                if not isinstance(m, dict):
+                    continue
+                role = str(m.get("role") or m.get("from") or "").lower()
+                val = str(m.get("content") or m.get("value") or "").strip()
+                if val:
+                    parts.append(f"{role}:{val}")
+                    total_chars += len(val)
+                    if role in ("assistant", "gpt", "bot"):
+                        has_asst = True
+            if len(parts) >= 2 and has_asst:
+                sig = "||".join(parts)
+        elif "chosen" in obj and "rejected" in obj:
+            detected_fmt = "dpo"
+            ch = str(obj.get("chosen") or "").strip()
+            rj = str(obj.get("rejected") or "").strip()
+            pr = str(obj.get("prompt") or obj.get("instruction") or "").strip()
+            if ch and rj:
+                total_chars = len(pr) + len(ch) + len(rj)
+                sig = f"dpo:{pr}||{ch}||{rj}"
+        else:
+            inst = str(obj.get("instruction") or obj.get("prompt") or obj.get("question") or "").strip()
+            out = str(obj.get("output") or obj.get("response") or obj.get("answer") or obj.get("completion") or "").strip()
+            inp = str(obj.get("input") or "").strip()
+            if inst and out:
+                total_chars = len(inst) + len(inp) + len(out)
+                sig = f"sft:{inst}||{inp}||{out}"
+
+        if not sig:
+            invalid += 1
+            continue
+        digest = hashlib.sha256(sig.encode("utf-8", "replace")).hexdigest()
+        if digest in seen:
+            dups += 1
+            continue
+        seen.add(digest)
+        cleaned.append(obj)
+        char_lengths.append(total_chars)
+
+    if not cleaned:
+        return {"ok": False, "error": "После проверки не осталось валидных примеров (файл не изменён)", "before": before, "removed_invalid": invalid}
+
+    tmp = path + ".clean.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        for row in cleaned:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    os.replace(tmp, path)
+
+    tok_ests = [max(1, round(c / 3.5)) for c in char_lengths]
+    return {
+        "ok": True,
+        "name": fname,
+        "format": detected_fmt,
+        "before": before,
+        "after": len(cleaned),
+        "removed_duplicates": dups,
+        "removed_invalid": invalid,
+        "min_tokens": min(tok_ests),
+        "avg_tokens": round(sum(tok_ests) / len(tok_ests)),
+        "max_tokens": max(tok_ests),
+    }
+
+
+def benchmark_gguf_model(gguf_path, threads=6, ngl=99):
+    """Run llama-bench on a local .gguf model to measure prompt processing & generation tok/s."""
+    gguf_path = str(gguf_path or "").strip().strip('"')
+    if not gguf_path or not os.path.isfile(gguf_path):
+        return {"ok": False, "error": "GGUF-файл не найден: %s" % gguf_path}
+    bench_bin = find_llama_tool("llama-bench")
+    if not bench_bin:
+        return {"ok": False, "error": "llama-bench не найден в lora_train_reference/llama.cpp"}
+    threads = max(1, min(64, int(threads or 6)))
+    ngl = max(0, min(200, int(ngl if ngl is not None else 99)))
+    size_mb = round(os.path.getsize(gguf_path) / (1024 * 1024), 2)
+    cmd = [bench_bin, "-m", gguf_path, "-p", "128", "-n", "64", "-r", "1", "-t", str(threads), "-ngl", str(ngl), "-o", "json"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=os.path.dirname(bench_bin),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=120,
+            creationflags=NO_WINDOW,
+        )
+        if proc.returncode != 0:
+            return {"ok": False, "error": (proc.stderr or proc.stdout or "llama-bench failed")[-400:]}
+        runs = json.loads(proc.stdout)
+        pp_tps = None
+        tg_tps = None
+        gpu_info = ""
+        for r in (runs if isinstance(runs, list) else []):
+            gpu_info = r.get("gpu_info") or gpu_info
+            if r.get("n_prompt"):
+                pp_tps = round(float(r.get("avg_ts") or 0.0), 2)
+            elif r.get("n_gen"):
+                tg_tps = round(float(r.get("avg_ts") or 0.0), 2)
+        return {
+            "ok": True,
+            "gguf_path": gguf_path,
+            "size_mb": size_mb,
+            "pp128_tps": pp_tps,
+            "tg64_tps": tg_tps,
+            "gpu_info": gpu_info,
+        }
+    except Exception as exc:
+        return {"ok": False, "error": "Ошибка запуска llama-bench: %s" % exc}

@@ -277,8 +277,75 @@ def test_new_http_endpoints_and_webui_sync(isolated_env):
         srv.shutdown()
         srv.server_close()
 
-    for fname in ("index.html", "style.css", "app.js", "worker.html"):
+    for fname in ("index.html", "style.css", "app.js", "worker.html", "files.html"):
         p1 = os.path.join(ROOT, "webui", fname)
         p2 = os.path.join(ROOT, "harness", "webui", fname)
         with open(p1, "rb") as f1, open(p2, "rb") as f2:
             assert f1.read() == f2.read(), f"WebUI out of sync: {fname}"
+
+
+# ---------- 7. IDE File Explorer, Mobile LAN Pairing & Dataset Cleaner ----------
+def test_ide_files_crud_conflict_guard_and_lan_pairing(isolated_env):
+    from harness import files as files_mod
+
+    cfg = isolated_env["cfg"]
+    cfg["lan_access"] = True
+    config_mod.save(cfg)
+
+    # Create directory & file
+    mk = files_mod.create_dir(cfg, "src_demo")
+    assert mk["ok"] is True and mk["created"] is True
+
+    sv = files_mod.save_file(cfg, "src_demo/hello.py", "print('v1')\n", revision=None)
+    assert sv["ok"] is True
+    rev1 = sv["revision"]
+
+    rd = files_mod.read_file(cfg, "src_demo/hello.py")
+    assert rd["text"] == "print('v1')\n"
+
+    # Optimistic concurrency conflict check (stale revision must raise 409)
+    sv2 = files_mod.save_file(cfg, "src_demo/hello.py", "print('v2')\n", revision=rev1)
+    assert sv2["revision"] != rev1
+    with pytest.raises(files_mod.FilesError) as exc_info:
+        files_mod.save_file(cfg, "src_demo/hello.py", "print('stale')\n", revision=rev1)
+    assert exc_info.value.status == 409
+
+    # Path traversal guard
+    with pytest.raises(files_mod.FilesError):
+        files_mod.read_file(cfg, "../config.json")
+
+    # Search & delete
+    sr = files_mod.search_files(cfg, "hello")
+    assert len(sr["matches"]) == 1 and sr["matches"][0]["path"] == "src_demo/hello.py"
+
+    dl = files_mod.delete_entry(cfg, "src_demo/hello.py")
+    assert dl["ok"] is True and dl["type"] == "file"
+
+    # LAN pairing flow
+    st_local = files_mod.pair_status(cfg, "127.0.0.1", lan_url="http://192.168.1.10:7788")
+    assert st_local["authorized"] is True and st_local.get("code")
+    st_lan_unauth = files_mod.pair_status(cfg, "192.168.1.55")
+    assert st_lan_unauth["authorized"] is False
+
+    paired = files_mod.pair(cfg, "192.168.1.55", st_local["display"])
+    assert paired["ok"] is True and "lh_files=" in paired["cookie"]
+    cookie_kv = paired["cookie"].split(";", 1)[0]
+    assert files_mod.authorized("192.168.1.55", {"Cookie": cookie_kv}, cfg, write=True) is True
+
+
+def test_dataset_cleaner_and_deduplicator(isolated_env):
+    ds_file = os.path.join(ut.datasets_dir(), "dirty.jsonl")
+    with open(ds_file, "w", encoding="utf-8") as fh:
+        fh.write(json.dumps({"instruction": "Что такое LoRA?", "output": "Адаптер низкого ранга."}) + "\n")
+        fh.write(json.dumps({"instruction": "Что такое LoRA?", "output": "Адаптер низкого ранга."}) + "\n")  # duplicate
+        fh.write("{broken json line\n")
+        fh.write(json.dumps({"instruction": "", "output": ""}) + "\n")  # empty
+        fh.write(json.dumps({"instruction": "Зачем GGUF?", "output": "Для быстрого локального запуска."}) + "\n")
+
+    res = ut.clean_and_validate_dataset("dirty.jsonl")
+    assert res["ok"] is True
+    assert res["before"] == 5
+    assert res["after"] == 2
+    assert res["removed_duplicates"] == 1
+    assert res["removed_invalid"] == 2
+    assert res["avg_tokens"] > 0

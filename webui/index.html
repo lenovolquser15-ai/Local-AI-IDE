@@ -104,6 +104,7 @@
 
     <nav class="views" id="views">
       <button class="view-tab active" id="tabChat" data-view="chat">Чат</button>
+      <button class="view-tab" id="tabFiles" data-view="files">📁 Файлы</button>
       <button class="view-tab" id="tabPlugins" data-view="plugins">Плагины</button>
       <button class="view-tab" id="tabLM" data-view="lm">LM Studio</button>
       <button class="view-tab" id="tabDashboard" data-view="dashboard">Дашборд</button>
@@ -907,13 +908,58 @@
               <option value="Q2_K">Q2_K</option>
             </select>
             <button id="trainQuantBtn" class="primary small-btn" type="button">⚙️ Квантовать</button>
+            <button id="trainBenchGgufBtn" class="ghost small-btn" type="button" title="Замерить реальную скорость генерации tok/s через llama-bench">⚡ Замер tok/s</button>
           </div>
           <div id="trainQuantStatus" class="page-sub" style="margin-top:6px;"></div>
         </div>
       </div>
     </section>
 
+    <section id="viewFiles" class="pageview" hidden>
+      <div class="page-inner files-page">
+        <div class="page-head">
+          <div class="page-head-text">
+            <div class="page-title">📁 Встроенный IDE Редактор</div>
+            <div class="page-sub" id="filesRootLabel">рабочая папка: …</div>
+          </div>
+          <span class="grow"></span>
+          <div class="page-head-tools">
+            <span class="sec-chip" id="filesPairChip" title="Код доступа для мобильного редактора /files.html по Wi-Fi">📱 Wi-Fi: выкл</span>
+            <button id="filesRotateCodeBtn" class="ghost small-btn" type="button" title="Сгенерировать новый одноразовый код сопряжения" hidden>🔄 Новый код</button>
+            <a id="filesOpenMobileLink" class="ghost small-btn" href="/files" target="_blank" rel="noopener">↗ Мобильный вид</a>
+            <button id="filesRefreshBtn" class="ghost small-btn" type="button">Обновить</button>
+          </div>
+        </div>
+
+        <div class="ide-split">
+          <div class="ide-tree-box">
+            <div class="urlrow" style="margin-top:0;">
+              <input type="text" id="filesSearchInput" class="field grow" placeholder="Поиск файла…">
+              <button id="filesNewFileBtn" class="ghost small-btn" type="button" title="Создать файл">+📄</button>
+              <button id="filesNewDirBtn" class="ghost small-btn" type="button" title="Создать папку">+📁</button>
+            </div>
+            <div class="ide-crumbs" id="filesCrumbs">/</div>
+            <div class="ide-list" id="filesList"></div>
+          </div>
+
+          <div class="ide-editor-box">
+            <div class="ide-editor-head">
+              <span class="monospace" id="filesCurrentPath">Выберите файл слева для редактирования</span>
+              <span class="grow"></span>
+              <span class="page-sub" id="filesMetaInfo"></span>
+              <button id="filesAskAiBtn" class="ghost small-btn" type="button" disabled title="Отправить содержимое файла в чат агенту">🤖 В чат</button>
+              <button id="filesIndexRagBtn" class="ghost small-btn" type="button" disabled title="Проиндексировать текущий файл в локальную базу знаний RAG">📚 В RAG</button>
+              <button id="filesDeleteBtn" class="ghost small-btn danger-text" type="button" disabled title="Удалить открытый файл">🗑️</button>
+              <button id="filesSaveBtn" class="primary small-btn" type="button" disabled>💾 Сохранить (Ctrl+S)</button>
+            </div>
+            <textarea id="filesEditorArea" class="ide-textarea" spellcheck="false" placeholder="Откройте любой текстовый файл проекта слева или создайте новый (+📄)…" disabled></textarea>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <footer class="composer">
+      <div id="slashMenu" class="slash-menu" hidden></div>
       <div class="band warn-band" id="approveBand" hidden></div>
       <div class="band goal-band" id="goalBand" hidden>
         <span class="goal-state" id="goalState">цель: не активна</span>
@@ -1420,6 +1466,7 @@
         <div class="call-orb-core" id="callOrbCore">🎙️</div>
       </div>
       <div class="call-state-label" id="callStateLabel">Готов к разговору</div>
+      <div class="call-live-interim" id="callLiveInterim" hidden></div>
       <div class="call-tool-pill" id="callToolPill" hidden></div>
     </div>
     <div class="call-settings-bar">
