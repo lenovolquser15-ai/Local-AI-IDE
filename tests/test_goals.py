@@ -98,6 +98,8 @@ class Scripted(BaseHTTPRequestHandler):
 
 
 class TestBridge(Bridge):
+    __test__ = False
+
     def __init__(self):
         Bridge.__init__(self)
         self.events = []

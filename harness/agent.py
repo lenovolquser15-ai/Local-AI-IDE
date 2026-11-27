@@ -5,11 +5,13 @@ import re
 import threading
 import time
 
+from . import changes as changes_mod
 from . import llm as llm_mod
 from . import lms as lms_mod
 from . import permissions
 from . import schemas
 from . import session as session_mod
+from . import tools as tools_mod
 from . import vision as vision_mod
 from .config import normalize_context, as_int, MAX_TOKENS_MIN, MAX_TOKENS_MAX
 from .tools import Toolkit
@@ -436,6 +438,10 @@ class Agent:
         self._loop_approaches = 0
         self.repeats_ok = {}
         self._format_retries = 0
+        self.changes = None
+
+    def _known_tool_names(self):
+        return {spec["name"] for spec in schemas.entries(self.profile, self.cfg)} | {"ask_user", "check_goal_point", "finish_goal"}
 
     def _watch_loop(self, name, args, result):
         """Слабая локальная модель может вечно тыкать одной и той же упавшей командой.
@@ -600,27 +606,36 @@ class Agent:
         self.bridge.emit(dict(snap, type="speed"))
 
     def _record_call(self, call):
-        name = call["function"]["name"]
+        raw_name = call["function"]["name"]
+        raw_args_str = call["function"].get("arguments") or "{}"
         try:
-            args = json.loads(call["function"].get("arguments") or "{}")
+            args = json.loads(raw_args_str) if isinstance(raw_args_str, str) else raw_args_str
         except ValueError:
-            return name, {}, {"ok": False, "error": "кривой JSON в arguments: %s" % _short(call["function"]["arguments"], 300)}
+            repaired = llm_mod._repair_json_candidate(raw_args_str)
+            if isinstance(repaired, dict):
+                args = repaired
+            else:
+                return raw_name, {}, {"ok": False, "error": "кривой JSON в arguments: %s" % _short(raw_args_str, 300)}, None
+        if not isinstance(args, dict):
+            args = {}
+        known_ext = {s["name"] for s in schemas.entries(self.profile, self.cfg)}
+        name, args = tools_mod.normalize_tool_call(raw_name, args, known_ext)
         if name == "ask_user":
             answer = self.bridge.ask("question", {"question": args.get("question") or "",
                                                  "options": args.get("options") or []})
             text = (answer or {}).get("text") or ""
             if not text:
                 self._soft_fail = True
-            return name, args, {"ok": bool(text), "answered": True, "answer": text or "(пользователь промолчал)"}
+            return name, args, {"ok": bool(text), "answered": True, "answer": text or "(пользователь промолчал)"}, None
         if name == "check_goal_point":
             if not self.goal or not self.checklist:
-                return name, args, {"ok": False, "error": "чеклист цели не задан — отмечать нечего"}
+                return name, args, {"ok": False, "error": "чеклист цели не задан — отмечать нечего"}, None
             try:
                 idx = int(args.get("index"))
             except (TypeError, ValueError):
                 idx = 0
             if idx < 1 or idx > len(self.checklist):
-                return name, args, {"ok": False, "error": "номер пункта вне чеклиста: 1..%d" % len(self.checklist)}
+                return name, args, {"ok": False, "error": "номер пункта вне чеклиста: 1..%d" % len(self.checklist)}, None
             done = args.get("done", True)
             done = True if done is None else bool(done)
             evidence = str(args.get("evidence") or "").strip()
@@ -628,11 +643,11 @@ class Agent:
                 self._soft_fail = True
                 return name, args, {"ok": False, "error":
                     "ПУНКТ НЕ ПРОВЕРЕН: сначала проверь этот пункт реальным инструментом (команда, файл или "
-                    "screenshot), затем отметь его с evidence из вывода проверки."}
+                    "screenshot), затем отметь его с evidence из вывода проверки."}, None
             if done and not evidence:
                 self._soft_fail = True
                 return name, args, {"ok": False, "error":
-                    "нет evidence: укажи, что именно показала проверка этого пункта."}
+                    "нет evidence: укажи, что именно показала проверка этого пункта."}, None
             item = self.checklist[idx - 1]
             item["done"] = done
             item["evidence"] = evidence
@@ -640,14 +655,14 @@ class Agent:
             self.bridge.emit({"type": "goal", "state": "point", "round": self.rounds,
                               "index": idx, "done": done, "evidence": _short(evidence, 300),
                               "points": [dict(p) for p in self.checklist], "remaining": remaining})
-            return name, args, {"ok": True, "index": idx, "done": done, "remaining": remaining}
+            return name, args, {"ok": True, "index": idx, "done": done, "remaining": remaining}, None
         if name == "finish_goal":
             achieved = bool(args.get("achieved"))
             if achieved and self.goal and not self._real_tools:
                 self._soft_fail = True
                 return name, args, {"ok": False, "error":
                     "ЦЕЛЬ НЕ ПРОВЕРЕНА: сначала выполни действие и проверь результат реальным инструментом "
-                    "(команда, файл или screenshot), потом вызови finish_goal с evidence из вывода проверки."}
+                    "(команда, файл или screenshot), потом вызови finish_goal с evidence из вывода проверки."}, None
             self.goal_state = {"achieved": achieved,
                                "summary": args.get("summary") or "", "evidence": args.get("evidence") or ""}
             remaining = [i for i, p in enumerate(self.checklist, 1) if not p["done"]] if self.checklist else []
@@ -659,7 +674,7 @@ class Agent:
                               "achieved": self.goal_state["achieved"],
                               "summary": self.goal_state["summary"],
                               "evidence": _short(self.goal_state["evidence"], 600)})
-            return name, args, {"ok": True, "recorded": True, "achieved": self.goal_state["achieved"]}
+            return name, args, {"ok": True, "recorded": True, "achieved": self.goal_state["achieved"]}, None
         self.bridge.emit({"type": "tool_start", "tool": name, "args": _short(args, ARGS_LIMIT)})
         decision, reason = permissions.decide(name, args, self.perm_mode)
         if decision == "deny":
@@ -669,15 +684,23 @@ class Agent:
                                           "поэтому выполнение заблокировано. Не пробуй обходным путём. "
                                           "Реши задачу иначе: web_fetch/web_search по нужному адресу, другой "
                                           "инструмент или правка конфигурации. Если без этого никак — спроси "
-                                          "пользователя через ask_user." % reason)}
+                                          "пользователя через ask_user." % reason)}, None
         if decision == "confirm":
             reply = self.bridge.ask("approve", {"tool": name, "args": args, "reason": reason,
                                                 "preview": _short(args, ARGS_LIMIT)})
             if not reply or not reply.get("allow"):
                 self._soft_fail = True
                 return name, args, {"ok": False,
-                                    "error": "ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ (%s). Сделай иначе или спроси, что именно нужно." % reason}
+                                    "error": "ОТКАЗАНО ПОЛЬЗОВАТЕЛЕМ (%s). Сделай иначе или спроси, что именно нужно." % reason}, None
+        target_file = None
+        before_text = None
+        if self.changes and name in ("write_file", "edit_file") and args.get("path"):
+            target_file = tools_mod.resolve_path(args.get("path"), getattr(self.tools, "workspace", None))
+            before_text = self.changes.before_file_op(target_file)
         result = self.tools.call(name, args)
+        file_edit = None
+        if self.changes and target_file and isinstance(result, dict) and result.get("ok"):
+            file_edit = self.changes.after_file_op(target_file, before_text=before_text)
         try:
             from . import dashboard as _dash
             _dash.record_tool_call(ok=bool(isinstance(result, dict) and result.get("ok", True)))
@@ -685,15 +708,18 @@ class Agent:
             pass
         if isinstance(result, dict) and result.get("ok"):
             self._real_tools += 1
-        return name, args, result
+        return name, args, result, file_edit
 
-    def _observe(self, name, args, result):
+    def _observe(self, name, args, result, file_edit=None):
         image = ((result.get("path") or result.get("screenshot") or result.get("image"))
                  if isinstance(result, dict) and name in ("screenshot", "game_control", "generate_image") else None)
-        self.bridge.emit({"type": "tool", "tool": name, "args": _short(args, ARGS_LIMIT),
-                          "result": _short(result, RESULT_LIMIT),
-                          "ok": bool(result.get("ok")) if isinstance(result, dict) else False,
-                          "image": image})
+        ev = {"type": "tool", "tool": name, "args": args if isinstance(args, dict) and len(json.dumps(args, ensure_ascii=False)) <= ARGS_LIMIT else _short(args, ARGS_LIMIT),
+              "result": _short(result, RESULT_LIMIT),
+              "ok": bool(result.get("ok")) if isinstance(result, dict) else False,
+              "image": image}
+        if file_edit:
+            ev["file_edit"] = file_edit
+        self.bridge.emit(ev)
         return json.dumps(result, ensure_ascii=False)[:RESULT_LIMIT]
 
     def _turn(self, messages, protocol, steps_left):
@@ -743,8 +769,50 @@ class Agent:
             try:
                 pump = ReasonPump(self.bridge, limit=80, interval=0.12)
                 self.bridge.set_stop_callback(self.llm.stop)
+                # В режиме без native tool_use фильтруем поток так, чтобы сырой JSON/XML вызовов
+                # (<tool_call>, {"tool":...}, {"final":...}) не мелькал сырым кодом в пузыре ответа
+                stream_state = {"buf": "", "suppress": False, "started": False}
+
+                def _smart_delta(piece):
+                    if protocol != "json":
+                        if "<tool_call>" in piece or "[TOOL_CALLS]" in piece or "<function=" in piece:
+                            stream_state["suppress"] = True
+                            idx = min(x for x in (piece.find("<tool_call>"), piece.find("[TOOL_CALLS]"), piece.find("<function=")) if x >= 0)
+                            if idx > 0:
+                                self._delta(piece[:idx])
+                            return
+                        if not stream_state["suppress"]:
+                            self._delta(piece)
+                        return
+                    if stream_state["suppress"]:
+                        return
+                    stream_state["buf"] += piece
+                    probe = stream_state["buf"].lstrip()
+                    if not probe:
+                        return
+                    if not stream_state["started"]:
+                        if len(probe) < 18 and (probe[0] in "{[`<" or "Action:"[:len(probe)] == probe):
+                            return
+                        if probe.startswith(("{", "[", "```", "<tool_call>", "<Seed:tool_call>", "<function=", "<invoke", "[TOOL_CALLS]", "Action:")):
+                            stream_state["suppress"] = True
+                            return
+                        stream_state["started"] = True
+                        out_chunk = stream_state["buf"]
+                        stream_state["buf"] = ""
+                    else:
+                        out_chunk = stream_state["buf"]
+                        stream_state["buf"] = ""
+                    for marker in ("<tool_call>", "<Seed:tool_call>", "[TOOL_CALLS]", "<function=", "<invoke", '{"tool"'):
+                        mpos = out_chunk.find(marker)
+                        if mpos != -1:
+                            if mpos > 0:
+                                self._delta(out_chunk[:mpos])
+                            stream_state["suppress"] = True
+                            return
+                    self._delta(out_chunk)
+
                 raw = self.llm.complete(folded, tools=self._tools_for(protocol), protocol=protocol,
-                                        stream_cb=self._delta, stats_cb=self._speed, reason_cb=pump.feed,
+                                        stream_cb=_smart_delta, stats_cb=self._speed, reason_cb=pump.feed,
                                         stop=self.bridge.stop)
                 pump.flush()
                 thought = (raw.get("reasoning") or "").strip()
@@ -778,8 +846,9 @@ class Agent:
                 session_mod.message(self.sid, "user", hint)
                 failure = "раздумья обрезаны лимитом токенов"
                 continue
+            known_names = self._known_tool_names()
             if protocol == "json":
-                parsed = llm_mod.parse_json_protocol(content)
+                parsed = llm_mod.parse_json_protocol(content, known_tools=known_names)
                 if not parsed["calls"]:
                     if self._retry_format(messages, content, parsed.get("content"), "json"):
                         continue
@@ -793,9 +862,9 @@ class Agent:
                 blocks = []
                 shots = []
                 for call in parsed["calls"]:
-                    name, args, result = self._record_call(call)
+                    name, args, result, f_edit = self._record_call(call)
                     hint = self._watch_loop(name, args, result)
-                    blocks.append("[%s] -> %s%s" % (name, self._observe(name, args, result),
+                    blocks.append("[%s] -> %s%s" % (name, self._observe(name, args, result, file_edit=f_edit),
                                                     ("\n" + hint) if hint else ""))
                     shot = self._shot_for(name, result)
                     if shot:
@@ -815,26 +884,58 @@ class Agent:
                     answer = self.goal_state["summary"]
                     break
                 continue
+
+            # Если в native-режиме шаблон GGUF не распарсил вызов в tool_calls, но модель явно вывела
+            # <tool_call> / [TOOL_CALLS] / <function=...> / JSON инструмента прямо в content — перехватываем!
+            text_fallback_calls = False
+            if not calls and content.strip():
+                fb = llm_mod.parse_json_protocol(content, known_tools=known_names, strict_for_native=True)
+                if fb["calls"]:
+                    calls = fb["calls"]
+                    content = fb.get("content") or ""
+                    text_fallback_calls = True
+
             if calls:
                 self._format_retries = 0
-                messages.append({"role": "assistant", "content": content or None, "tool_calls": calls})
-                session_mod.message(self.sid, "assistant", content or None, tool_calls=calls)
-                if content:
-                    self.bridge.emit({"type": "plan", "text": content})
-                for call in calls:
-                    name, args, result = self._record_call(call)
-                    text = self._observe(name, args, result)
-                    hint = self._watch_loop(name, args, result)
-                    if hint:
-                        text += "\n" + hint
-                    shot = self._shot_for(name, result)
-                    if shot:
-                        self._pending_shots.append(shot)
-                        text += "\nИзображение придёт следующим сообщением пользователя — дождись его, не делай выводов вслепую."
-                    messages.append({"role": "tool", "tool_call_id": call.get("id") or name, "content": text})
-                    session_mod.message(self.sid, "tool", text)
-                    if self.stalled:
-                        break
+                if text_fallback_calls:
+                    messages.append({"role": "assistant", "content": raw.get("content") or ""})
+                    session_mod.message(self.sid, "assistant", raw.get("content") or "")
+                    if content:
+                        self.bridge.emit({"type": "plan", "text": content})
+                    blocks = []
+                    shots = []
+                    for call in calls:
+                        name, args, result, f_edit = self._record_call(call)
+                        hint = self._watch_loop(name, args, result)
+                        blocks.append("[%s] -> %s%s" % (name, self._observe(name, args, result, file_edit=f_edit),
+                                                        ("\n" + hint) if hint else ""))
+                        shot = self._shot_for(name, result)
+                        if shot:
+                            shots.append(shot)
+                        if self.stalled:
+                            break
+                    messages.append({"role": "user", "content": vision_mod.make_user_content("\n\n".join(blocks), shots)})
+                    for block in blocks:
+                        session_mod.message(self.sid, "user", block)
+                else:
+                    messages.append({"role": "assistant", "content": content or None, "tool_calls": calls})
+                    session_mod.message(self.sid, "assistant", content or None, tool_calls=calls)
+                    if content:
+                        self.bridge.emit({"type": "plan", "text": content})
+                    for call in calls:
+                        name, args, result, f_edit = self._record_call(call)
+                        text = self._observe(name, args, result, file_edit=f_edit)
+                        hint = self._watch_loop(name, args, result)
+                        if hint:
+                            text += "\n" + hint
+                        shot = self._shot_for(name, result)
+                        if shot:
+                            self._pending_shots.append(shot)
+                            text += "\nИзображение придёт следующим сообщением пользователя — дождись его, не делай выводов вслепую."
+                        messages.append({"role": "tool", "tool_call_id": call.get("id") or name, "content": text})
+                        session_mod.message(self.sid, "tool", text)
+                        if self.stalled:
+                            break
                 if self.stalled:
                     self.bridge.emit({"type": "notice",
                                       "text": "модель зациклилась на %s — подход оборван, дальше другой тактикой" % name})
@@ -936,6 +1037,7 @@ class Agent:
     def run(self, user_text, history=None, goal=None, image=None, images=None):
         self._sync_context_window()
         self._fit_profile()
+        self.changes = changes_mod.WorkspaceTracker(getattr(self.tools, "workspace", None))
         protocol = self.cfg.get("tool_protocol", "auto")
         if protocol == "auto":
             protocol = self.llm.probe_protocol(schemas.native_tools(self.profile, self.cfg))
@@ -1074,11 +1176,28 @@ class Agent:
                 answer = "Модель за %d шагов не дала ответа — скорее всего уперлась в контекст или в недоступный инструмент." % total_steps
         messages.append({"role": "assistant", "content": answer})
         session_mod.message(self.sid, "assistant", answer)
+        changes_summary = None
+        if self.changes:
+            try:
+                changes_summary = self.changes.finalize()
+            except Exception:
+                changes_summary = None
+        rounds_done = self.rounds + (1 if self.goal_state else 0)
         done = {"type": "done", "text": answer, "steps": total_steps, "protocol": protocol,
-                "speed": self.speed, "rounds": self.rounds + (1 if self.goal_state else 0)}
+                "speed": self.speed, "rounds": rounds_done}
+        if changes_summary and (changes_summary.get("files_changed", 0) > 0 or self.goal):
+            done["changes"] = changes_summary
         if self.goal:
-            done["goal"] = {"achieved": bool(self.goal_state and self.goal_state["achieved"]),
-                            "summary": (self.goal_state or {}).get("summary", "")}
+            goal_payload = {
+                "achieved": bool(self.goal_state and self.goal_state["achieved"]),
+                "objective": (self.goal or {}).get("objective", ""),
+                "summary": (self.goal_state or {}).get("summary") or answer,
+                "evidence": (self.goal_state or {}).get("evidence", ""),
+                "steps": total_steps,
+                "rounds": rounds_done,
+                "points": [dict(p) for p in self.checklist],
+            }
+            done["goal"] = goal_payload
         try:
             if self.cfg.get("provider") == "lmstudio":
                 lms_mod.invalidate()

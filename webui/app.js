@@ -343,49 +343,260 @@ function pushNotice(text, cls) {
   return add(node('div', 'notice ' + (cls || ''), md(text)));
 }
 
-/* ---------- reasoning: inline "глубокие раздумья" line ---------- */
-function diveStart() {
-  if (diveEl) return diveEl;
+/* ---------- reasoning & Screenshot-2 inline action timeline ("глубокие раздумья") ---------- */
+let lastPlanNote = '';
+
+function _fmtShortBytes(bytes) {
+  const b = Number(bytes) || 0;
+  if (b <= 0) return '';
+  if (b < 1024) return b + 'B';
+  if (b < 1048576) return Math.max(1, Math.round(b / 1024)) + 'KB';
+  return (b / 1048576).toFixed(1) + 'MB';
+}
+
+function _parseArgsObj(raw) {
+  if (raw && typeof raw === 'object') return raw;
+  if (typeof raw === 'string') {
+    try { return JSON.parse(raw); } catch (e) { return { raw }; }
+  }
+  return {};
+}
+
+function _parseResultText(raw) {
+  if (raw == null) return '';
+  if (typeof raw === 'string') {
+    try {
+      const obj = JSON.parse(raw);
+      if (obj && typeof obj === 'object') {
+        if (typeof obj.stdout === 'string' || typeof obj.stderr === 'string') {
+          return [obj.stdout || '', obj.stderr ? ('[stderr]\n' + obj.stderr) : '', obj.error || ''].filter(Boolean).join('\n').trim();
+        }
+        if (typeof obj.out === 'string') return (obj.out + (obj.error ? '\n' + obj.error : '')).trim();
+        if (typeof obj.content === 'string') return obj.content;
+        if (typeof obj.error === 'string' && Object.keys(obj).length <= 2) return 'Ошибка: ' + obj.error;
+      }
+    } catch (e) {}
+    return raw;
+  }
+  return JSON.stringify(raw, null, 2);
+}
+
+function _renderDiffHtml(diffText) {
+  if (!diffText) return '<div class="diff-line">Изменения без текстового диффа</div>';
+  return String(diffText).split('\n').map((ln) => {
+    let cls = 'diff-line';
+    if (ln.startsWith('+++') || ln.startsWith('---') || ln.startsWith('@@')) cls += ' hunk';
+    else if (ln.startsWith('+')) cls += ' add';
+    else if (ln.startsWith('-')) cls += ' del';
+    return '<div class="' + cls + '">' + esc(ln || ' ') + '</div>';
+  }).join('');
+}
+
+function _updateDiveHeader(d) {
+  if (!d) return;
+  const durEl = d.head.querySelector('.dive-dur');
+  const secs = d.live ? ((Date.now() - d.t0) / 1000).toFixed(1) + ' с' : (d.finalSecs || '');
+  const parts = [];
+  if (secs) parts.push(secs);
+  if (d.toolCount > 0) {
+    const w = d.toolCount === 1 ? 'действие' : (d.toolCount < 5 ? 'действия' : 'действий');
+    parts.push(d.toolCount + ' ' + w);
+  } else if (d.totalChars > 0) {
+    parts.push(d.totalChars.toLocaleString('ru-RU') + ' зн.');
+  }
+  if (durEl) durEl.textContent = parts.length ? ('· ' + parts.join(' · ')) : '';
+}
+
+function diveStart(forTool) {
+  if (diveEl) {
+    if (forTool) {
+      diveEl.wrap.classList.remove('only-thoughts');
+      diveEl.wrap.hidden = false;
+      if (!diveEl.userToggled) {
+        diveEl.body.hidden = false;
+        diveEl.meta.textContent = diveEl.live ? 'ход работы и раздумья · нажми, чтобы свернуть' : 'ход работы · нажми, чтобы свернуть';
+      }
+    }
+    return diveEl;
+  }
   dropWelcome();
   ensureTurn();
-  const wrap = node('div', 'dive');
-  const head = node('div', 'dive-head live');
+  const wrap = node('div', 'dive' + (forTool ? '' : ' only-thoughts'));
+  const head = node('div', 'dive-head' + (replaying ? '' : ' live'));
   head.innerHTML = '<span class="mark">⌁</span><span class="label">Глубокие раздумья</span>' +
     '<span class="dive-dur"></span>';
-  const body = node('div', 'dive-body');
-  const meta = node('div', 'dive-meta', 'идёт поток · нажми, чтобы свернуть');
-  head.onclick = () => { body.hidden = !body.hidden; meta.textContent = body.hidden ? 'свернуто · нажми, чтобы открыть' : 'идёт поток · нажми, чтобы свернуть'; if (!body.hidden) body.scrollTop = body.scrollHeight; };
+  const body = node('div', 'dive-body dive-timeline');
+  const initOpen = forTool ? true : expandReasoning;
+  const meta = node('div', 'dive-meta', initOpen ? 'идёт поток · нажми, чтобы свернуть' : 'свернуто · нажми, чтобы открыть');
+  const state = {
+    wrap, head, body, meta,
+    curThoughtEl: null,
+    curThoughtText: '',
+    totalChars: 0,
+    toolCount: 0,
+    pendingStepEl: null,
+    userToggled: false,
+    t0: Date.now(),
+    finalSecs: '',
+    live: !replaying,
+  };
+  head.onclick = () => {
+    state.userToggled = true;
+    body.hidden = !body.hidden;
+    meta.textContent = body.hidden ? 'свернуто · нажми, чтобы открыть' : 'открыто · нажми, чтобы свернуть';
+    if (!body.hidden) body.scrollTop = body.scrollHeight;
+  };
   wrap.append(head, meta, body);
-  body.hidden = !expandReasoning;
-  if (!showReasoning) wrap.hidden = true;
+  body.hidden = !initOpen;
+  if (!showReasoning && !forTool) wrap.hidden = true;
   add(wrap);
-  diveEl = { wrap: wrap, head: head, body: body, text: '', t0: Date.now(), live: !replaying };
+  diveEl = state;
   return diveEl;
 }
 
+function _ensureThoughtSeg(d) {
+  if (!d.curThoughtEl) {
+    d.curThoughtEl = node('div', 'dive-thought');
+    d.body.appendChild(d.curThoughtEl);
+  }
+  return d.curThoughtEl;
+}
+
 function showDive(piece) {
-  const d = diveStart();
-  d.wrap.hidden = !showReasoning;
-  d.text += piece;
-  d.body.textContent = d.text.length > 8000 ? d.text.slice(-8000) : d.text;
-  d.body.scrollTop = d.body.scrollHeight;
+  if (!piece) return;
+  const d = diveStart(false);
+  if (d.toolCount === 0) d.wrap.hidden = !showReasoning;
+  const seg = _ensureThoughtSeg(d);
+  d.curThoughtText += piece;
+  d.totalChars += piece.length;
+  seg.textContent = d.curThoughtText.length > 8000 ? d.curThoughtText.slice(-8000) : d.curThoughtText;
+  _updateDiveHeader(d);
+  if (!d.body.hidden) d.body.scrollTop = d.body.scrollHeight;
 }
 
 function diveFinal(text) {
-  const d = diveEl || diveStart();
-  diveEl = null;
-  const full = (text || d.text || '').trim();
-  const secs = d.live ? ((Date.now() - d.t0) / 1000).toFixed(1) + ' с' : full.length + ' зн.';
-  d.head.classList.remove('live');
-  d.live = false;
-  d.head.querySelector('.dive-dur').textContent = '· ' + secs + ' · ' + full.length.toLocaleString('ru-RU') + ' знаков';
-  d.body.textContent = full.length > 12000 ? full.slice(-12000) : full;
-  d.body.hidden = !expandReasoning;
-  d.wrap.hidden = !showReasoning;
-  d.body.scrollTop = 0;
+  const clean = String(text || '').trim();
+  if (!clean && !diveEl) return;
+  const d = diveEl || diveStart(false);
+  const seg = _ensureThoughtSeg(d);
+  if (clean) {
+    const prevLen = d.curThoughtText.length;
+    d.curThoughtText = clean;
+    d.totalChars = Math.max(d.totalChars, d.totalChars - prevLen + clean.length);
+    seg.textContent = clean.length > 12000 ? clean.slice(-12000) : clean;
+  }
+  // Закрываем текущий текстовый сегмент, чтобы следующее действие встало отдельной строкой ниже
+  d.curThoughtEl = null;
+  d.curThoughtText = '';
+  _updateDiveHeader(d);
 }
 
-function dropDive() { diveEl = null; }
+function divePlan(text) {
+  const clean = String(text || '').trim();
+  if (!clean) return;
+  lastPlanNote = clean;
+  const d = diveStart(true);
+  d.curThoughtEl = null;
+  d.curThoughtText = '';
+  const row = node('div', 'dive-plan-note', esc(clean));
+  d.body.appendChild(row);
+  if (!d.body.hidden) d.body.scrollTop = d.body.scrollHeight;
+}
+
+function closeDive() {
+  if (!diveEl) return;
+  const d = diveEl;
+  diveEl = null;
+  d.head.classList.remove('live');
+  if (d.live) d.finalSecs = ((Date.now() - d.t0) / 1000).toFixed(1) + ' с';
+  d.live = false;
+  if (d.pendingStepEl) { d.pendingStepEl.remove(); d.pendingStepEl = null; }
+  _updateDiveHeader(d);
+  d.meta.textContent = d.body.hidden ? 'свернуто · нажми, чтобы открыть' : 'завершено · нажми, чтобы свернуть';
+}
+
+function dropDive() {
+  closeDive();
+  lastPlanNote = '';
+}
+
+const _EDIT_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.5 2.5h-5A1.5 1.5 0 0 0 3 4v8a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 12V7.5"/><path d="m12.1 2.4 1.5 1.5L8.5 9H7V7.5z"/></svg>';
+
+function _describeToolForDive(tool, argsObj, fileEdit, noteHint) {
+  if (fileEdit || tool === 'write_file' || tool === 'edit_file') {
+    const fname = (fileEdit && (fileEdit.name || fileEdit.rel_path)) || String(argsObj.path || 'file').split(/[\\/]/).pop();
+    const fsize = fileEdit ? _fmtShortBytes(fileEdit.size_bytes) : '';
+    const added = fileEdit && fileEdit.added != null ? fileEdit.added : null;
+    const removed = fileEdit && fileEdit.removed != null ? fileEdit.removed : null;
+    return { mode: 'edit', kind: 'Edit', fname, fsize, added, removed, fileEdit };
+  }
+  if (tool === 'shell' || tool === 'powershell' || tool === 'ssh' || tool === 'python' || tool === 'git') {
+    let kind = 'Pwsh';
+    let cmdText = '';
+    if (tool === 'python') {
+      kind = 'Python';
+      cmdText = String(argsObj.code || '');
+    } else if (tool === 'ssh') {
+      kind = 'SSH';
+      cmdText = String(argsObj.command || '');
+    } else if (tool === 'git') {
+      kind = 'Git';
+      cmdText = 'git ' + [argsObj.action, argsObj.path, argsObj.message ? ('-m "' + argsObj.message + '"') : ''].filter(Boolean).join(' ');
+    } else {
+      kind = argsObj.mode === 'bash' ? 'Bash' : 'Pwsh';
+      cmdText = String(argsObj.cmd || argsObj.command || '');
+    }
+    const firstLine = cmdText.trim().split('\n')[0] || tool;
+    const desc = (noteHint && noteHint.length <= 90) ? noteHint : (firstLine.length > 72 ? firstLine.slice(0, 72) + '…' : firstLine);
+    return { mode: 'cmd', kind, desc, cmdText };
+  }
+  if (tool === 'read_file') {
+    const p = String(argsObj.path || '').split(/[\\/]/).slice(-2).join('/');
+    const range = argsObj.offset ? `${argsObj.offset}–${Number(argsObj.offset) + Number(argsObj.limit || 200)}` : '';
+    return { mode: 'info', kind: 'Read', fname: p || 'file', fsize: range };
+  }
+  if (tool === 'list_dir' || tool === 'glob') {
+    const p = String(argsObj.path || argsObj.pattern || '.');
+    return { mode: 'info', kind: tool === 'glob' ? 'Glob' : 'List', desc: p };
+  }
+  if (tool === 'grep') {
+    return { mode: 'info', kind: 'Grep', desc: `${argsObj.pattern || ''}` + (argsObj.path ? ` in ${argsObj.path}` : '') };
+  }
+  if (tool === 'web_search' || tool === 'rag_search') {
+    return { mode: 'info', kind: tool === 'rag_search' ? 'RAG' : 'Search', desc: String(argsObj.query || '') };
+  }
+  if (tool === 'web_fetch') {
+    return { mode: 'info', kind: 'Fetch', desc: String(argsObj.url || '') };
+  }
+  if (tool === 'check_goal_point' || tool === 'finish_goal') {
+    return {
+      mode: 'info',
+      kind: 'Goal ✓',
+      desc: tool === 'finish_goal' ? String(argsObj.summary || 'закрытие цели') : ('Пункт #' + (argsObj.index || '?') + ' проверен'),
+    };
+  }
+  const preview = Object.values(argsObj).filter((v) => typeof v === 'string' || typeof v === 'number').slice(0, 2).join(' · ');
+  return { mode: 'info', kind: tool, desc: preview || 'вызов инструмента' };
+}
+
+function diveToolStart(ev) {
+  const argsObj = _parseArgsObj(ev.args);
+  traceRow('', ev.tool, typeof ev.args === 'string' ? ev.args : JSON.stringify(argsObj));
+  const d = diveStart(true);
+  d.curThoughtEl = null;
+  d.curThoughtText = '';
+  if (d.pendingStepEl) d.pendingStepEl.remove();
+  const info = _describeToolForDive(ev.tool, argsObj, null, lastPlanNote);
+  const step = node('div', 'dive-step pending');
+  const head = node('div', 'dive-step-head');
+  head.innerHTML = `<span class="dive-step-ico">⏳</span><span class="dive-kind">${esc(info.kind)}</span>`
+    + `<span class="dive-dot">·</span><span class="dive-desc">${esc(info.fname || info.desc || ev.tool)}</span>`
+    + `<span class="dive-running-pill">выполняется…</span>`;
+  step.appendChild(head);
+  d.body.appendChild(step);
+  d.pendingStepEl = step;
+  if (!d.body.hidden) d.body.scrollTop = d.body.scrollHeight;
+}
 
 function syncQuickControls() {
   $('#showReasoning').checked = showReasoning;
@@ -420,36 +631,116 @@ function finishAnswer(html, label, rawText) {
 
 function resetStream() { answerEl = null; }
 
-/* ---------- tool calls ---------- */
+/* ---------- tool calls rendered inside .dive (Screenshot-2 style) ---------- */
 function toolLine(ev, open) {
   dropWelcome();
   ensureTurn();
-  const wrap = node('div', 'call');
-  const line = node('div', 'call-line ' + (ev.ok ? 'good' : 'bad'));
-  const args = typeof ev.args === 'string' ? ev.args : JSON.stringify(ev.args || {});
-  line.innerHTML = '<span class="chev">' + (open ? '▾' : '▸') + '</span>' +
-    '<span class="name">' + esc(ev.tool) + '</span>' +
-    '<span class="arg">' + esc(String(args).slice(0, 160)) + '</span>' +
-    '<span class="when">' + at(ev.ts) + '</span>';
-  const card = node('div', 'call-card');
-  card.hidden = !open;
-  if (args) card.appendChild(node('div', 'cmd', esc(shorten(args, 900))));
-  card.appendChild(node('pre', null, esc(shorten(ev.result, 24000))));
-  if (ev.image) {
-    const img = node('img');
-    img.src = '/shot?path=' + encodeURIComponent(ev.image);
-    img.alt = 'скриншот';
-    img.addEventListener('click', () => window.open(img.src));
-    card.appendChild(img);
+  const d = diveStart(true);
+  d.curThoughtEl = null;
+  d.curThoughtText = '';
+  if (d.pendingStepEl) { d.pendingStepEl.remove(); d.pendingStepEl = null; }
+  d.toolCount += 1;
+  _updateDiveHeader(d);
+
+  const argsObj = _parseArgsObj(ev.args);
+  const noteHint = lastPlanNote;
+  lastPlanNote = '';
+  const info = _describeToolForDive(ev.tool, argsObj, ev.file_edit, noteHint);
+  const outClean = _parseResultText(ev.result);
+
+  const step = node('div', 'dive-step ' + (ev.ok ? 'good' : 'bad'));
+  const head = node('div', 'dive-step-head');
+
+  if (info.mode === 'edit') {
+    const plusHtml = info.added != null ? `<span class="dive-plus">+${info.added}</span>` : '';
+    const minusHtml = info.removed != null ? `<span class="dive-minus">-${info.removed}</span>` : '';
+    const sizeHtml = info.fsize ? `<span class="dive-fsize">${esc(info.fsize)}</span>` : '';
+    head.innerHTML = `<span class="dive-step-ico">${_EDIT_SVG}</span>`
+      + `<span class="dive-kind">Edit</span><span class="dive-dot">·</span>`
+      + `<span class="dive-fname" title="${esc((info.fileEdit && info.fileEdit.path) || argsObj.path || '')}">${esc(info.fname)}</span>`
+      + sizeHtml + plusHtml + minusHtml;
+
+    const diffCard = node('div', 'dive-step-card');
+    diffCard.hidden = !open;
+    if (info.fileEdit && info.fileEdit.diff) {
+      diffCard.innerHTML = _renderDiffHtml(info.fileEdit.diff);
+    } else {
+      diffCard.appendChild(node('pre', 'dive-out-pre', esc(shorten(outClean, 6000))));
+    }
+
+    head.onclick = (e) => {
+      if (e.target.classList.contains('dive-fname') && info.fileEdit) {
+        e.stopPropagation();
+        openReviewModal({ files_changed: 1, insertions: info.added || 0, deletions: info.removed || 0, files: [info.fileEdit] });
+        return;
+      }
+      diffCard.hidden = !diffCard.hidden;
+    };
+    step.append(head, diffCard);
+  } else if (info.mode === 'cmd') {
+    const cmdLines = String(info.cmdText || '').trim().split('\n').filter((l) => l !== '');
+    const startExpanded = open || (cmdLines.length > 0 && cmdLines.length <= 10);
+    head.innerHTML = `<span class="dive-step-ico dive-chev">${startExpanded ? '⌄' : '›'}</span>`
+      + `<span class="dive-kind">${esc(info.kind)}</span><span class="dive-dot">·</span>`
+      + `<span class="dive-desc" title="${esc(info.cmdText)}">${esc(info.desc)}</span>`;
+
+    const cmdCard = node('div', 'dive-cmd-card');
+    cmdCard.hidden = !startExpanded;
+    cmdLines.forEach((ln) => {
+      const row = node('div', 'dive-cmd-line');
+      row.innerHTML = `<span class="dive-dollar">$</span><span>${esc(ln)}</span>`;
+      cmdCard.appendChild(row);
+    });
+    if (outClean) {
+      const outPre = node('pre', 'dive-out-pre', esc(shorten(outClean, 12000)));
+      if (!ev.ok) outPre.style.color = 'var(--fail)';
+      cmdCard.appendChild(outPre);
+    }
+    head.onclick = () => {
+      cmdCard.hidden = !cmdCard.hidden;
+      const ch = head.querySelector('.dive-chev');
+      if (ch) ch.textContent = cmdCard.hidden ? '›' : '⌄';
+    };
+    step.append(head, cmdCard);
+  } else {
+    const showOpen = open || !!ev.image || !ev.ok;
+    const targetHtml = info.fname
+      ? `<span class="dive-fname">${esc(info.fname)}</span>`
+      : `<span class="dive-desc">${esc(info.desc || '')}</span>`;
+    const sizeHtml = info.fsize ? `<span class="dive-fsize">${esc(info.fsize)}</span>` : '';
+    head.innerHTML = `<span class="dive-step-ico dive-chev">${showOpen ? '⌄' : '›'}</span>`
+      + `<span class="dive-kind">${esc(info.kind)}</span><span class="dive-dot">·</span>`
+      + targetHtml + sizeHtml;
+
+    const card = node('div', 'dive-step-card');
+    card.hidden = !showOpen;
+    if (outClean) {
+      const pre = node('pre', 'dive-out-pre', esc(shorten(outClean, 16000)));
+      pre.style.marginTop = '0';
+      pre.style.paddingTop = '0';
+      pre.style.borderTop = 'none';
+      card.appendChild(pre);
+    }
+    if (ev.image) {
+      const img = node('img');
+      img.src = '/shot?path=' + encodeURIComponent(ev.image);
+      img.alt = 'скриншот';
+      img.addEventListener('click', () => window.open(img.src));
+      card.appendChild(img);
+    }
+    head.onclick = () => {
+      card.hidden = !card.hidden;
+      const ch = head.querySelector('.dive-chev');
+      if (ch) ch.textContent = card.hidden ? '›' : '⌄';
+    };
+    step.append(head, card);
   }
-  line.onclick = () => {
-    card.hidden = !card.hidden;
-    line.querySelector('.chev').textContent = card.hidden ? '▸' : '▾';
-  };
-  wrap.append(line, card);
-  add(wrap);
-  traceRow(ev.ok ? 'good' : 'bad', ev.tool, String(args));
-  return wrap;
+
+  d.body.appendChild(step);
+  if (!d.body.hidden) d.body.scrollTop = d.body.scrollHeight;
+  const rawArgsStr = typeof ev.args === 'string' ? ev.args : JSON.stringify(argsObj);
+  traceRow(ev.ok ? 'good' : 'bad', ev.tool, rawArgsStr);
+  return step;
 }
 
 function shorten(value, limit) {
@@ -669,27 +960,30 @@ function render(ev, replayed) {
       turn = null; dropDive(); resetStream(); closeBand();
       pushUser(ev.text, ev.images);
       break;
-    case 'plan': pushNotice('→ ' + ev.text); break;
+    case 'plan': divePlan(ev.text); break;
     case 'reason': showDive(ev.text); break;
     case 'thinking': diveFinal(ev.text); break;
     case 'delta': streamPiece(ev.text); break;
     case 'speed': showSpeed(ev); break;
     case 'goal': goalBand(ev); break;
-    case 'tool_start': traceRow('', ev.tool, 'вызов…'); break;
+    case 'tool_start': diveToolStart(ev); break;
     case 'tool': resetStream(); toolLine(ev, false); break;
-    case 'question': case 'approve': resetStream(); dropDive(); askBand(ev); break;
+    case 'question': case 'approve': resetStream(); closeDive(); askBand(ev); break;
     case 'notice': pushNotice(ev.text, 'warn'); break;
     case 'context': paintContext(ev); break;
     case 'compact': pushNotice('контекст сжат: свёрнуто ходов — ' + ev.folded_turns
       + (ev.before ? ' · ' + fmtTok(ev.before) + '→' + fmtTok(ev.after) + ' ток' : ''), 'warn compact'); break;
-    case 'error': resetStream(); dropDive(); pushNotice('сбой: ' + ev.text, 'bad'); break;
+    case 'error': resetStream(); closeDive(); pushNotice('сбой: ' + ev.text, 'bad'); break;
     case 'stopped':
-      resetStream(); dropDive(); pushNotice('остановлено', 'warn');
+      resetStream(); closeDive(); pushNotice('остановлено', 'warn');
       finishRun(ev || {});
       break;
     case 'done':
-      dropDive();
-      finishAnswer(md(ev.text), 'модель · ' + (ev.protocol === 'json' ? 'json-инструменты' : 'native'), ev.text);
+      closeDive();
+      finishAnswer(md(ev.text), 'модель · ' + (ev.protocol === 'json' ? 'без tool_use' : 'native'), ev.text);
+      if ((ev.changes && ev.changes.files_changed > 0) || ev.goal) {
+        renderChangesSummaryBar(ev.changes, ev.goal, ev.steps, ev.rounds);
+      }
       if (!replayed && typeof onVoiceCallAnswer === 'function' && ev.text) {
         const handledByCall = onVoiceCallAnswer(ev.text);
         if (!handledByCall && typeof speakAnswer === 'function') speakAnswer(ev.text);
@@ -826,6 +1120,9 @@ async function openSession(id) {
   const data = await api('/api/history?session=' + encodeURIComponent(id));
   const title = (data.meta && data.meta.title) || 'новая сессия';
   $('#sessionTitle').textContent = title;
+  if (typeof syncHeaderWorkspaceChip === 'function') {
+    syncHeaderWorkspaceChip((data.meta && data.meta.workspace) || '');
+  }
   if (data.running) {
     running = true;
     $('#send').disabled = true;
@@ -939,6 +1236,58 @@ function renderModelMenu(st) {
     });
   }
 
+  const lmsBar = $('#mmLmsBar');
+  if (lmsBar) {
+    const isLms = st.provider === 'lmstudio';
+    lmsBar.hidden = !isLms;
+    if (isLms) {
+      const rtInfo = st.lms_runtimes || {};
+      const engChip = $('#mmLmsEngineChip');
+      if (engChip) {
+        if (rtInfo.vulkan_active) {
+          engChip.textContent = '🌋 Vulkan' + (rtInfo.active_version ? ' v' + rtInfo.active_version : '');
+          engChip.title = 'Активен движок Vulkan llama.cpp (нажми для настроек LM Studio)';
+        } else if (rtInfo.active_name) {
+          const low = rtInfo.active_name.toLowerCase();
+          const ico = low.includes('cuda') ? '🟢 CUDA' : (low.includes('rocm') ? '🔴 ROCm' : '💻 CPU');
+          engChip.textContent = ico + (rtInfo.active_version ? ' v' + rtInfo.active_version : '');
+          engChip.title = 'Активен движок: ' + rtInfo.active_name + ' (нажми, чтобы переключить на Vulkan)';
+        } else {
+          engChip.textContent = '⚡ LM Studio';
+        }
+        engChip.onclick = () => {
+          setModelMenu(false);
+          setView('lm');
+        };
+      }
+      const qCtx = $('#mmQuickCtx');
+      if (qCtx && document.activeElement !== qCtx) {
+        const curCtx = clampContext(st.lms_context_length || st.context_tokens, 16384);
+        const stdVals = ['2048', '4096', '8192', '16384', '32768', '65536', '131072'];
+        let customOpt = qCtx.querySelector('option[data-custom="1"]');
+        if (!stdVals.includes(String(curCtx))) {
+          if (!customOpt) {
+            customOpt = document.createElement('option');
+            customOpt.dataset.custom = '1';
+            qCtx.appendChild(customOpt);
+          }
+          customOpt.value = String(curCtx);
+          customOpt.textContent = curCtx.toLocaleString('ru-RU') + ' ток.';
+        } else if (customOpt) {
+          customOpt.remove();
+        }
+        qCtx.value = String(curCtx);
+      }
+      const openBtn = $('#mmOpenLoaderBtn');
+      if (openBtn) {
+        openBtn.onclick = () => {
+          setModelMenu(false);
+          openLmsLoadModal(currentModel);
+        };
+      }
+    }
+  }
+
   const list = $('#mmModels');
   if (list) {
     const keepScroll = list.scrollTop;
@@ -947,14 +1296,27 @@ function renderModelMenu(st) {
       list.appendChild(node('div', 'mm-empty', 'Моделей нет — проверь LM Studio или провайдера.'));
     }
     const vision = new Set(ps.vision_models || []);
+    const metaMap = ps.model_meta || {};
+    const loadedSet = new Set((st.lms_loaded || []).map((x) => String(x || '').toLowerCase()));
     models.forEach((m) => {
       const on = m === currentModel;
+      const meta = metaMap[m] || {};
+      const isLoaded = !!(meta.loaded || loadedSet.has(String(m).toLowerCase()));
+      const loadedCtxTxt = meta.loadedContextLength
+        ? (meta.loadedContextLength >= 1024 ? Math.round(meta.loadedContextLength / 1024) + 'K' : meta.loadedContextLength)
+        : '';
+      const stateBadge = st.provider === 'lmstudio'
+        ? (isLoaded
+            ? '<span class="mm-state-pill loaded" title="Модель загружена в видеопамять">● ' + esc(loadedCtxTxt || 'VRAM') + '</span>'
+            : '<span class="mm-state-pill disk" title="Модель на диске (не загружена)">диск</span>')
+        : '';
       const b = node('button', 'mm-model' + (on ? ' on' : ''),
         '<span class="mm-model-name">' + esc(shortModel(m)) + '</span>'
         + (vision.has(m) ? '<span class="mm-vision">vision</span>' : '')
+        + stateBadge
         + '<span class="mm-check">✓</span>');
       b.type = 'button';
-      b.title = m;
+      b.title = m + (meta.maxContextLength ? ' · макс. контекст ' + meta.maxContextLength : '');
       b.setAttribute('aria-pressed', on ? 'true' : 'false');
       b.onclick = async () => {
         const sel = $('#model');
@@ -962,7 +1324,23 @@ function renderModelMenu(st) {
         setModelMenu(false);
         await patchConfig('model', m);
       };
-      list.appendChild(b);
+      if (st.provider === 'lmstudio') {
+        const row = node('div', 'mm-model-row');
+        const cfgBtn = node('button', 'mm-cfg-btn', isLoaded ? '⚙️' : '⚡ Загрузить');
+        cfgBtn.type = 'button';
+        cfgBtn.title = isLoaded
+          ? 'Изменить окно контекста / GPU Offload / перезагрузить модель'
+          : 'Выбрать окно контекста и загрузить модель в память как в LM Studio';
+        cfgBtn.onclick = (ev) => {
+          ev.stopPropagation();
+          setModelMenu(false);
+          openLmsLoadModal(m);
+        };
+        row.append(b, cfgBtn);
+        list.appendChild(row);
+      } else {
+        list.appendChild(b);
+      }
     });
     list.scrollTop = keepScroll;
   }
@@ -976,8 +1354,14 @@ async function refreshState() {
   $('#dnsChip').textContent = 'dns-обход: ' + (st.dns_probe && st.dns_probe.ok ? st.dns_probe.ip : 'не работает');
   $('#dnsChip').title = st.dns_probe && st.dns_probe.ok ? '' : (st.dns_probe || {}).error || '';
   $('#modelCount').textContent = (ps.label || st.provider) + ' · моделей: ' + ((ps.models || []).length);
-  $('#lmContext').value = clampContext(st.lms_context_length || st.context_tokens, 8192);
-  $('#lmTtl').value = st.lms_ttl || 0;
+  const curLmsCtx = clampContext(st.lms_context_length || st.context_tokens, 16384);
+  if ($('#lmContext') && document.activeElement !== $('#lmContext')) $('#lmContext').value = curLmsCtx;
+  if ($('#lmGpuQuick') && document.activeElement !== $('#lmGpuQuick')) $('#lmGpuQuick').value = st.lms_gpu_offload || 'max';
+  if ($('#lmKvQuick') && document.activeElement !== $('#lmKvQuick')) $('#lmKvQuick').value = st.lms_kv_quant || 'f16';
+  if ($('#lmTtl') && document.activeElement !== $('#lmTtl')) $('#lmTtl').value = st.lms_ttl || 0;
+  document.querySelectorAll('#lmPageCtxChips .ctx-preset-pill').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.ctx) === curLmsCtx);
+  });
   if (document.activeElement !== $('#systemPrompt')) $('#systemPrompt').value = st.system_prompt || '';
   $('#searxngEnabled').checked = !!st.search_searxng;
   if (document.activeElement !== $('#searxngUrl')) $('#searxngUrl').value = st.search_searxng_url || 'http://127.0.0.1:8080';
@@ -1029,10 +1413,11 @@ async function refreshState() {
   const visionSet = new Set(ps.vision_models || []);
   fillSelect($('#model'), models.map((m) => [m, shortModel(m) + (visionSet.has(m) ? ' · vision' : '')]), st.model || models[0] || '');
   fillSelect($('#profile'), [['core', 'core'], ['full', 'full']], st.tool_profile);
-  fillSelect($('#protocol'), [['auto', 'tools auto'], ['native', 'tools native'], ['json', 'tools json']], st.tool_protocol);
+  fillSelect($('#protocol'), [['auto', 'авто'], ['native', 'native'], ['json', 'без tool_use']], st.tool_protocol);
   fillSelect($('#perms'), [['auto', 'права: авто'], ['unrestricted', 'права: всё'], ['ask', 'права: спрос']],
     (st.permissions && st.permissions.mode) || 'auto');
   renderModelMenu(st);
+  if (typeof syncWorkspaceSidebarUi === 'function') syncWorkspaceSidebarUi(st);
   $('#modeHint').textContent = {
     auto: 'авто: чёрный список всё равно спрашивает',
     unrestricted: 'ВСЕ ПРАВА: подтверждений нет',
@@ -1111,56 +1496,218 @@ function confirmDelete(title) {
   });
 }
 
+let wsFilterOnlyActive = localStorage.getItem('lh.wsFilterOnlyActive') === '1';
+let wsCollapsedMap = {};
+try { wsCollapsedMap = JSON.parse(localStorage.getItem('lh.wsCollapsed') || '{}') || {}; } catch (e) { wsCollapsedMap = {}; }
+
+function _wsKey(rawPath) {
+  const s = String(rawPath || '').trim();
+  if (!s) return '__none__';
+  return s.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+}
+
+function _wsShortName(rawPath, customName) {
+  if (customName && String(customName).trim()) return String(customName).trim();
+  const s = String(rawPath || '').trim().replace(/[\\/]+$/, '');
+  if (!s) return 'Без пространства';
+  const parts = s.split(/[\\/]/).filter(Boolean);
+  return parts[parts.length - 1] || s;
+}
+
+function _buildSessionRowEl(row) {
+  const el = node('div', 'session' + (row.id === sessionId ? ' active' : ''));
+  el.dataset.id = row.id;
+  const label = node('button', 'session-title', esc(row.title || row.id));
+  label.title = (row.title || row.id) + (row.workspace ? `\n📁 ${row.workspace}` : '\n🌐 Без рабочего пространства');
+  label.onclick = async () => {
+    try {
+      const targetWs = row.workspace || '';
+      const curWs = (stateCache && stateCache.workspace) || '';
+      if (_wsKey(targetWs) !== _wsKey(curWs)) {
+        try {
+          await api('/api/workspace/select', { path: targetWs });
+        } catch (e) { /* если папка была перемещена — всё равно откроем историю чата */ }
+      }
+      await openSession(row.id);
+      if (currentView !== 'chat') setView('chat');
+      await refreshState();
+    } catch (err) {
+      pushNotice(err.message, 'bad');
+    }
+  };
+
+  const moveWs = node('button', 'session-action', '📁');
+  moveWs.title = row.workspace
+    ? `Пространство: ${row.workspace} (нажми, чтобы сменить или отвязать)`
+    : 'Привязать чат к рабочему пространству (по желанию)';
+  moveWs.setAttribute('aria-label', moveWs.title);
+  moveWs.style.fontSize = '12px';
+  moveWs.onclick = (e) => {
+    e.stopPropagation();
+    openWorkspaceModal(row.id);
+  };
+
+  const rename = node('button', 'session-action', '✎');
+  rename.title = 'Переименовать сессию';
+  rename.setAttribute('aria-label', rename.title);
+  rename.onclick = () => editSessionTitle(el, row);
+
+  const download = node('button', 'session-action', '↓');
+  download.title = 'Экспорт в Markdown';
+  download.setAttribute('aria-label', download.title);
+  download.onclick = async () => {
+    download.disabled = true;
+    try {
+      const res = await fetch('/api/session/export?session=' + encodeURIComponent(row.id));
+      if (!res.ok) throw new Error('Не удалось экспортировать сессию (' + res.status + ')');
+      const url = URL.createObjectURL(await res.blob());
+      const link = node('a');
+      link.href = url;
+      link.download = row.id + '.md';
+      link.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (err) { pushNotice(err.message, 'bad'); }
+    finally { download.disabled = false; }
+  };
+
+  const del = node('button', 'session-action session-del', '&times;');
+  del.title = 'Удалить сессию';
+  del.setAttribute('aria-label', del.title);
+  del.onclick = async () => {
+    if (!await confirmDelete(row.title || row.id)) return;
+    try {
+      await api('/api/session/delete', { session: row.id });
+      if (sessionId === row.id) {
+        const res = await api('/api/new', { title: '' });
+        await openSession(res.session);
+      }
+      await refreshState();
+    } catch (err) { pushNotice(err.message, 'bad'); }
+  };
+
+  el.append(label, moveWs, rename, download, del);
+  return el;
+}
+
 function renderSessions() {
   if ($('#sessions .session-edit')) return;
-  const filter = $('#sessionSearch').value.trim().toLocaleLowerCase();
-  const rows = ((stateCache || {}).sessions || []).filter((row) =>
-    (row.title + ' ' + row.id).toLocaleLowerCase().includes(filter));
-  $('#sessions').replaceChildren();
-  if (!rows.length) $('#sessions').append(node('div', 'page-sub', filter ? 'Ничего не найдено' : 'Пока нет сессий'));
-  rows.forEach((row) => {
-    const el = node('div', 'session' + (row.id === sessionId ? ' active' : ''));
-    el.dataset.id = row.id;
-    const label = node('button', 'session-title', esc(row.title || row.id));
-    label.title = row.title || row.id;
-    label.onclick = () => openSession(row.id).catch((err) => pushNotice(err.message, 'bad'));
-    const rename = node('button', 'session-action', '✎');
-    rename.title = 'Переименовать сессию';
-    rename.setAttribute('aria-label', rename.title);
-    rename.onclick = () => editSessionTitle(el, row);
-    const download = node('button', 'session-action', '↓');
-    download.title = 'Экспорт в Markdown';
-    download.setAttribute('aria-label', download.title);
-    download.onclick = async () => {
-      download.disabled = true;
-      try {
-        const res = await fetch('/api/session/export?session=' + encodeURIComponent(row.id));
-        if (!res.ok) throw new Error('Не удалось экспортировать сессию (' + res.status + ')');
-        const url = URL.createObjectURL(await res.blob());
-        const link = node('a');
-        link.href = url;
-        link.download = row.id + '.md';
-        link.click();
-        setTimeout(() => URL.revokeObjectURL(url), 1000);
-      } catch (err) { pushNotice(err.message, 'bad'); }
-      finally { download.disabled = false; }
+  const st = stateCache || {};
+  const activeWs = st.workspace || '';
+  const activeKey = _wsKey(activeWs);
+  const filter = ($('#sessionSearch').value || '').trim().toLocaleLowerCase();
+
+  const filterBtn = $('#wsFilterToggleBtn');
+  if (filterBtn) {
+    filterBtn.classList.toggle('only-active', wsFilterOnlyActive);
+    filterBtn.textContent = wsFilterOnlyActive ? 'Текущее' : 'Все';
+    filterBtn.title = wsFilterOnlyActive
+      ? 'Показаны только чаты текущего рабочего пространства (нажми, чтобы показать все пространства)'
+      : 'Показаны все рабочие пространства с группировкой чатов (нажми, чтобы оставить только текущее)';
+  }
+
+  const allSessions = (st.sessions || []).filter((row) => {
+    if (wsFilterOnlyActive && _wsKey(row.workspace) !== activeKey) return false;
+    if (!filter) return true;
+    const hay = `${row.title || ''} ${row.id || ''} ${row.workspace || ''} ${row.workspace_name || ''}`.toLocaleLowerCase();
+    return hay.includes(filter);
+  });
+
+  const box = $('#sessions');
+  box.replaceChildren();
+
+  // Собираем группы рабочих пространств
+  const groupsMap = new Map();
+  const ensureGroup = (rawPath, customName) => {
+    const key = _wsKey(rawPath);
+    if (!groupsMap.has(key)) {
+      groupsMap.set(key, {
+        key,
+        path: key === '__none__' ? '' : String(rawPath || ''),
+        name: key === '__none__' ? 'Без пространства' : _wsShortName(rawPath, customName),
+        isNone: key === '__none__',
+        rows: [],
+        latestMtime: 0,
+      });
+    } else if (customName && key !== '__none__') {
+      groupsMap.get(key).name = customName;
+    }
+    return groupsMap.get(key);
+  };
+
+  if (!wsFilterOnlyActive) {
+    if (activeWs) ensureGroup(activeWs);
+    (st.workspaces || []).forEach((w) => {
+      if (w && w.path && (!filter || `${w.name || ''} ${w.path || ''}`.toLocaleLowerCase().includes(filter))) {
+        ensureGroup(w.path, w.name);
+      }
+    });
+    if (!filter) ensureGroup('', 'Без пространства');
+  } else {
+    ensureGroup(activeWs);
+  }
+
+  allSessions.forEach((row) => {
+    const g = ensureGroup(row.workspace || '', row.workspace_name || '');
+    g.rows.push(row);
+    if ((row.mtime || 0) > g.latestMtime) g.latestMtime = row.mtime || 0;
+  });
+
+  const groups = Array.from(groupsMap.values()).sort((a, b) => {
+    if ((a.key === activeKey) !== (b.key === activeKey)) return a.key === activeKey ? -1 : 1;
+    if (a.isNone !== b.isNone) return a.isNone ? 1 : -1;
+    return (b.latestMtime - a.latestMtime) || a.name.localeCompare(b.name, 'ru');
+  });
+
+  if (!groups.length || (filter && !allSessions.length && !groups.some((g) => g.rows.length))) {
+    box.append(node('div', 'page-sub', filter ? 'Ничего не найдено' : 'Пока нет чатов'));
+    return;
+  }
+
+  groups.forEach((g) => {
+    const isCurrent = g.key === activeKey;
+    const isCollapsed = !filter && !!wsCollapsedMap[g.key] && !g.rows.some((r) => r.id === sessionId);
+    const wrap = node('div', 'ws-group');
+    const head = node('div', 'ws-group-head' + (isCurrent ? ' current' : ''));
+    const toggle = node('button', 'ws-group-toggle');
+    toggle.type = 'button';
+    toggle.title = g.isNone
+      ? 'Общие чаты без привязки к папке проекта'
+      : `Рабочее пространство: ${g.path}`;
+    const ico = g.isNone ? '🌐' : '📁';
+    toggle.innerHTML = `<span>${isCollapsed ? '▸' : '▾'}</span><span>${ico}</span>`
+      + `<span class="ws-group-title">${esc(g.name)}</span>`
+      + `<span class="ws-group-count">${g.rows.length}</span>`;
+
+    const addBtn = node('button', 'ws-group-add', '+');
+    addBtn.type = 'button';
+    addBtn.title = g.isNone
+      ? 'Новый чат без рабочего пространства'
+      : `Новый чат в пространстве «${g.name}»`;
+    addBtn.onclick = (e) => {
+      e.stopPropagation();
+      createNewChatInWorkspace(g.path);
     };
-    const del = node('button', 'session-action session-del', '&times;');
-    del.title = 'Удалить сессию';
-    del.setAttribute('aria-label', del.title);
-    del.onclick = async () => {
-      if (!await confirmDelete(row.title || row.id)) return;
-      try {
-        await api('/api/session/delete', { session: row.id });
-        if (sessionId === row.id) {
-          const res = await api('/api/new', { title: '' });
-          await openSession(res.session);
-        }
-        await refreshState();
-      } catch (err) { pushNotice(err.message, 'bad'); }
+
+    const itemsBox = node('div', 'ws-group-items');
+    itemsBox.hidden = isCollapsed;
+    if (!g.rows.length) {
+      itemsBox.appendChild(node('div', 'ws-group-empty', 'чатов пока нет — нажми +'));
+    } else {
+      g.rows.forEach((row) => itemsBox.appendChild(_buildSessionRowEl(row)));
+    }
+
+    toggle.onclick = () => {
+      const nextHidden = !itemsBox.hidden;
+      itemsBox.hidden = nextHidden;
+      wsCollapsedMap[g.key] = nextHidden;
+      localStorage.setItem('lh.wsCollapsed', JSON.stringify(wsCollapsedMap));
+      const chev = toggle.querySelector('span');
+      if (chev) chev.textContent = nextHidden ? '▸' : '▾';
     };
-    el.append(label, rename, download, del);
-    $('#sessions').appendChild(el);
+
+    head.append(toggle, addBtn);
+    wrap.append(head, itemsBox);
+    box.appendChild(wrap);
   });
 }
 
@@ -2421,7 +2968,118 @@ function fmtSize(bytes) {
   return Math.round(bytes / 1048576) + ' МБ';
 }
 
+let lmsStateCache = null;
+
+function renderLmsRuntimes(rtInfo) {
+  const box = $('#lmRuntimesList');
+  const chip = $('#lmRuntimeActiveChip');
+  if (!box) return;
+  const info = rtInfo || {};
+  const runtimes = info.runtimes || [];
+  if (chip) {
+    if (info.vulkan_active) {
+      chip.className = 'sec-chip ok';
+      chip.textContent = '🌋 Активен: Vulkan' + (info.active_version ? ' v' + info.active_version : '');
+    } else if (info.active_name) {
+      chip.className = 'sec-chip ok';
+      chip.textContent = 'Активен: ' + info.active_name.replace('llama.cpp-win-x86_64-', '') + (info.active_version ? ' v' + info.active_version : '');
+    } else {
+      chip.className = 'sec-chip';
+      chip.textContent = 'автовыбор LM Studio';
+    }
+  }
+  box.innerHTML = '';
+  if (!runtimes.length) {
+    box.appendChild(node('div', 'empty-note', 'Движки LM Studio не обнаружены — нажмите «Скачать / Обновить Vulkan».'));
+    return;
+  }
+  const kindIcon = { vulkan: '🌋', cuda: '🟢', rocm: '🔴', metal: '🍎', cpu: '💻' };
+  runtimes.forEach((rt) => {
+    const card = node('div', 'lms-rt-card' + (rt.selected ? ' active' : '') + (rt.kind === 'vulkan' ? ' vulkan-card' : ''));
+    const head = node('div', 'lms-rt-head');
+    head.appendChild(node('span', 'lms-rt-title', (kindIcon[rt.kind] || '⚙️') + ' ' + esc(rt.label || rt.name)));
+    if (rt.version) head.appendChild(node('span', 'lms-rt-ver', 'v' + esc(rt.version)));
+    else if (!rt.installed) head.appendChild(node('span', 'lms-rt-ver', 'не скачан'));
+    card.appendChild(head);
+
+    let metaTxt = '';
+    let metaBad = false;
+    if (!rt.installed) {
+      metaTxt = 'Универсальный движок Vulkan для NVIDIA / AMD / Intel GPU. Устанавливается в 1 клик.';
+    } else if (rt.compatible) {
+      const gpuPart = (rt.gpus && rt.gpus.length) ? rt.gpus[0].replace('NVIDIA GeForce ', '') : (rt.kind === 'cpu' ? 'Процессор AVX2' : 'GPU совместим');
+      const vramPart = rt.vram_gb > 0 ? ' · ' + rt.vram_gb + ' ГБ VRAM' : '';
+      metaTxt = '✅ Совместим · ' + gpuPart + vramPart;
+    } else {
+      metaBad = true;
+      metaTxt = '⚠️ Ошибка опроса GPU (' + (rt.status || 'несовместим') + ') — рекомендуется переключиться на Vulkan!';
+    }
+    card.appendChild(node('div', 'lms-rt-meta' + (metaBad ? ' bad' : ''), esc(metaTxt)));
+
+    const acts = node('div', 'lms-rt-actions');
+    if (!rt.installed) {
+      const dlBtn = node('button', 'primary small-btn', '⬇️ Скачать Vulkan');
+      dlBtn.type = 'button';
+      dlBtn.onclick = () => installLmsRuntime(rt.install_query || rt.name, dlBtn);
+      acts.appendChild(dlBtn);
+    } else if (rt.selected) {
+      const curBtn = node('button', 'ghost small-btn', '✓ Активен');
+      curBtn.type = 'button';
+      curBtn.disabled = true;
+      acts.appendChild(curBtn);
+      if (rt.kind === 'vulkan') {
+        const updBtn = node('button', 'ghost small-btn', '🔄 Обновить');
+        updBtn.type = 'button';
+        updBtn.onclick = () => installLmsRuntime(rt.install_query || rt.name, updBtn);
+        acts.appendChild(updBtn);
+      }
+    } else {
+      const selBtn = node('button', rt.kind === 'vulkan' ? 'primary small-btn' : 'ghost small-btn',
+        rt.kind === 'vulkan' ? '🌋 Включить Vulkan' : '⚡ Выбрать');
+      selBtn.type = 'button';
+      selBtn.onclick = async () => {
+        selBtn.disabled = true;
+        selBtn.textContent = 'переключаю…';
+        try {
+          const res = await api('/api/lms/runtime/select', { name: rt.name, version: rt.version });
+          if (!res.ok) throw new Error(res.error || 'Не удалось переключить движок');
+          pushNotice('Активный движок LM Studio переключён на ' + (rt.label || rt.name) + '!', 'ok');
+          renderLmsRuntimes(res);
+          await refreshState();
+        } catch (err) {
+          pushNotice(err.message, 'bad');
+          selBtn.disabled = false;
+          selBtn.textContent = rt.kind === 'vulkan' ? '🌋 Включить Vulkan' : '⚡ Выбрать';
+        }
+      };
+      acts.appendChild(selBtn);
+    }
+    card.appendChild(acts);
+    box.appendChild(card);
+  });
+}
+
+async function installLmsRuntime(query, btnEl) {
+  if (btnEl) btnEl.disabled = true;
+  try {
+    const res = await api('/api/lms/runtime/install', { query: query || 'vulkan' });
+    if (!res.ok) throw new Error(res.error || 'Не удалось запустить установку движка');
+    pushNotice('Запущено скачивание / обновление движка: ' + (res.query || 'Vulkan'), 'ok');
+    const box = $('#lmJobLog');
+    if (box) {
+      box.hidden = false;
+      box.textContent = 'Скачивание движка ' + (res.query || 'Vulkan') + '…';
+    }
+    refreshLM();
+  } catch (err) {
+    pushNotice(err.message, 'bad');
+  } finally {
+    if (btnEl) btnEl.disabled = false;
+  }
+}
+
 function renderLM(data) {
+  lmsStateCache = data;
   const hw = data.hardware || {};
   let hwSummary = '';
   if (hw.ram_total_gb) {
@@ -2432,29 +3090,35 @@ function renderLM(data) {
   }
   $('#lmBase').textContent = 'сервер: ' + (data.base || '…') + ' · ' +
     (data.alive ? 'живой' : 'молчит') + ' · моделей на диске: ' + (data.disk || []).length + hwSummary;
+  renderLmsRuntimes(data.runtimes);
+
   const loaded = $('#lmLoaded');
   loaded.innerHTML = '';
   const hasAnyLoaded = !!(data.loaded && data.loaded.length);
   if ($('#lmsUnloadAll')) $('#lmsUnloadAll').disabled = !hasAnyLoaded;
   if ($('#lmsUnloadPlateBtn')) $('#lmsUnloadPlateBtn').hidden = !hasAnyLoaded;
-  if (!hasAnyLoaded) loaded.append(node('div', 'empty-note', 'в памяти пусто — загрузи модель с диска'));
+  if (!hasAnyLoaded) loaded.append(node('div', 'empty-note', 'в памяти пусто — нажми «⚙️ Загрузить…» на модели справа'));
   (data.loaded || []).forEach((m) => {
-    const actions = [node('button', 'ghost', 'выгрузить')];
-    actions[0].onclick = async () => {
-      actions[0].disabled = true;
-      actions[0].textContent = 'выгружается…';
+    const cfgBtn = node('button', 'ghost', '⚙️ Контекст');
+    cfgBtn.title = 'Изменить окно контекста, GPU Offload или перезагрузить модель';
+    cfgBtn.onclick = () => openLmsLoadModal(m.modelKey || m.path || m.identifier);
+    const unloadBtn = node('button', 'ghost', 'выгрузить');
+    unloadBtn.onclick = async () => {
+      unloadBtn.disabled = true;
+      unloadBtn.textContent = 'выгружается…';
       try {
         await api('/api/lms/unload', { model: m.identifier || m.modelKey || m.path });
         pushNotice('Модель выгружена из памяти', 'ok');
         await refreshLM();
         await refreshState();
       } catch (err) { alert(err.message); }
-      finally { actions[0].disabled = false; actions[0].textContent = 'выгрузить'; }
+      finally { unloadBtn.disabled = false; unloadBtn.textContent = 'выгрузить'; }
     };
+    const actions = [cfgBtn, unloadBtn];
     const est = m.estimate || {};
     const card = plugCard({
       name: m.displayName || m.modelKey || m.path,
-      desc: [m.status, m.contextLength ? 'контекст ' + m.contextLength : '', m.paramsString || '',
+      desc: [m.status, m.contextLength ? 'контекст ' + Number(m.contextLength).toLocaleString('ru-RU') + ' ток.' : '', m.paramsString || '',
         m.quantization && m.quantization.name ? m.quantization.name : '', fmtSize(m.sizeBytes)]
         .filter(Boolean).join(' · '),
       badge: est.fit_label ? (est.fit_label + ' · ' + (est.tok_per_sec || '')) : '',
@@ -2474,7 +3138,6 @@ function renderLM(data) {
     (data.loaded || []).flatMap((m) => [m.modelKey, m.path, m.identifier, m.displayName, m.indexedModelIdentifier].map(normKey).filter(Boolean))
   );
   (data.disk || []).forEach((m) => {
-    const isLlm = m.type !== 'embedding';
     const isLoaded = [m.modelKey, m.path, m.identifier, m.displayName, m.indexedModelIdentifier]
       .map(normKey)
       .some((k) => k && loadedKeys.has(k));
@@ -2497,26 +3160,41 @@ function renderLM(data) {
       };
       actions.push(unloadBtn);
     }
-    const loadBtn = node('button', isLoaded ? 'ghost' : 'primary', isLoaded ? 'Перезагрузить' : 'Загрузить');
-    loadBtn.onclick = async () => {
-      loadBtn.disabled = true;
-      loadBtn.textContent = 'грузится…';
+    const quickBtn = node('button', 'ghost', '⚡ Быстро');
+    quickBtn.title = 'Быстро загрузить с текущими параметрами контекста и GPU со страницы';
+    quickBtn.onclick = async () => {
+      quickBtn.disabled = true;
+      quickBtn.textContent = 'грузится…';
       try {
-        await api('/api/lms/load', { model: m.modelKey || m.path, context_length: clampContext($('#lmContext').value, 8192), ttl: Number($('#lmTtl').value) || 0 });
+        await api('/api/lms/load', {
+          model: m.modelKey || m.path,
+          context_length: clampContext($('#lmContext').value, 16384),
+          gpu: ($('#lmGpuQuick') && $('#lmGpuQuick').value) || 'max',
+          kv_quant: ($('#lmKvQuick') && $('#lmKvQuick').value) || 'f16',
+          ttl: Number($('#lmTtl').value) || 0,
+        });
+        pushNotice('Запущена загрузка модели «' + (m.displayName || m.modelKey) + '»', 'ok');
         await refreshLM();
         await refreshState();
       } catch (err) {
         alert(err.message);
-        loadBtn.disabled = false;
-        loadBtn.textContent = isLoaded ? 'Перезагрузить' : 'Загрузить';
+        quickBtn.disabled = false;
+        quickBtn.textContent = '⚡ Быстро';
       }
     };
-    actions.push(loadBtn);
+    actions.push(quickBtn);
+
+    const cfgLoadBtn = node('button', isLoaded ? 'ghost' : 'primary', isLoaded ? '⚙️ Перезагрузить…' : '⚙️ Загрузить…');
+    cfgLoadBtn.title = 'Открыть окно настройки контекста, GPU Offload, Vulkan и KV-кэша как в LM Studio';
+    cfgLoadBtn.onclick = () => openLmsLoadModal(m.modelKey || m.path);
+    actions.push(cfgLoadBtn);
+
     const est = m.estimate || {};
+    const maxCtxStr = m.maxContextLength ? Number(m.maxContextLength).toLocaleString('ru-RU') : '?';
     const card = plugCard({
       name: m.displayName || m.modelKey || m.path,
       desc: [m.type, m.paramsString || '', m.architecture || '', m.trainedForToolUse ? 'tools' : '',
-        m.vision ? 'vision' : '', 'контекст до ' + (m.maxContextLength || '?'),
+        m.vision ? 'vision' : '', 'контекст до ' + maxCtxStr,
         m.quantization && m.quantization.name ? m.quantization.name : '', fmtSize(m.sizeBytes)]
         .filter(Boolean).join(' · '),
       badge: isLoaded ? '● в памяти' : (est.fit_label ? (est.fit_label + ' · ' + (est.tok_per_sec || '')) : ''),
@@ -2783,7 +3461,8 @@ $('#input').addEventListener('focus', () => {
 $('#showReasoning').onchange = (e) => {
   showReasoning = e.target.checked;
   localStorage.setItem('lh.showReasoning', showReasoning ? '1' : '0');
-  if (diveEl) diveEl.wrap.hidden = !showReasoning;
+  app.classList.toggle('thinkoff', !showReasoning);
+  if (diveEl && diveEl.toolCount === 0) diveEl.wrap.hidden = !showReasoning;
 };
 $('#expandReasoning').onchange = (e) => {
   expandReasoning = e.target.checked;
@@ -2836,14 +3515,42 @@ $('#plugInstallUrl').onclick = async () => {
   $('#plugInstallUrl').disabled = false;
 };
 $('#lmContext').onchange = async (e) => {
-  const prev = clampContext(stateCache && (stateCache.lms_context_length || stateCache.context_tokens), 8192);
+  const prev = clampContext(stateCache && (stateCache.lms_context_length || stateCache.context_tokens), 16384);
   const next = clampContext(e.target.value, prev);
   if (String(e.target.value).trim() !== String(next)) {
     pushNotice('Контекст ограничен диапазоном 512–262144 токенов: ' + next, 'warn');
   }
   e.target.value = next;
-  if (next !== prev) await patchConfig('lms_context_length', next);
+  if (next !== prev) {
+    await api('/api/config', { config: { lms_context_length: next, context_tokens: next } });
+    await refreshState();
+  }
 };
+if ($('#lmGpuQuick')) $('#lmGpuQuick').onchange = (e) => patchConfig('lms_gpu_offload', e.target.value);
+if ($('#lmKvQuick')) $('#lmKvQuick').onchange = (e) => patchConfig('lms_kv_quant', e.target.value);
+document.querySelectorAll('#lmPageCtxChips .ctx-preset-pill').forEach((btn) => {
+  btn.onclick = async () => {
+    const val = clampContext(btn.dataset.ctx, 16384);
+    if ($('#lmContext')) $('#lmContext').value = val;
+    await api('/api/config', { config: { lms_context_length: val, context_tokens: val } });
+    await refreshState();
+    if (currentView === 'lm') refreshLM();
+  };
+});
+if ($('#mmQuickCtx')) {
+  $('#mmQuickCtx').onchange = async (e) => {
+    const val = clampContext(e.target.value, 16384);
+    await api('/api/config', { config: { lms_context_length: val, context_tokens: val } });
+    await refreshState();
+    pushNotice('Окно контекста установлено: ' + val.toLocaleString('ru-RU') + ' токенов (перезагрузи модель кнопкой ⚡, если она уже в памяти)', 'ok');
+  };
+}
+if ($('#lmInstallVulkanBtn')) {
+  $('#lmInstallVulkanBtn').onclick = () => installLmsRuntime('vulkan', $('#lmInstallVulkanBtn'));
+}
+if ($('#lmsOpenLoaderTopBtn')) {
+  $('#lmsOpenLoaderTopBtn').onclick = () => openLmsLoadModal(stateCache && stateCache.model);
+}
 $('#lmTtl').onchange = (e) => patchConfig('lms_ttl', Number(e.target.value) || 0);
 $('#searxngEnabled').onchange = (e) => patchConfig('search_searxng', e.target.checked);
 $('#searxngUrl').onchange = (e) => patchConfig('search_searxng_url', e.target.value.trim() || 'http://127.0.0.1:8080');
@@ -6261,6 +6968,799 @@ if ($('#trainEvalBtn')) {
     }
   };
 }
+
+/* ---------- LM Studio Native Load Modal (Context Window, GPU Offload, Vulkan, KV Quant) ---------- */
+let lmsModalEstTimer = null;
+let lmsModalPollTimer = null;
+
+function _gpuPctFromVal(val) {
+  const raw = String(val == null ? 'max' : val).trim().toLowerCase();
+  if (raw === 'max' || raw === 'auto' || raw === '' || raw === '100%') return 100;
+  if (raw === 'off' || raw === 'none' || raw === 'cpu' || raw === '0' || raw === '0%') return 0;
+  const num = parseFloat(raw.replace('%', ''));
+  if (!Number.isFinite(num)) return 100;
+  return num > 1 ? Math.round(Math.min(100, Math.max(0, num))) : Math.round(Math.min(100, Math.max(0, num * 100)));
+}
+
+function _gpuFlagFromPct(pct) {
+  const n = Math.round(Number(pct));
+  if (!Number.isFinite(n) || n >= 100) return 'max';
+  if (n <= 0) return 'off';
+  return String(Math.round(n) / 100);
+}
+
+function _updateGpuSliderUi(pct) {
+  const p = Math.min(100, Math.max(0, Math.round(Number(pct) || 0)));
+  const range = $('#lmsLoadGpuRange');
+  if (range) range.value = String(p);
+  const lbl = $('#lmsLoadGpuLabel');
+  if (lbl) {
+    if (p >= 100) lbl.textContent = 'Max (100% слоёв в VRAM)';
+    else if (p <= 0) lbl.textContent = 'Off (0% — только CPU / RAM)';
+    else lbl.textContent = p + '% слоёв в VRAM (гибрид GPU+RAM)';
+  }
+  document.querySelectorAll('#lmsLoadGpuPresets .ctx-preset-pill').forEach((btn) => {
+    btn.classList.toggle('active', Number(btn.dataset.gpu) === p);
+  });
+}
+
+function _selectedModalDiskModel() {
+  const sel = $('#lmsLoadModelSelect');
+  const wanted = sel ? sel.value : '';
+  const disk = (lmsStateCache && lmsStateCache.disk) || [];
+  return disk.find((m) => (m.modelKey || m.path) === wanted) || disk[0] || null;
+}
+
+function _syncModalModelBounds(preferredCtx) {
+  const m = _selectedModalDiskModel();
+  const maxCtx = Math.max(512, Math.min(262144, Number((m && m.maxContextLength) || 32768)));
+  const range = $('#lmsLoadCtxRange');
+  const numIn = $('#lmsLoadCtxInput');
+  const maxLbl = $('#lmsLoadCtxMaxLabel');
+  const metaEl = $('#lmsLoadModalMeta');
+
+  if (range) range.max = String(maxCtx);
+  if (numIn) numIn.max = String(maxCtx);
+  if (maxLbl) maxLbl.textContent = '/ ' + maxCtx.toLocaleString('ru-RU') + ' ток.';
+
+  if (metaEl && m) {
+    const q = m.quantization && m.quantization.name ? m.quantization.name : '';
+    metaEl.textContent = [
+      q,
+      fmtSize(m.sizeBytes),
+      m.paramsString || '',
+      'макс. контекст ' + maxCtx.toLocaleString('ru-RU'),
+      m.vision ? 'Vision' : '',
+      m.trainedForToolUse ? 'Tools' : '',
+    ].filter(Boolean).join(' · ');
+  }
+
+  const preset = (m && m.saved_preset) || {};
+  const loadedList = (lmsStateCache && lmsStateCache.loaded) || [];
+  const loadedMatch = m ? loadedList.find((x) => x.modelKey === m.modelKey || x.path === m.path) : null;
+
+  let targetCtx = preferredCtx
+    || (loadedMatch && loadedMatch.contextLength)
+    || preset.context_length
+    || (stateCache && (stateCache.lms_context_length || stateCache.context_tokens))
+    || 16384;
+  targetCtx = Math.max(512, Math.min(maxCtx, Math.round(Number(targetCtx) || 16384)));
+
+  if (range) range.value = String(targetCtx);
+  if (numIn) numIn.value = String(targetCtx);
+
+  document.querySelectorAll('#lmsLoadCtxPresets .ctx-preset-pill').forEach((btn) => {
+    const raw = btn.dataset.ctx;
+    if (raw === 'max') {
+      btn.disabled = false;
+      btn.textContent = 'Max (' + fmtTok(maxCtx) + ')';
+      btn.classList.toggle('active', targetCtx === maxCtx);
+    } else {
+      const cVal = Number(raw);
+      btn.disabled = cVal > maxCtx;
+      btn.classList.toggle('active', cVal === targetCtx);
+    }
+  });
+
+  if (preset.gpu_offload != null) _updateGpuSliderUi(_gpuPctFromVal(preset.gpu_offload));
+  if (preset.kv_quant && $('#lmsLoadKvSelect')) $('#lmsLoadKvSelect').value = preset.kv_quant;
+  if (preset.flash_attention != null && $('#lmsLoadFlashCheck')) $('#lmsLoadFlashCheck').checked = !!preset.flash_attention;
+  if (preset.parallel && $('#lmsLoadParallelInput')) $('#lmsLoadParallelInput').value = String(preset.parallel);
+
+  scheduleModalEstimate(false);
+}
+
+function _setModalCtxValue(val) {
+  const m = _selectedModalDiskModel();
+  const maxCtx = Math.max(512, Math.min(262144, Number((m && m.maxContextLength) || 262144)));
+  const clamped = Math.max(512, Math.min(maxCtx, Math.round(Number(val) || 8192)));
+  if ($('#lmsLoadCtxRange')) $('#lmsLoadCtxRange').value = String(clamped);
+  if ($('#lmsLoadCtxInput') && document.activeElement !== $('#lmsLoadCtxInput')) {
+    $('#lmsLoadCtxInput').value = String(clamped);
+  }
+  document.querySelectorAll('#lmsLoadCtxPresets .ctx-preset-pill').forEach((btn) => {
+    const raw = btn.dataset.ctx;
+    const target = raw === 'max' ? maxCtx : Number(raw);
+    btn.classList.toggle('active', target === clamped);
+  });
+  scheduleModalEstimate(false);
+}
+
+function renderModalEstimate(est, isPrecise) {
+  if (!est) return;
+  const verdict = $('#lmsLoadEstVerdict');
+  const bar = $('#lmsLoadEstBar');
+  const stats = $('#lmsLoadEstStats');
+  const hw = est.hardware || (lmsStateCache && lmsStateCache.hardware) || {};
+  const vramTotal = Number(hw.vram_total_gb || 0);
+  const ramTotal = Number(hw.ram_total_gb || 16);
+  const estGpu = Number(est.est_gpu_gb != null ? est.est_gpu_gb : est.total_req_gb || 0);
+  const estTot = Number(est.total_req_gb || 0);
+
+  if (verdict) {
+    const tag = isPrecise && est.cli_estimate ? '✓ Точный расчёт lms: ' : '⚡ Оценка: ';
+    const cliVerdict = est.cli_estimate && est.cli_estimate.verdict ? ' · ' + est.cli_estimate.verdict : '';
+    verdict.textContent = tag + (est.fit_label || '') + (est.tok_per_sec ? ' · ' + est.tok_per_sec : '') + cliVerdict;
+  }
+  if (bar) {
+    const denom = vramTotal > 0 && estGpu > 0 ? vramTotal : ramTotal;
+    const numer = vramTotal > 0 && estGpu > 0 ? estGpu : estTot;
+    const pct = Math.min(100, Math.max(4, Math.round((numer / Math.max(1, denom)) * 100)));
+    bar.style.width = pct + '%';
+    bar.className = 'lms-est-bar-fill' + (est.fit === 'oom' ? ' bad' : (est.fit === 'tight' || est.fit === 'hybrid' ? ' warn' : ''));
+  }
+  if (stats) {
+    const vramPart = vramTotal > 0
+      ? `VRAM: ${estGpu.toFixed(2)} / ${vramTotal.toFixed(2)} ГБ`
+      : `GPU не используется`;
+    stats.textContent = `${vramPart} · Общая память: ${estTot.toFixed(2)} ГБ (веса ${est.weights_gb || '—'} ГБ + KV-кэш ${est.kv_cache_gb || '—'} ГБ)`;
+  }
+}
+
+function scheduleModalEstimate(precise) {
+  if (lmsModalEstTimer) clearTimeout(lmsModalEstTimer);
+  lmsModalEstTimer = setTimeout(async () => {
+    const m = _selectedModalDiskModel();
+    if (!m) return;
+    const ctx = clampContext($('#lmsLoadCtxInput') && $('#lmsLoadCtxInput').value, 16384);
+    const gpuFlag = _gpuFlagFromPct($('#lmsLoadGpuRange') && $('#lmsLoadGpuRange').value);
+    const kv = ($('#lmsLoadKvSelect') && $('#lmsLoadKvSelect').value) || 'f16';
+    const btn = $('#lmsLoadPreciseBtn');
+    if (precise && btn) {
+      btn.disabled = true;
+      btn.textContent = '⏳ Считаю…';
+    }
+    try {
+      const res = await api('/api/lms/estimate', {
+        model: m.modelKey || m.path,
+        context_length: ctx,
+        gpu: gpuFlag,
+        kv_quant: kv,
+        precise: !!precise,
+      });
+      if (res && res.estimate) renderModalEstimate(res.estimate, !!precise);
+    } catch (err) {
+      if (precise) pushNotice('Ошибка расчёта памяти: ' + err.message, 'warn');
+    } finally {
+      if (precise && btn) {
+        btn.disabled = false;
+        btn.textContent = '🔍 Точный расчёт LM Studio';
+      }
+    }
+  }, precise ? 10 : 120);
+}
+
+async function openLmsLoadModal(preferredModelKey) {
+  const dlg = $('#lmsLoadDialog');
+  if (!dlg) return;
+  if (lmsModalPollTimer) { clearTimeout(lmsModalPollTimer); lmsModalPollTimer = null; }
+  const liveLog = $('#lmsLoadLiveLog');
+  if (liveLog) { liveLog.hidden = true; liveLog.textContent = ''; }
+  const submitBtn = $('#lmsLoadSubmitBtn');
+  if (submitBtn) { submitBtn.disabled = false; submitBtn.textContent = '🚀 Загрузить модель в память'; }
+
+  try {
+    lmsStateCache = await api('/api/lms/state');
+  } catch (err) {
+    pushNotice('Не удалось опросить LM Studio: ' + err.message, 'bad');
+    return;
+  }
+
+  const diskAll = (lmsStateCache && lmsStateCache.disk) || [];
+  const chatDisk = diskAll.filter((m) => m.type !== 'embedding');
+  const modelsToShow = chatDisk.length ? chatDisk : diskAll;
+  const selModel = $('#lmsLoadModelSelect');
+  if (!modelsToShow.length) {
+    pushNotice('В LM Studio пока нет скачанных моделей на диске — скачай GGUF модель на вкладке LM Studio.', 'warn');
+    setView('lm');
+    return;
+  }
+
+  selModel.innerHTML = '';
+  modelsToShow.forEach((m) => {
+    const key = m.modelKey || m.path;
+    const opt = document.createElement('option');
+    opt.value = key;
+    const q = m.quantization && m.quantization.name ? ' (' + m.quantization.name + ')' : '';
+    opt.textContent = (m.displayName || key) + q + (m.sizeBytes ? ' · ' + fmtSize(m.sizeBytes) : '');
+    if (preferredModelKey && (key === preferredModelKey || m.path === preferredModelKey || m.displayName === preferredModelKey)) {
+      opt.selected = true;
+    }
+    selModel.appendChild(opt);
+  });
+
+  // Заполняем селектор Runtime движков (Vulkan / CUDA / ROCm / CPU)
+  const rtSel = $('#lmsLoadRuntimeSelect');
+  const rtInfo = (lmsStateCache && lmsStateCache.runtimes) || {};
+  if (rtSel) {
+    rtSel.innerHTML = '';
+    const installedRts = (rtInfo.runtimes || []).filter((r) => r.installed);
+    if (!installedRts.length) {
+      const defOpt = document.createElement('option');
+      defOpt.value = '';
+      defOpt.textContent = 'По умолчанию LM Studio';
+      rtSel.appendChild(defOpt);
+    } else {
+      installedRts.forEach((r) => {
+        const opt = document.createElement('option');
+        opt.value = r.name;
+        const ico = r.kind === 'vulkan' ? '🌋 ' : (r.kind === 'cuda' ? '🟢 ' : (r.kind === 'rocm' ? '🔴 ' : '💻 '));
+        const compatWarn = r.compatible ? '' : ' [⚠️ ошибка опроса GPU]';
+        opt.textContent = ico + (r.label || r.name) + (r.version ? ' v' + r.version : '') + compatWarn;
+        if (r.selected) opt.selected = true;
+        rtSel.appendChild(opt);
+      });
+    }
+  }
+
+  const defs = (lmsStateCache && lmsStateCache.defaults) || {};
+  _updateGpuSliderUi(_gpuPctFromVal(defs.gpu_offload || (stateCache && stateCache.lms_gpu_offload) || 'max'));
+  if ($('#lmsLoadKvSelect')) $('#lmsLoadKvSelect').value = defs.kv_quant || (stateCache && stateCache.lms_kv_quant) || 'f16';
+  if ($('#lmsLoadFlashCheck')) $('#lmsLoadFlashCheck').checked = defs.flash_attention !== false;
+  if ($('#lmsLoadParallelInput')) $('#lmsLoadParallelInput').value = String(defs.parallel || 1);
+  if ($('#lmsLoadTtlInput')) $('#lmsLoadTtlInput').value = String(defs.ttl || 0);
+
+  _syncModalModelBounds();
+  if (!dlg.open) dlg.showModal();
+  const bodyEl = dlg.querySelector('.modal-body');
+  if (bodyEl) bodyEl.scrollTop = 0;
+}
+
+(function wireLmsLoadModal() {
+  const dlg = $('#lmsLoadDialog');
+  if (!dlg) return;
+  const closeModal = () => {
+    if (lmsModalPollTimer) { clearTimeout(lmsModalPollTimer); lmsModalPollTimer = null; }
+    if (dlg.open) dlg.close();
+  };
+  $('#lmsLoadCloseBtn')?.addEventListener('click', closeModal);
+  $('#lmsLoadCancelBtn')?.addEventListener('click', closeModal);
+  dlg.addEventListener('click', (ev) => { if (ev.target === dlg) closeModal(); });
+
+  $('#lmsLoadModelSelect')?.addEventListener('change', () => _syncModalModelBounds());
+  $('#lmsLoadCtxRange')?.addEventListener('input', (e) => _setModalCtxValue(e.target.value));
+  $('#lmsLoadCtxInput')?.addEventListener('change', (e) => {
+    _setModalCtxValue(e.target.value);
+    e.target.value = $('#lmsLoadCtxRange').value;
+  });
+  $('#lmsLoadCtxInput')?.addEventListener('input', (e) => {
+    const n = Number(e.target.value);
+    if (Number.isFinite(n) && n >= 512) _setModalCtxValue(n);
+  });
+  document.querySelectorAll('#lmsLoadCtxPresets .ctx-preset-pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const m = _selectedModalDiskModel();
+      const maxCtx = Math.max(512, Math.min(262144, Number((m && m.maxContextLength) || 32768)));
+      const raw = btn.dataset.ctx;
+      _setModalCtxValue(raw === 'max' ? maxCtx : Number(raw));
+    });
+  });
+
+  $('#lmsLoadGpuRange')?.addEventListener('input', (e) => {
+    _updateGpuSliderUi(e.target.value);
+    scheduleModalEstimate(false);
+  });
+  document.querySelectorAll('#lmsLoadGpuPresets .ctx-preset-pill').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      _updateGpuSliderUi(Number(btn.dataset.gpu));
+      scheduleModalEstimate(false);
+    });
+  });
+  $('#lmsLoadKvSelect')?.addEventListener('change', () => scheduleModalEstimate(false));
+  $('#lmsLoadPreciseBtn')?.addEventListener('click', () => scheduleModalEstimate(true));
+
+  $('#lmsLoadSubmitBtn')?.addEventListener('click', async () => {
+    const m = _selectedModalDiskModel();
+    if (!m) return;
+    const submitBtn = $('#lmsLoadSubmitBtn');
+    const liveLog = $('#lmsLoadLiveLog');
+    const ctx = clampContext($('#lmsLoadCtxInput').value, 16384);
+    const gpu = _gpuFlagFromPct($('#lmsLoadGpuRange').value);
+    const runtime = ($('#lmsLoadRuntimeSelect') && $('#lmsLoadRuntimeSelect').value) || '';
+    const kv_quant = ($('#lmsLoadKvSelect') && $('#lmsLoadKvSelect').value) || 'f16';
+    const flash_attention = !!($('#lmsLoadFlashCheck') && $('#lmsLoadFlashCheck').checked);
+    const parallel = Math.max(1, Math.min(16, Number($('#lmsLoadParallelInput').value) || 1));
+    const ttl = Math.max(0, Number($('#lmsLoadTtlInput').value) || 0);
+    const select_for_chat = !!($('#lmsLoadSyncChatCheck') && $('#lmsLoadSyncChatCheck').checked);
+
+    submitBtn.disabled = true;
+    submitBtn.textContent = '⏳ Загружаю в память…';
+    if (liveLog) {
+      liveLog.hidden = false;
+      liveLog.textContent = `Запуск lms load ${m.modelKey || m.path} --context-length ${ctx} --gpu ${gpu}…`;
+    }
+
+    try {
+      const res = await api('/api/lms/load', {
+        model: m.modelKey || m.path,
+        runtime,
+        context_length: ctx,
+        gpu,
+        kv_quant,
+        flash_attention,
+        parallel,
+        ttl,
+        select_for_chat,
+      });
+      if (!res.ok) throw new Error(res.error || 'Не удалось запустить загрузку');
+      (res.warnings || []).forEach((w) => pushNotice(w, 'warn'));
+
+      const pollJob = async () => {
+        try {
+          const job = await api('/api/lms/job');
+          if (liveLog && job) {
+            liveLog.textContent = (job.kind || 'load') + ' [' + (job.status || '') + ']\n' + (job.lines || []).join('\n');
+            liveLog.scrollTop = liveLog.scrollHeight;
+          }
+          if (job && job.running) {
+            lmsModalPollTimer = setTimeout(pollJob, 900);
+            return;
+          }
+          await refreshState();
+          await refreshReadiness();
+          if (currentView === 'lm') await refreshLM();
+          if (job && job.rc === 0) {
+            pushNotice(`✅ Модель «${m.displayName || m.modelKey}» загружена (контекст ${ctx.toLocaleString('ru-RU')} токенов)!`, 'ok');
+            closeModal();
+          } else {
+            submitBtn.disabled = false;
+            submitBtn.textContent = '🔄 Повторить загрузку';
+            pushNotice('Загрузка модели завершилась с ошибкой — проверь лог в окне и попробуй уменьшить контекст или GPU Offload.', 'bad');
+          }
+        } catch (pollErr) {
+          submitBtn.disabled = false;
+          submitBtn.textContent = '🚀 Загрузить модель в память';
+        }
+      };
+      lmsModalPollTimer = setTimeout(pollJob, 600);
+    } catch (err) {
+      if (liveLog) liveLog.textContent = '❌ Ошибка: ' + err.message;
+      pushNotice(err.message, 'bad');
+      submitBtn.disabled = false;
+      submitBtn.textContent = '🚀 Загрузить модель в память';
+    }
+  });
+})();
+
+/* ---------- Screenshot-1 Post-Run / Post-Goal Summary Bar & Review Diff Modal ---------- */
+const _REVIEW_DOC_SVG = '<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 2h5.5L13 5.5V13a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V3a1 1 0 0 1 1-1z"/><path d="M9.5 2v3.5H13"/><path d="M6 9h4M8 7v4"/></svg>';
+
+function renderChangesSummaryBar(changes, goalInfo, steps, rounds) {
+  const filesChanged = Number((changes && changes.files_changed) || 0);
+  const ins = Number((changes && changes.insertions) || 0);
+  const del = Number((changes && changes.deletions) || 0);
+  if (filesChanged <= 0 && !goalInfo) return null;
+
+  ensureTurn();
+  const bar = node('div', 'changes-summary-bar');
+  const left = node('button', 'changes-summary-left');
+  left.type = 'button';
+
+  if (filesChanged > 0) {
+    const fLabel = filesChanged === 1 ? '1 file changed' : `${filesChanged} files changed`;
+    const goalTag = goalInfo ? (goalInfo.achieved ? ' · ✓ цель достигнута' : ' · цель завершена') : '';
+    left.innerHTML = `<span class="changes-label">${esc(fLabel + goalTag)}</span>`
+      + `<span class="changes-plus">+${ins}</span>`
+      + `<span class="changes-minus">-${del}</span>`
+      + `<span class="changes-chev">›</span>`;
+  } else {
+    const pts = (goalInfo && goalInfo.points) || [];
+    const donePts = pts.filter((p) => p.done).length;
+    const statusIcon = goalInfo && goalInfo.achieved ? '✓ Цель достигнута' : 'Итог цели';
+    const ptsStr = pts.length ? ` · пунктов ${donePts}/${pts.length}` : '';
+    const stStr = steps != null ? ` · шагов ${steps}` : '';
+    left.innerHTML = `<span class="changes-label">${esc(statusIcon + ptsStr + stStr)}</span>`
+      + `<span class="changes-chev">›</span>`;
+  }
+
+  const revBtn = node('button', 'changes-review-btn');
+  revBtn.type = 'button';
+  revBtn.innerHTML = `${_REVIEW_DOC_SVG}<span>Review</span>`;
+
+  const openFn = () => openReviewModal(changes, goalInfo, steps, rounds);
+  left.onclick = openFn;
+  revBtn.onclick = openFn;
+
+  bar.append(left, revBtn);
+  add(bar);
+  return bar;
+}
+
+function openReviewModal(changes, goalInfo, steps, rounds) {
+  const dlg = $('#reviewChangesDialog');
+  if (!dlg) return;
+  const files = (changes && changes.files) || [];
+  const ins = Number((changes && changes.insertions) || 0);
+  const del = Number((changes && changes.deletions) || 0);
+
+  const titleEl = $('#reviewModalTitle');
+  const metaEl = $('#reviewModalMeta');
+  const statChip = $('#reviewModalStatChip');
+  const goalBox = $('#reviewGoalSummaryBox');
+  const layoutEl = $('#reviewFilesLayout');
+  const listEl = $('#reviewFileList');
+  const diffFname = $('#reviewDiffFname');
+  const diffCode = $('#reviewDiffCode');
+  const openIdeBtn = $('#reviewOpenInIdeBtn');
+
+  if (titleEl) {
+    titleEl.textContent = goalInfo
+      ? (goalInfo.achieved ? '✅ Итог цели и обзор изменений' : '📋 Отчёт по цели и изменения')
+      : '📄 Обзор изменённых файлов (Review)';
+  }
+  if (metaEl) {
+    const bits = [];
+    if (files.length) bits.push(`Файлов изменено: ${files.length}`);
+    if (steps != null) bits.push(`Шагов агента: ${steps}`);
+    if (rounds) bits.push(`Подходов: ${rounds}`);
+    metaEl.textContent = bits.join(' · ') || 'Сводка прогона';
+  }
+  if (statChip) {
+    if (files.length) {
+      statChip.hidden = false;
+      statChip.innerHTML = `<span class="changes-plus">+${ins}</span><span class="changes-minus">-${del}</span>`;
+    } else {
+      statChip.hidden = true;
+    }
+  }
+
+  if (goalBox) {
+    if (goalInfo) {
+      goalBox.hidden = false;
+      const pts = goalInfo.points || [];
+      const ptsHtml = pts.length
+        ? '<div class="review-goal-pts">' + pts.map((p, i) =>
+            `<div>${p.done ? '✅' : '⬜'} <b>${i + 1}.</b> ${esc(p.text || '')}`
+            + (p.evidence ? ` <span style="color:var(--text-cap)">— ${esc(p.evidence)}</span>` : '')
+            + `</div>`
+          ).join('') + '</div>'
+        : '';
+      goalBox.innerHTML = `<div class="review-goal-title">${goalInfo.achieved ? '🎯 Цель успешно достигнута' : '⚠️ Цель остановлена'}: ${esc(goalInfo.objective || '')}</div>`
+        + (goalInfo.summary ? `<div class="review-goal-summary">${esc(goalInfo.summary)}</div>` : '')
+        + (goalInfo.evidence ? `<div class="page-sub">Проверка: ${esc(goalInfo.evidence)}</div>` : '')
+        + ptsHtml;
+    } else {
+      goalBox.hidden = true;
+      goalBox.innerHTML = '';
+    }
+  }
+
+  if (!files.length) {
+    if (layoutEl) layoutEl.hidden = true;
+  } else {
+    if (layoutEl) layoutEl.hidden = false;
+    listEl.innerHTML = '';
+
+    const selectFile = (idx) => {
+      const f = files[idx];
+      if (!f) return;
+      listEl.querySelectorAll('.review-file-item').forEach((el, i) => el.classList.toggle('active', i === idx));
+      if (diffFname) {
+        diffFname.textContent = `${f.rel_path || f.name || f.path} (${_fmtShortBytes(f.size_bytes)})`;
+      }
+      if (diffCode) {
+        diffCode.innerHTML = _renderDiffHtml(f.diff);
+      }
+      if (openIdeBtn) {
+        openIdeBtn.hidden = f.status === 'deleted';
+        openIdeBtn.onclick = () => {
+          dlg.close();
+          setView('files');
+          if (typeof openIdeFile === 'function' && f.rel_path && !f.rel_path.startsWith('..')) {
+            setTimeout(() => openIdeFile(f.rel_path), 150);
+          }
+        };
+      }
+    };
+
+    files.forEach((f, idx) => {
+      const st = f.status || 'modified';
+      const badge = st === 'added' ? 'A' : (st === 'deleted' ? 'D' : 'M');
+      const btn = node('button', 'review-file-item' + (idx === 0 ? ' active' : ''));
+      btn.type = 'button';
+      btn.title = f.path || f.rel_path || '';
+      btn.innerHTML = `<span class="rf-status ${esc(st)}">${badge}</span>`
+        + `<span class="rf-name">${esc(f.rel_path || f.name || f.path)}</span>`
+        + `<span class="rf-counts"><span class="dive-plus">+${f.added || 0}</span><span class="dive-minus">-${f.removed || 0}</span></span>`;
+      btn.onclick = () => selectFile(idx);
+      listEl.appendChild(btn);
+    });
+
+    selectFile(0);
+  }
+
+  if (!dlg.open) dlg.showModal();
+}
+
+(function wireReviewModal() {
+  const dlg = $('#reviewChangesDialog');
+  if (!dlg) return;
+  const close = () => { if (dlg.open) dlg.close(); };
+  $('#reviewModalCloseBtn')?.addEventListener('click', close);
+  dlg.addEventListener('click', (ev) => { if (ev.target === dlg) close(); });
+})();
+
+/* ---------- Workspace Manager (Optional Workspaces & Per-Chat Assignment) ---------- */
+let wsModalTargetSession = null;
+
+function syncHeaderWorkspaceChip(sessionWsPath) {
+  const chip = $('#headWorkspaceChip');
+  if (!chip) return;
+  const st = stateCache || {};
+  const curRow = (st.sessions || []).find((r) => r.id === sessionId);
+  const wsPath = sessionWsPath !== undefined
+    ? String(sessionWsPath || '')
+    : String((curRow && curRow.workspace) || st.workspace || '');
+  const saved = (st.workspaces || []).find((w) => _wsKey(w.path) === _wsKey(wsPath));
+  if (wsPath) {
+    const name = _wsShortName(wsPath, saved && saved.name);
+    chip.textContent = '📁 ' + name;
+    chip.title = `Рабочее пространство чата: ${wsPath}\nНажми, чтобы сменить папку или переключить в режим «Без пространства»`;
+    chip.classList.add('active-ws');
+  } else {
+    chip.textContent = '🌐 Без папки';
+    chip.title = 'Чат без привязки к папке проекта (по желанию). Нажми, чтобы выбрать рабочее пространство';
+    chip.classList.remove('active-ws');
+  }
+}
+
+function syncWorkspaceSidebarUi(st) {
+  const ws = String((st && st.workspace) || '').trim();
+  const saved = ((st && st.workspaces) || []).find((w) => _wsKey(w.path) === _wsKey(ws));
+  const btn = $('#wsPickerBtn');
+  const ico = $('#wsPickerIco');
+  const nameEl = $('#wsPickerName');
+  const clearBtn = $('#wsClearQuickBtn');
+
+  if (btn) {
+    btn.classList.toggle('has-ws', !!ws);
+    btn.title = ws
+      ? `Активное рабочее пространство: ${ws}\nНажми для переключения или добавления папки`
+      : 'Рабочее пространство не выбрано (по желанию) — нажми, чтобы выбрать папку проекта';
+  }
+  if (ico) ico.textContent = ws ? '📁' : '🌐';
+  if (nameEl) nameEl.textContent = ws ? _wsShortName(ws, saved && saved.name) : 'Без пространства';
+  if (clearBtn) clearBtn.hidden = !ws;
+
+  const curRow = ((st && st.sessions) || []).find((r) => r.id === sessionId);
+  syncHeaderWorkspaceChip(curRow ? (curRow.workspace || '') : ws);
+}
+
+async function createNewChatInWorkspace(wsPath) {
+  try {
+    const cleanWs = String(wsPath || '').trim();
+    await api('/api/workspace/select', { path: cleanWs });
+    const res = await api('/api/new', { title: '', workspace: cleanWs });
+    await openSession(res.session);
+    if (currentView !== 'chat') setView('chat');
+    $('#sessionTitle').textContent = 'новая сессия';
+    await refreshState();
+    $('#input')?.focus();
+  } catch (err) {
+    pushNotice(err.message, 'bad');
+  }
+}
+
+async function applyWorkspaceChoice(wsPath, customName, createDir) {
+  const dlg = $('#workspaceDialog');
+  const cleanWs = String(wsPath || '').trim();
+  try {
+    if (wsModalTargetSession) {
+      // Перемещение конкретного чата в выбранное пространство (или «Без пространства»)
+      if (cleanWs) {
+        await api('/api/workspace/select', {
+          path: cleanWs,
+          name: customName || '',
+          create_dir: !!createDir,
+        });
+      }
+      await api('/api/session/workspace', { session: wsModalTargetSession, workspace: cleanWs });
+      if (wsModalTargetSession === sessionId && !cleanWs) {
+        await api('/api/workspace/select', { path: '' });
+      }
+      pushNotice(
+        cleanWs
+          ? `Чат перемещён в пространство «${_wsShortName(cleanWs, customName)}»`
+          : 'Чат отвязан от папки — режим «Без рабочего пространства»',
+        'ok'
+      );
+    } else {
+      await api('/api/workspace/select', {
+        path: cleanWs,
+        name: customName || '',
+        create_dir: !!createDir,
+        session: sessionId || '',
+      });
+      pushNotice(
+        cleanWs
+          ? `Выбрано рабочее пространство: ${_wsShortName(cleanWs, customName)} (${cleanWs})`
+          : 'Включён режим «Без рабочего пространства» (общие чаты)',
+        'ok'
+      );
+    }
+    if (dlg && dlg.open) dlg.close();
+    await refreshState();
+    if (currentView === 'files' && typeof refreshIdeFiles === 'function') refreshIdeFiles();
+  } catch (err) {
+    pushNotice(err.message, 'bad');
+  }
+}
+
+function renderWorkspaceModalList() {
+  const st = stateCache || {};
+  const sessions = st.sessions || [];
+  const targetRow = wsModalTargetSession ? sessions.find((r) => r.id === wsModalTargetSession) : null;
+  const currentWs = wsModalTargetSession
+    ? String((targetRow && targetRow.workspace) || '')
+    : String(st.workspace || '');
+  const currentKey = _wsKey(currentWs);
+
+  const titleEl = $('#wsModalTitle');
+  const metaEl = $('#wsModalMeta');
+  if (titleEl) {
+    titleEl.textContent = wsModalTargetSession
+      ? `📁 Пространство для чата «${(targetRow && targetRow.title) || wsModalTargetSession}»`
+      : '📁 Рабочие пространства';
+  }
+  if (metaEl) {
+    metaEl.textContent = wsModalTargetSession
+      ? 'Привяжи чат к папке проекта или оставь его в разделе «Без пространства»'
+      : 'Выбор рабочего пространства по желанию — можно работать с папкой проекта или свободно без привязки';
+  }
+
+  const noneCard = $('#wsChooseNoneBtn');
+  const noneBadge = $('#wsNoneActiveBadge');
+  if (noneCard) noneCard.classList.toggle('active', currentKey === '__none__');
+  if (noneBadge) noneBadge.textContent = currentKey === '__none__' ? '✓ Выбрано' : 'Выбрать';
+
+  const list = $('#wsSavedList');
+  if (!list) return;
+  list.innerHTML = '';
+  const workspaces = st.workspaces || [];
+  if (!workspaces.length) {
+    list.appendChild(node('div', 'empty-note', 'Сохранённых пространств пока нет — выбери папку кнопкой «📂 Обзор…» ниже или работай без пространства.'));
+    return;
+  }
+
+  const countByKey = {};
+  sessions.forEach((s) => {
+    const k = _wsKey(s.workspace);
+    countByKey[k] = (countByKey[k] || 0) + 1;
+  });
+
+  workspaces.forEach((w) => {
+    const k = _wsKey(w.path);
+    const isSel = k === currentKey;
+    const chatCnt = countByKey[k] || 0;
+    const row = node('div', 'ws-saved-row' + (isSel ? ' active' : ''));
+    const info = node('div', 'ws-saved-info');
+    const warnMissing = w.exists === false ? ' <span style="color:var(--warn);font-size:11px;">(папка не найдена)</span>' : '';
+    info.innerHTML = `<div class="ws-saved-name">📁 ${esc(w.name || _wsShortName(w.path))}`
+      + `<span class="ws-group-count">${chatCnt} чат.</span>${warnMissing}</div>`
+      + `<div class="ws-saved-path" title="${esc(w.path)}">${esc(w.path)}</div>`;
+
+    const selBtn = node('button', isSel ? 'ghost small-btn' : 'primary small-btn', isSel ? '✓ Активно' : 'Выбрать');
+    selBtn.type = 'button';
+    selBtn.onclick = () => applyWorkspaceChoice(w.path, w.name, false);
+
+    const newChatBtn = node('button', 'ghost small-btn', '+ Чат');
+    newChatBtn.type = 'button';
+    newChatBtn.title = 'Создать новый чат сразу в этом пространстве';
+    newChatBtn.onclick = async () => {
+      const dlg = $('#workspaceDialog');
+      if (dlg && dlg.open) dlg.close();
+      await createNewChatInWorkspace(w.path);
+    };
+
+    const rmBtn = node('button', 'ghost small-btn danger-text', '✕');
+    rmBtn.type = 'button';
+    rmBtn.title = 'Убрать пространство из списка (файлы на диске НЕ удаляются)';
+    rmBtn.onclick = async () => {
+      try {
+        await api('/api/workspace/remove', { path: w.path, detach_sessions: true });
+        await refreshState();
+        renderWorkspaceModalList();
+        pushNotice('Рабочее пространство убрано из списка (файлы не затронуты)', 'ok');
+      } catch (err) {
+        pushNotice(err.message, 'bad');
+      }
+    };
+
+    row.append(info, selBtn, newChatBtn, rmBtn);
+    list.appendChild(row);
+  });
+}
+
+function openWorkspaceModal(forSessionId) {
+  wsModalTargetSession = forSessionId || null;
+  const dlg = $('#workspaceDialog');
+  if (!dlg) return;
+  if ($('#wsPathInput')) $('#wsPathInput').value = '';
+  if ($('#wsNameInput')) $('#wsNameInput').value = '';
+  if ($('#wsCreateDirCheck')) $('#wsCreateDirCheck').checked = false;
+  renderWorkspaceModalList();
+  if (!dlg.open) dlg.showModal();
+}
+
+(function wireWorkspaceUi() {
+  const dlg = $('#workspaceDialog');
+  const close = () => { if (dlg && dlg.open) dlg.close(); };
+
+  $('#wsPickerBtn')?.addEventListener('click', () => openWorkspaceModal(null));
+  $('#headWorkspaceChip')?.addEventListener('click', () => openWorkspaceModal(sessionId || null));
+  $('#wsClearQuickBtn')?.addEventListener('click', async () => {
+    await applyWorkspaceChoice('', '', false);
+  });
+  $('#wsFilterToggleBtn')?.addEventListener('click', () => {
+    wsFilterOnlyActive = !wsFilterOnlyActive;
+    localStorage.setItem('lh.wsFilterOnlyActive', wsFilterOnlyActive ? '1' : '0');
+    renderSessions();
+  });
+
+  $('#wsModalCloseBtn')?.addEventListener('click', close);
+  dlg?.addEventListener('click', (ev) => { if (ev.target === dlg) close(); });
+
+  $('#wsChooseNoneBtn')?.addEventListener('click', () => applyWorkspaceChoice('', '', false));
+
+  $('#wsBrowseBtn')?.addEventListener('click', async () => {
+    const btn = $('#wsBrowseBtn');
+    btn.disabled = true;
+    btn.textContent = '⏳ Открываю…';
+    try {
+      const res = await api('/api/workspace/browse', {});
+      if (res && res.ok && !res.cancelled && res.path) {
+        $('#wsPathInput').value = res.path;
+        if ($('#wsNameInput') && !$('#wsNameInput').value.trim()) {
+          $('#wsNameInput').value = _wsShortName(res.path);
+        }
+      }
+    } catch (err) {
+      pushNotice(err.message, 'bad');
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📂 Обзор…';
+    }
+  });
+
+  $('#wsAddSelectBtn')?.addEventListener('click', () => {
+    const p = ($('#wsPathInput') && $('#wsPathInput').value.trim()) || '';
+    if (!p) {
+      $('#wsPathInput')?.focus();
+      pushNotice('Укажи путь к папке или нажми «📂 Обзор…» (либо выбери «Без рабочего пространства» выше)', 'warn');
+      return;
+    }
+    const name = ($('#wsNameInput') && $('#wsNameInput').value.trim()) || '';
+    const createDir = !!($('#wsCreateDirCheck') && $('#wsCreateDirCheck').checked);
+    applyWorkspaceChoice(p, name, createDir);
+  });
+
+  $('#wsPathInput')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      $('#wsAddSelectBtn')?.click();
+    }
+  });
+})();
 
 (async function boot() {
   if (localStorage.getItem('lh.rail') === '1') app.classList.add('rail');

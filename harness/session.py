@@ -31,13 +31,35 @@ def _path(sid):
     return os.path.join(sdir, "%s.jsonl" % sid)
 
 
-def create(title=""):
+def normalize_ws(raw):
+    text = str(raw or "").strip().strip('"').strip("'")
+    if not text:
+        return ""
+    return os.path.normpath(os.path.abspath(os.path.expanduser(text)))
+
+
+def workspace_label(ws):
+    clean = str(ws or "").strip().rstrip("\\/")
+    if not clean:
+        return ""
+    base = os.path.basename(clean)
+    return base or clean
+
+
+def create(title="", workspace=""):
+    ws = normalize_ws(workspace)
     with LOCK:
         for _ in range(16):
             sid = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
             try:
                 with open(_path(sid), "x", encoding="utf-8") as fh:
-                    fh.write(json.dumps({"t": "meta", "id": sid, "created": time.time(), "title": title}, ensure_ascii=False) + "\n")
+                    fh.write(json.dumps({
+                        "t": "meta",
+                        "id": sid,
+                        "created": time.time(),
+                        "title": title,
+                        "workspace": ws,
+                    }, ensure_ascii=False) + "\n")
                 return sid
             except FileExistsError:
                 continue
@@ -101,6 +123,31 @@ def set_title(sid, title):
             meta = json.loads(fh.readline())
             rest = fh.read()
         meta["title"] = title
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=_session_dir(), delete=False) as fh:
+                tmp = fh.name
+                fh.write((json.dumps(meta, ensure_ascii=False) + "\n").encode("utf-8"))
+                fh.write(rest)
+            os.replace(tmp, path)
+        finally:
+            if tmp and os.path.exists(tmp):
+                os.remove(tmp)
+        return True
+
+
+def set_workspace(sid, workspace=""):
+    if not valid_id(sid):
+        return False
+    ws = normalize_ws(workspace)
+    with LOCK:
+        path = _path(sid)
+        if not os.path.isfile(path):
+            return False
+        with open(path, "rb") as fh:
+            meta = json.loads(fh.readline())
+            rest = fh.read()
+        meta["workspace"] = ws
         tmp = None
         try:
             with tempfile.NamedTemporaryFile(dir=_session_dir(), delete=False) as fh:
@@ -215,10 +262,19 @@ def list_sessions(limit=None, query=""):
             except (OSError, ValueError):
                 continue
             title = first.get("title") or sid
-            if query and query not in (title + " " + sid).casefold():
+            ws = normalize_ws(first.get("workspace") or "")
+            ws_name = workspace_label(ws)
+            if query and query not in (title + " " + sid + " " + ws + " " + ws_name).casefold():
                 continue
-            rows.append({"id": sid, "title": title, "created": first.get("created"),
-                         "mtime": stat.st_mtime, "bytes": stat.st_size})
+            rows.append({
+                "id": sid,
+                "title": title,
+                "workspace": ws,
+                "workspace_name": ws_name,
+                "created": first.get("created"),
+                "mtime": stat.st_mtime,
+                "bytes": stat.st_size,
+            })
     rows.sort(key=lambda row: row["mtime"], reverse=True)
     return rows[:limit] if limit is not None else rows
 

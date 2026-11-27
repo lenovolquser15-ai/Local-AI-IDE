@@ -41,9 +41,10 @@ def _settings(cfg):
 def _root(cfg):
     configured = str(_settings(cfg).get("root") or "").strip()
     fallback_work = os.path.join(config_mod.ROOT, "work")
-    if not configured and not cfg.get("workspace"):
+    ws_active = cfg.get("workspace") if cfg.get("workspace_enabled", True) else ""
+    if not configured and not ws_active:
         os.makedirs(fallback_work, exist_ok=True)
-    root = os.path.realpath(configured or cfg.get("workspace") or fallback_work)
+    root = os.path.realpath(configured or ws_active or fallback_work)
     if not os.path.isdir(root):
         raise FilesError("Папка редактора не найдена: %s" % root, 409)
     protected = [os.path.realpath(config_mod.config_path()), os.path.realpath(config_mod.data_dir())]

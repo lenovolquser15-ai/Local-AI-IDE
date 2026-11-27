@@ -44,9 +44,24 @@
       <span class="dot idle" id="provDot" title="локальный сервер моделей"></span>
       <button id="sideCloseBtn" class="icon mobile-only" type="button" title="Закрыть меню">✕</button>
     </div>
+    <div class="ws-sidebar-box" id="wsSidebarBox">
+      <button id="wsPickerBtn" class="ws-picker-btn" type="button" title="Выбрать рабочее пространство проекта или работать без привязки к папке">
+        <span class="ws-picker-ico" id="wsPickerIco">🌐</span>
+        <span class="ws-picker-text">
+          <span class="ws-picker-kicker">Пространство</span>
+          <span class="ws-picker-name" id="wsPickerName">Без пространства</span>
+        </span>
+        <span class="ws-picker-caret">▾</span>
+      </button>
+      <button id="wsClearQuickBtn" class="ws-clear-btn" type="button" title="Отключить рабочее пространство (общий режим без папки)" hidden>✕</button>
+    </div>
     <button id="newChat" class="new-session"><span class="plus">+</span><span class="text">Новая сессия</span></button>
-    <div class="side-label">Сессии</div>
-    <input id="sessionSearch" class="field session-search" type="search" placeholder="Поиск сессий…" aria-label="Поиск сессий">
+    <div class="side-sessions-head">
+      <span class="side-label">Чаты по пространствам</span>
+      <span class="grow"></span>
+      <button id="wsFilterToggleBtn" class="ws-filter-btn" type="button" title="Переключить показ: все пространства или только активное">Все</button>
+    </div>
+    <input id="sessionSearch" class="field session-search" type="search" placeholder="Поиск чатов и пространств…" aria-label="Поиск сессий">
     <div id="sessions" class="sessions"></div>
     <div class="side-foot">
       <label class="autostart-label"><input id="autostart" type="checkbox" disabled> Запускать с Windows</label>
@@ -66,6 +81,7 @@
       <div class="head-titles">
         <span class="head-kicker mobile-only">LocalHarness</span>
         <span class="head-title" id="sessionTitle">новая сессия</span>
+        <button id="headWorkspaceChip" class="head-ws-chip" type="button" title="Рабочее пространство этого чата (нажми для смены или отключения)">🌐 Без папки</button>
       </div>
       <span class="grow"></span>
       <select id="personaSelect" class="compact persona-select" title="Роль / Персона агента" aria-label="Персона агента">
@@ -356,10 +372,25 @@
             <div class="page-sub" id="lmBase">сервер: …</div>
           </div>
           <span class="grow"></span>
+          <button id="lmsOpenLoaderTopBtn" class="primary small-btn" type="button" title="Открыть окно тонкой загрузки модели как в LM Studio">⚙️ Загрузить модель…</button>
           <button id="lmsUnloadAll" class="ghost" title="Выгрузить все модели из памяти LM Studio">выгрузить всё</button>
           <button id="lmsWake" class="ghost">разбудить сервер</button>
           <button id="lmsRefresh" class="ghost">обновить</button>
         </div>
+
+        <section class="plate lms-runtime-plate" id="lmRuntimePlate">
+          <div class="plate-title-row">
+            <div>
+              <div class="plate-title">🌋 Движок ускорения LM Studio (Vulkan / CUDA / ROCm / CPU)</div>
+              <div class="page-sub" id="lmRuntimeSub">Vulkan даёт стабильное GPU-ускорение на новых видеокартах NVIDIA RTX 50xx (Blackwell), AMD Radeon и Intel Arc.</div>
+            </div>
+            <span class="grow"></span>
+            <span class="sec-chip ok" id="lmRuntimeActiveChip">опрос…</span>
+            <button id="lmInstallVulkanBtn" class="ghost small-btn" type="button" title="Скачать или обновить официальный движок llama.cpp Vulkan для LM Studio">⬇️ Скачать / Обновить Vulkan</button>
+          </div>
+          <div id="lmRuntimesList" class="lms-runtime-grid"></div>
+        </section>
+
         <div class="plug-grid two">
           <section class="plate">
             <div class="plate-title-row">
@@ -372,10 +403,35 @@
             <div class="plate-title">На диске</div>
             <div id="lmDisk" class="cardlist"></div>
             <div class="lm-options">
-              <label>Контекст LM Studio <input id="lmContext" class="small-field" type="number" min="512" max="262144" step="512" title="512–262144 токенов; не больше реального контекста модели"></label>
+              <label>Окно контекста (токенов) <input id="lmContext" class="small-field" type="number" min="512" max="262144" step="1" title="512–262144 токенов; любое число до максимума модели"></label>
+              <label>GPU Offload
+                <select id="lmGpuQuick" class="compact" title="Выгрузка слоёв модели в видеопамять">
+                  <option value="max">Max (100% GPU)</option>
+                  <option value="0.75">75% GPU</option>
+                  <option value="0.5">50% GPU</option>
+                  <option value="0.25">25% GPU</option>
+                  <option value="off">Off (только CPU)</option>
+                </select>
+              </label>
+              <label>KV-кэш
+                <select id="lmKvQuick" class="compact" title="Квантование K/V кэша контекста">
+                  <option value="f16">FP16</option>
+                  <option value="q8_0">Q8_0 (-45% VRAM)</option>
+                  <option value="q4_0">Q4_0 (-70% VRAM)</option>
+                </select>
+              </label>
               <label>TTL, сек <input id="lmTtl" class="small-field" type="number" min="0" step="60" placeholder="0 = выкл."></label>
             </div>
-            <div class="page-sub">Контекст: 512–262144 токенов, кратно 512. Больше реального контекста модели выставлять нельзя — LM Studio откажет или загрузит модель не влезающей в память.</div>
+            <div class="lms-ctx-chips" id="lmPageCtxChips">
+              <span class="page-sub" style="margin-right:4px;">Быстрый контекст:</span>
+              <button type="button" class="ctx-preset-pill" data-ctx="4096">4K</button>
+              <button type="button" class="ctx-preset-pill" data-ctx="8192">8K</button>
+              <button type="button" class="ctx-preset-pill" data-ctx="16384">16K</button>
+              <button type="button" class="ctx-preset-pill" data-ctx="32768">32K</button>
+              <button type="button" class="ctx-preset-pill" data-ctx="65536">64K</button>
+              <button type="button" class="ctx-preset-pill" data-ctx="131072">128K</button>
+            </div>
+            <div class="page-sub">Нажми «⚙️ Загрузить…» на любой карточке модели для выбора точного ползунка контекста, GPU Offload, Flash Attention и расчёта памяти как в LM Studio.</div>
             <div class="urlrow">
               <input type="text" id="lmQuery" class="field grow" placeholder="Поиск и скачивание GGUF модели (напр. qwen2.5-7b-instruct)">
               <button id="lmDownload" class="primary">Скачать</button>
@@ -1004,14 +1060,32 @@
           <button id="modelMenuClose" class="icon" type="button" title="Закрыть">✕</button>
         </div>
         <div class="mm-providers" id="mmProviders" role="tablist" aria-label="Провайдер"></div>
+        <div class="mm-lms-bar" id="mmLmsBar" hidden>
+          <div class="mm-lms-row">
+            <span class="mm-lms-engine" id="mmLmsEngineChip" title="Активный движок LM Studio">🌋 Vulkan</span>
+            <span class="grow"></span>
+            <label class="mm-lms-ctx-lbl" title="Окно контекста модели">Контекст:
+              <select id="mmQuickCtx" class="compact mm-ctx-select">
+                <option value="2048">2K (2 048)</option>
+                <option value="4096">4K (4 096)</option>
+                <option value="8192">8K (8 192)</option>
+                <option value="16384">16K (16 384)</option>
+                <option value="32768">32K (32 768)</option>
+                <option value="65536">64K (65 536)</option>
+                <option value="131072">128K (131 072)</option>
+              </select>
+            </label>
+            <button id="mmOpenLoaderBtn" class="ghost small-btn mm-loader-btn" type="button" title="Открыть окно загрузки модели как в LM Studio (ползунок контекста, GPU Offload, Vulkan, KV-кэш)">⚙️ Загрузить…</button>
+          </div>
+        </div>
         <div class="mm-label">Модель</div>
         <div class="mm-models" id="mmModels"></div>
         <div class="mm-grid">
           <label class="mm-field"><span>tools</span>
-            <select id="protocol" class="compact" title="Как модель вызывает инструменты">
-              <option value="auto">auto</option>
+            <select id="protocol" class="compact" title="Режим вызова инструментов: Авто, Native API или универсальный текстовый режим для любых моделей без tool_use">
+              <option value="auto">авто</option>
               <option value="native">native</option>
-              <option value="json">json</option>
+              <option value="json">без tool_use</option>
             </select>
           </label>
           <label class="mm-field"><span>набор</span>
@@ -1512,6 +1586,181 @@
     </div>
   </div>
 </dialog>
+
+<dialog id="lmsLoadDialog" class="code-modal lms-load-modal" aria-label="Настройка и загрузка модели LM Studio">
+  <div class="modal-head">
+    <div class="modal-head-text">
+      <span class="modal-title" id="lmsLoadModalTitle">⚡ Загрузка модели в LM Studio</span>
+      <span class="modal-meta" id="lmsLoadModalMeta">Настройка окна контекста, GPU Offload и движка Vulkan</span>
+    </div>
+    <span class="grow"></span>
+    <button id="lmsLoadCloseBtn" class="icon" type="button" title="Закрыть">✕</button>
+  </div>
+  <div class="modal-body lms-load-body">
+    <div class="lms-load-row two-col">
+      <div class="field-group">
+        <label class="field-label" for="lmsLoadModelSelect">Модель на диске:</label>
+        <select id="lmsLoadModelSelect" class="field"></select>
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="lmsLoadRuntimeSelect">Движок ускорения (Runtime):</label>
+        <select id="lmsLoadRuntimeSelect" class="field"></select>
+      </div>
+    </div>
+
+    <div class="lms-slider-card">
+      <div class="lms-slider-head">
+        <span class="lms-slider-title">Длина контекста (Context Length)</span>
+        <div class="lms-slider-right">
+          <input type="number" id="lmsLoadCtxInput" class="field small-field lms-num-input" min="512" max="262144" step="1" value="16384">
+          <span class="lms-slider-max" id="lmsLoadCtxMaxLabel">/ 32 768 ток.</span>
+        </div>
+      </div>
+      <input type="range" id="lmsLoadCtxRange" class="lms-range" min="512" max="32768" step="256" value="16384">
+      <div class="lms-ctx-chips" id="lmsLoadCtxPresets">
+        <button type="button" class="ctx-preset-pill" data-ctx="2048">2K</button>
+        <button type="button" class="ctx-preset-pill" data-ctx="4096">4K</button>
+        <button type="button" class="ctx-preset-pill" data-ctx="8192">8K</button>
+        <button type="button" class="ctx-preset-pill" data-ctx="16384">16K</button>
+        <button type="button" class="ctx-preset-pill" data-ctx="32768">32K</button>
+        <button type="button" class="ctx-preset-pill" data-ctx="65536">64K</button>
+        <button type="button" class="ctx-preset-pill" data-ctx="131072">128K</button>
+        <button type="button" class="ctx-preset-pill" data-ctx="max">Max</button>
+      </div>
+    </div>
+
+    <div class="lms-slider-card">
+      <div class="lms-slider-head">
+        <span class="lms-slider-title">Выгрузка слоёв на видеокарту (GPU Offload)</span>
+        <span class="lms-gpu-badge" id="lmsLoadGpuLabel">Max (100% слоёв в VRAM)</span>
+      </div>
+      <input type="range" id="lmsLoadGpuRange" class="lms-range" min="0" max="100" step="5" value="100">
+      <div class="lms-ctx-chips" id="lmsLoadGpuPresets">
+        <button type="button" class="ctx-preset-pill" data-gpu="0">Off (только CPU)</button>
+        <button type="button" class="ctx-preset-pill" data-gpu="25">25%</button>
+        <button type="button" class="ctx-preset-pill" data-gpu="50">50%</button>
+        <button type="button" class="ctx-preset-pill" data-gpu="75">75%</button>
+        <button type="button" class="ctx-preset-pill active" data-gpu="100">Max (100% GPU)</button>
+      </div>
+    </div>
+
+    <div class="lms-adv-grid">
+      <div class="field-group">
+        <label class="field-label" for="lmsLoadKvSelect">Квантование KV-кэша:</label>
+        <select id="lmsLoadKvSelect" class="field compact">
+          <option value="f16">FP16 (стандарт)</option>
+          <option value="q8_0">Q8_0 (-45% памяти KV)</option>
+          <option value="q4_0">Q4_0 (-70% памяти KV)</option>
+        </select>
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="lmsLoadParallelInput">Параллельные слоты (--parallel):</label>
+        <input type="number" id="lmsLoadParallelInput" class="field compact" min="1" max="16" step="1" value="1">
+      </div>
+      <div class="field-group">
+        <label class="field-label" for="lmsLoadTtlInput">Автовыгрузка TTL (сек, 0 = выкл):</label>
+        <input type="number" id="lmsLoadTtlInput" class="field compact" min="0" step="60" value="0">
+      </div>
+    </div>
+
+    <div class="lms-check-row">
+      <label class="check-pill">
+        <input type="checkbox" id="lmsLoadFlashCheck" checked>
+        <span>⚡ Flash Attention (ускоряет длинный контекст и снижает расход VRAM)</span>
+      </label>
+      <label class="check-pill">
+        <input type="checkbox" id="lmsLoadSyncChatCheck" checked>
+        <span>💬 Сделать активной моделью чата и синхронизировать лимит контекста</span>
+      </label>
+    </div>
+
+    <div class="lms-est-panel" id="lmsLoadEstPanel">
+      <div class="lms-est-top">
+        <span class="lms-est-verdict" id="lmsLoadEstVerdict">Оценка памяти…</span>
+        <span class="grow"></span>
+        <button type="button" id="lmsLoadPreciseBtn" class="ghost small-btn" title="Запросить точный расчёт памяти напрямую у движка lms (--estimate-only)">🔍 Точный расчёт LM Studio</button>
+      </div>
+      <div class="lms-est-bar-bg">
+        <div class="lms-est-bar-fill" id="lmsLoadEstBar" style="width: 35%;"></div>
+      </div>
+      <div class="lms-est-stats" id="lmsLoadEstStats">VRAM: — · Всего памяти: — · Скорость: —</div>
+    </div>
+
+    <pre id="lmsLoadLiveLog" class="joblog" hidden></pre>
+  </div>
+  <div class="modal-foot">
+    <button type="button" id="lmsLoadCancelBtn" class="ghost">Отмена</button>
+    <span class="grow"></span>
+    <button type="button" id="lmsLoadSubmitBtn" class="primary">🚀 Загрузить модель в память</button>
+  </div>
+</dialog>
+
+<dialog id="reviewChangesDialog" class="code-modal review-changes-modal" aria-label="Обзор изменений и итогов цели">
+  <div class="modal-head">
+    <div class="modal-head-text">
+      <span class="modal-title" id="reviewModalTitle">📄 Обзор изменений (Review)</span>
+      <span class="modal-meta" id="reviewModalMeta">Изменённые файлы и итог выполнения</span>
+    </div>
+    <span class="grow"></span>
+    <span class="review-stat-chip" id="reviewModalStatChip"></span>
+    <button id="reviewModalCloseBtn" class="icon" type="button" title="Закрыть">✕</button>
+  </div>
+  <div class="modal-body review-modal-body">
+    <div id="reviewGoalSummaryBox" class="review-goal-box" hidden></div>
+    <div id="reviewFilesLayout" class="review-files-layout">
+      <div class="review-file-list" id="reviewFileList"></div>
+      <div class="review-diff-pane">
+        <div class="review-diff-head">
+          <span class="review-diff-fname" id="reviewDiffFname">Выберите файл</span>
+          <span class="grow"></span>
+          <button type="button" id="reviewOpenInIdeBtn" class="ghost small-btn" hidden>📁 Открыть во вкладке «Файлы»</button>
+        </div>
+        <div class="review-diff-code" id="reviewDiffCode"></div>
+      </div>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="workspaceDialog" class="code-modal ws-modal" aria-label="Выбор рабочего пространства">
+  <div class="modal-head">
+    <div class="modal-head-text">
+      <span class="modal-title" id="wsModalTitle">📁 Рабочие пространства</span>
+      <span class="modal-meta" id="wsModalMeta">Выбор папки проекта по желанию — чаты группируются по пространствам</span>
+    </div>
+    <span class="grow"></span>
+    <button id="wsModalCloseBtn" class="icon" type="button" title="Закрыть">✕</button>
+  </div>
+  <div class="modal-body ws-modal-body">
+    <button id="wsChooseNoneBtn" class="ws-none-card" type="button">
+      <span class="ws-none-ico">🌐</span>
+      <div class="ws-none-info">
+        <div class="ws-none-title">Без рабочего пространства (по желанию)</div>
+        <div class="ws-none-sub">Свободный режим для любых вопросов и задач на ПК без привязки к папке проекта</div>
+      </div>
+      <span class="ws-none-badge" id="wsNoneActiveBadge">Выбрать</span>
+    </button>
+
+    <div class="ws-section-label">Сохранённые рабочие пространства</div>
+    <div id="wsSavedList" class="ws-saved-list"></div>
+
+    <div class="ws-add-card">
+      <div class="ws-section-label">Открыть или добавить папку проекта</div>
+      <div class="urlrow">
+        <input type="text" id="wsPathInput" class="field grow" placeholder="C:\Projects\MyApp — путь к папке на диске">
+        <button type="button" id="wsBrowseBtn" class="ghost" title="Выбрать папку через стандартное окно Windows">📂 Обзор…</button>
+      </div>
+      <div class="ws-add-meta-row">
+        <input type="text" id="wsNameInput" class="field grow" placeholder="Название пространства (необязательно, по умолчанию имя папки)">
+        <label class="check-pill">
+          <input type="checkbox" id="wsCreateDirCheck">
+          <span>Создать папку, если нет</span>
+        </label>
+        <button type="button" id="wsAddSelectBtn" class="primary">➕ Выбрать пространство</button>
+      </div>
+    </div>
+  </div>
+</dialog>
+
 <script src="/app.js"></script>
 </body>
 </html>

@@ -217,6 +217,96 @@ class Repl:
         self.proc = None
 
 
+TOOL_NAME_ALIASES = {
+    "bash": "shell",
+    "sh": "shell",
+    "cmd": "shell",
+    "terminal": "shell",
+    "run_command": "shell",
+    "execute_command": "shell",
+    "exec_command": "shell",
+    "pwsh": "powershell",
+    "fs_read": "read_file",
+    "view_file": "read_file",
+    "open_file": "read_file",
+    "cat": "read_file",
+    "fs_write": "write_file",
+    "create_file": "write_file",
+    "save_file": "write_file",
+    "fs_edit": "edit_file",
+    "replace_in_file": "edit_file",
+    "str_replace": "edit_file",
+    "patch_file": "edit_file",
+    "ls": "list_dir",
+    "dir": "list_dir",
+    "list_files": "list_dir",
+    "fs_list": "list_dir",
+    "search_files": "grep",
+    "ripgrep": "grep",
+    "rg": "grep",
+    "find_in_files": "grep",
+    "search": "web_search",
+    "internet_search": "web_search",
+    "fetch": "web_fetch",
+    "fetch_url": "web_fetch",
+    "read_url": "web_fetch",
+    "run_python": "python",
+    "python_exec": "python",
+    "py": "python",
+}
+
+PARAM_ALIASES = {
+    "shell": {"command": "cmd", "script": "cmd", "code": "cmd", "input": "cmd", "workdir": "cwd"},
+    "powershell": {"command": "cmd", "script": "cmd", "code": "cmd", "input": "cmd", "workdir": "cwd"},
+    "read_file": {"file": "path", "file_path": "path", "filepath": "path", "filename": "path", "start_line": "offset", "max_lines": "limit"},
+    "write_file": {"file": "path", "file_path": "path", "filepath": "path", "filename": "path", "text": "content", "data": "content", "body": "content", "contents": "content"},
+    "edit_file": {
+        "file": "path", "file_path": "path", "filepath": "path", "filename": "path",
+        "old_str": "find", "old_string": "find", "old_text": "find", "old": "find", "search": "find", "target": "find",
+        "new_str": "replace", "new_string": "replace", "new_text": "replace", "new": "replace", "replacement": "replace",
+        "replace_all": "all",
+    },
+    "list_dir": {"dir": "path", "directory": "path", "folder": "path", "file_path": "path"},
+    "glob": {"dir": "path", "directory": "path", "glob": "pattern", "mask": "pattern"},
+    "grep": {"regex": "pattern", "query": "pattern", "search": "pattern", "dir": "path", "directory": "path", "file_path": "path"},
+    "web_search": {"q": "query", "search_query": "query", "input": "query", "limit": "count", "num_results": "count"},
+    "web_fetch": {"link": "url", "href": "url", "uri": "url"},
+    "download": {"link": "url", "href": "url", "file": "path", "file_path": "path"},
+    "python": {"script": "code", "cmd": "code", "command": "code", "input": "code"},
+    "rag_search": {"q": "query", "search_query": "query", "limit": "top_k"},
+    "rag_index": {"dir": "path", "folder": "path", "file_path": "path"},
+    "ask_user": {"prompt": "question", "text": "question", "message": "question"},
+    "check_goal_point": {"point": "index", "step": "index", "number": "index", "proof": "evidence"},
+    "finish_goal": {"done": "achieved", "success": "achieved", "ok": "achieved", "result": "summary", "answer": "summary", "proof": "evidence"},
+}
+
+
+def normalize_tool_call(name, args, known_Plugin_or_Mcp=None):
+    """Приводит имя инструмента и ключи аргументов к каноническим именам LocalHarness,
+    чтобы модели без native tool_use не спотыкались на мелких расхождениях (file_path -> path, command -> cmd)."""
+    raw_name = str(name or "").strip()
+    norm_args = dict(args) if isinstance(args, dict) else {}
+    known_ext = set(known_Plugin_or_Mcp or ())
+    canon_name = raw_name
+    if raw_name not in known_ext:
+        low = raw_name.lower()
+        if low in TOOL_NAME_ALIASES:
+            canon_name = TOOL_NAME_ALIASES[low]
+            if low in ("bash", "sh") and "mode" not in norm_args:
+                norm_args["mode"] = "bash"
+    pmap = PARAM_ALIASES.get(canon_name)
+    if pmap and norm_args:
+        remapped = {}
+        for k, v in norm_args.items():
+            target_k = pmap.get(k)
+            if target_k and target_k not in norm_args and target_k not in remapped:
+                remapped[target_k] = v
+            else:
+                remapped[k] = v
+        norm_args = remapped
+    return canon_name, norm_args
+
+
 def resolve_path(path, base=None):
     if not path:
         return os.path.abspath(base or DATA_DIR)
@@ -1538,6 +1628,12 @@ class Toolkit:
         return ut.export_sessions_to_dataset(dataset_name=name, max_sessions=int(max_sessions or 100))
 
     def call(self, name, args):
+        name, args = normalize_tool_call(name, args)
+        if name == "jobs":
+            try:
+                return self.jobs_tool(**(args or {}))
+            except Exception as exc:
+                return {"ok": False, "error": "%s: %s" % (type(exc).__name__, exc)}
         fn = getattr(self, name, None)
         if fn is None or name.startswith("_") or name in ("call", "cfg", "jobs"):
             if str(name).startswith("mcp__"):

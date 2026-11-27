@@ -484,6 +484,20 @@ class LLM:
             self._ensure_model()
         except LLMError:
             pass
+        # Fast-path: if LM Studio metadata explicitly marks model as NOT trained for tool use,
+        # skip the slow network probe and use our universal text/JSON protocol immediately.
+        if (self.cfg or {}).get("provider") == "lmstudio" and self.model:
+            try:
+                from . import lms as lms_mod
+                disk, _ = lms_mod.disk_models(self.cfg, timeout=5)
+                for item in (disk or []):
+                    if any(lms_mod._match_alias(item.get(k), self.model)
+                           for k in ("modelKey", "path", "identifier", "displayName", "indexedModelIdentifier")):
+                        if item.get("trainedForToolUse") is False:
+                            return "json"
+                        break
+            except Exception:
+                pass
         try:
             with open(PROTOCOL_CACHE, "r", encoding="utf-8") as fh:
                 cache = json.load(fh)
@@ -625,68 +639,382 @@ def strip_reasoning(text):
     return text.strip()
 
 
+def _repair_json_candidate(raw):
+    """Мягкая починка типичных ошибок локальных GGUF-моделей без tool_use:
+    висячие запятые, неэкранированные переводы строк внутри кавычек, одинарные кавычки / Python-словари."""
+    import ast
+    s = (raw or "").strip()
+    if not s:
+        return None
+    try:
+        return json.loads(s)
+    except ValueError:
+        pass
+    # 1. Убираем trailing commas перед } и ] и экранируем сырые переводы строк внутри JSON-строк
+    repaired_chars = []
+    in_str = False
+    esc = False
+    for ch in s:
+        if in_str:
+            if esc:
+                repaired_chars.append(ch)
+                esc = False
+            elif ch == "\\":
+                repaired_chars.append(ch)
+                esc = True
+            elif ch == '"':
+                repaired_chars.append(ch)
+                in_str = False
+            elif ch == "\n":
+                repaired_chars.append("\\n")
+            elif ch == "\r":
+                repaired_chars.append("\\r")
+            elif ch == "\t":
+                repaired_chars.append("\\t")
+            else:
+                repaired_chars.append(ch)
+        else:
+            if ch == '"':
+                in_str = True
+            repaired_chars.append(ch)
+    fixed = re.sub(r",\s*([}\]])", r"\1", "".join(repaired_chars))
+    try:
+        return json.loads(fixed)
+    except ValueError:
+        pass
+    # 2. Fallback для Python-литералов ({'tool': 'shell', 'args': {'cmd': 'dir'}, 'all': True})
+    py_cand = re.sub(r"\btrue\b", "True", fixed)
+    py_cand = re.sub(r"\bfalse\b", "False", py_cand)
+    py_cand = re.sub(r"\bnull\b", "None", py_cand)
+    try:
+        val = ast.literal_eval(py_cand)
+        if isinstance(val, (dict, list)):
+            return val
+    except Exception:
+        pass
+    return None
+
+
 def _balanced_object(text):
-    start = text.find("{")
-    while start != -1:
-        depth = 0
-        in_str = False
+    """Извлекает первый сбалансированный JSON/Python объект {...} из текста."""
+    objs = _all_balanced_structures(text, limit=1, allow_arrays=False)
+    return objs[0][0] if objs else None
+
+
+def _all_balanced_structures(text, limit=8, allow_arrays=True):
+    """Находит до `limit` сбалансированных JSON-объектов {...} (и массивов [...]) с их позициями (obj, start, end)."""
+    results = []
+    if not text:
+        return results
+    openers = "{[" if allow_arrays else "{"
+    idx = 0
+    n = len(text)
+    while idx < n and len(results) < limit:
+        best_pos = -1
+        for op in openers:
+            p = text.find(op, idx)
+            if p != -1 and (best_pos == -1 or p < best_pos):
+                best_pos = p
+        if best_pos == -1:
+            break
+        stack = []
+        in_str = None
         esc = False
-        for i in range(start, len(text)):
+        parsed_end = -1
+        for i in range(best_pos, n):
             ch = text[i]
             if in_str:
                 if esc:
                     esc = False
                 elif ch == "\\":
                     esc = True
-                elif ch == '"':
-                    in_str = False
+                elif ch == in_str:
+                    in_str = None
                 continue
-            if ch == '"':
-                in_str = True
-            elif ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    candidate = text[start:i + 1]
-                    try:
-                        return json.loads(candidate)
-                    except ValueError:
-                        break
-        start = text.find("{", start + 1)
-    return None
+            if ch in ('"', "'"):
+                in_str = ch
+            elif ch in "{[":
+                stack.append("}" if ch == "{" else "]")
+            elif ch in "}]":
+                if not stack or ch != stack[-1]:
+                    break
+                stack.pop()
+                if not stack:
+                    cand = text[best_pos:i + 1]
+                    obj = _repair_json_candidate(cand)
+                    if isinstance(obj, (dict, list)):
+                        results.append((obj, best_pos, i + 1))
+                        parsed_end = i + 1
+                    break
+        idx = parsed_end if parsed_end != -1 else (best_pos + 1)
+    return results
 
 
-def parse_json_protocol(text):
-    """Extract tool calls from a model that answered in plain text."""
-    clean = strip_reasoning(text or "")
-    fenced = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", clean, re.S)
-    blob = _balanced_object(fenced.group(1)) if fenced else _balanced_object(clean)
-    if not isinstance(blob, dict):
-        return {"kind": "final", "content": clean, "calls": []}
-    if "final" in blob or ("content" in blob and "tool" not in blob and "tools" not in blob):
-        return {"kind": "final", "content": str(blob.get("final") or blob.get("content") or clean), "calls": []}
-    raw_calls = blob.get("tools") or blob.get("calls") or []
-    if isinstance(raw_calls, dict):
-        raw_calls = [raw_calls]
-    if blob.get("tool"):
-        raw_calls = [blob] + list(raw_calls)
+def _coerce_call_item(item, index=0):
+    """Превращает словарь любого популярного формата (LocalHarness / OpenAI / Hermes / Qwen / ReAct)
+    в стандартный OpenAI tool_call dict, либо возвращает None."""
+    if not isinstance(item, dict):
+        return None
+    fn_block = item.get("function") if isinstance(item.get("function"), dict) else None
+    name = (
+        item.get("tool")
+        or item.get("tool_name")
+        or item.get("action")
+        or (fn_block.get("name") if fn_block else None)
+        or item.get("name")
+    )
+    if not name or not isinstance(name, str):
+        return None
+    name = name.strip()
+    if not name or name.lower() in ("final", "final_answer", "none", "null", "answer", "response"):
+        return None
+    if fn_block and "arguments" in fn_block:
+        args = fn_block.get("arguments")
+    else:
+        for key in ("args", "arguments", "parameters", "params", "action_input", "input"):
+            if key in item:
+                args = item[key]
+                break
+        else:
+            # Некоторые маленькие GGUF пишут плоский JSON: {"tool": "shell", "cmd": "dir"}
+            reserved = {"tool", "tool_name", "name", "action", "id", "type", "note", "thought", "reasoning"}
+            extra = {k: v for k, v in item.items() if k not in reserved}
+            args = extra if extra else {}
+    if isinstance(args, str):
+        repaired = _repair_json_candidate(args)
+        args = repaired if isinstance(repaired, dict) else ({"input": args} if args.strip() else {})
+    elif not isinstance(args, dict):
+        args = {}
+    return {
+        "id": str(item.get("id") or ("json_%d_%d" % (int(time.time() * 1000), index))),
+        "type": "function",
+        "function": {"name": name, "arguments": json.dumps(args, ensure_ascii=False)},
+    }
+
+
+_XML_TOOL_BLOCK_RE = re.compile(
+    r"(?:<(?:tool_call|Seed:tool_call|function_call)>|<\|tool_call_start\|>)\s*(.*?)\s*"
+    r"(?:</(?:tool_call|Seed:tool_call|function_call)>|<\|tool_call_end\|>)",
+    re.S | re.I,
+)
+_DEEPSEEK_TOOL_RE = re.compile(
+    r"<[｜|]tool[▁_]call[▁_]begin[｜|]>(?:function<[｜|]tool[▁_]sep[｜|]>)?\s*([a-zA-Z0-9_.\-]+)\s*"
+    r"(?:```(?:json)?\s*)?(\{.*?\})(?:\s*```)?\s*<[｜|]tool[▁_]call[▁_]end[｜|]>",
+    re.S,
+)
+_FUNC_TAG_RE = re.compile(
+    r"<function\s*=\s*([a-zA-Z0-9_.\-]+)\s*>(.*?)</function>|<function\s*=\s*([a-zA-Z0-9_.\-]+)\s*\((\{.*?\})\)\s*/?>",
+    re.S | re.I,
+)
+_INVOKE_TAG_RE = re.compile(
+    r"<invoke\s+name=[\"']([a-zA-Z0-9_.\-]+)[\"']\s*>(.*?)</invoke>",
+    re.S | re.I,
+)
+_INVOKE_PARAM_RE = re.compile(
+    r"<parameter\s+name=[\"']([a-zA-Z0-9_.\-]+)[\"']\s*>(.*?)</parameter>",
+    re.S | re.I,
+)
+_REACT_RE = re.compile(
+    r"(?:^|\n)\s*Action\s*:\s*`?([a-zA-Z0-9_.\-]+)`?\s*\n\s*Action\s+Input\s*:\s*(\{.*?\})",
+    re.S | re.I,
+)
+
+
+def parse_json_protocol(text, known_tools=None, strict_for_native=False):
+    """Универсальный парсер вызовов инструментов без native tool_use.
+    Поддерживает чистый JSON, markdown ```json```, <tool_call>, Qwen/Hermes, DeepSeek,
+    Mistral [TOOL_CALLS], Llama <function=...>, Claude <invoke>, ReAct Action/Action Input
+    и мягкую починку синтаксиса для локальных GGUF-моделей."""
+    raw_text = text or ""
+    clean = strip_reasoning(raw_text)
+    # Если модель открыла <think>, забыла закрыть </think>, но в конце явно написала <tool_call>:
+    if not clean and ("<tool_call>" in raw_text or "<function=" in raw_text or '"tool"' in raw_text):
+        for marker in ("<tool_call>", "<Seed:tool_call>", "<function=", "[TOOL_CALLS]"):
+            pos = raw_text.find(marker)
+            if pos != -1:
+                clean = raw_text[pos:].strip()
+                break
+
+    allowed = {str(t).strip() for t in known_tools} if known_tools else None
     calls = []
-    for i, item in enumerate(raw_calls):
-        if not isinstance(item, dict) or not item.get("tool"):
+    spans_to_strip = []
+
+    def _accept_name(cname):
+        if not allowed:
+            return True
+        if cname in allowed:
+            return True
+        # Разрешаем также стандартные алиасы инструментов (bash -> shell, fs_read -> read_file и т.д.)
+        from . import tools as tools_mod
+        canon = tools_mod.TOOL_NAME_ALIASES.get(cname.lower())
+        return bool(canon and canon in allowed)
+
+    # 1. Явные XML / специальные теги (<tool_call>, DeepSeek, <function=...>, <invoke ...>)
+    for m in _XML_TOOL_BLOCK_RE.finditer(clean):
+        spans_to_strip.append(m.span())
+        inner = m.group(1).strip()
+        parsed_inner = _repair_json_candidate(inner)
+        if parsed_inner is None:
+            sub = _balanced_object(inner)
+            parsed_inner = sub
+        items = parsed_inner if isinstance(parsed_inner, list) else ([parsed_inner] if isinstance(parsed_inner, dict) else [])
+        for it in items:
+            c = _coerce_call_item(it, len(calls))
+            if c and _accept_name(c["function"]["name"]):
+                calls.append(c)
+
+    for m in _DEEPSEEK_TOOL_RE.finditer(clean):
+        spans_to_strip.append(m.span())
+        tname = m.group(1).strip()
+        targs = _repair_json_candidate(m.group(2)) or {}
+        c = _coerce_call_item({"name": tname, "arguments": targs}, len(calls))
+        if c and _accept_name(c["function"]["name"]):
+            calls.append(c)
+
+    for m in _FUNC_TAG_RE.finditer(clean):
+        spans_to_strip.append(m.span())
+        tname = (m.group(1) or m.group(3) or "").strip()
+        raw_arg = (m.group(2) if m.group(1) else m.group(4)) or "{}"
+        targs = _repair_json_candidate(raw_arg.strip()) or _balanced_object(raw_arg) or {}
+        c = _coerce_call_item({"name": tname, "arguments": targs}, len(calls))
+        if c and _accept_name(c["function"]["name"]):
+            calls.append(c)
+
+    for m in _INVOKE_TAG_RE.finditer(clean):
+        spans_to_strip.append(m.span())
+        tname = m.group(1).strip()
+        params = {}
+        for pm in _INVOKE_PARAM_RE.finditer(m.group(2)):
+            pkey = pm.group(1).strip()
+            pval = pm.group(2).strip()
+            conv = _repair_json_candidate(pval)
+            params[pkey] = conv if conv is not None and pval.startswith(("{", "[", "true", "false")) else pval
+        c = _coerce_call_item({"name": tname, "arguments": params}, len(calls))
+        if c and _accept_name(c["function"]["name"]):
+            calls.append(c)
+
+    if calls:
+        note = clean
+        for s, e in sorted(spans_to_strip, reverse=True):
+            note = note[:s] + " " + note[e:]
+        note = re.sub(r"```(?:xml|json|tool_call|tool)?\s*```", "", note).strip()
+        return {"kind": "tools", "content": note, "calls": calls}
+
+    # 2. Mistral [TOOL_CALLS] [...]
+    if "[TOOL_CALLS]" in clean:
+        pos = clean.find("[TOOL_CALLS]")
+        after = clean[pos + len("[TOOL_CALLS]"):].strip()
+        structs = _all_balanced_structures(after, limit=4, allow_arrays=True)
+        for obj, _s, _e in structs:
+            items = obj if isinstance(obj, list) else [obj]
+            for it in items:
+                c = _coerce_call_item(it, len(calls))
+                if c and _accept_name(c["function"]["name"]):
+                    calls.append(c)
+        if calls:
+            return {"kind": "tools", "content": clean[:pos].strip(), "calls": calls}
+
+    # 3. В native-режиме перехватываем неразмеченный JSON только если он явно содержит вызов известного инструмента
+    if strict_for_native:
+        fenced_tc = re.search(r"```(?:tool_call|tool|json)\s*(\{.*?\}|\[.*?\])\s*```", clean, re.S)
+        cand_text = fenced_tc.group(1) if fenced_tc else (clean if clean.lstrip().startswith("{") else "")
+        if not cand_text:
+            return {"kind": "final", "content": clean, "calls": []}
+        structs = _all_balanced_structures(cand_text, limit=4, allow_arrays=True)
+        for obj, _s, _e in structs:
+            items = obj if isinstance(obj, list) else ([obj] if isinstance(obj, dict) else [])
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                if not any(k in it for k in ("tool", "tools", "tool_calls", "function")) and not (
+                    "name" in it and ("arguments" in it or "args" in it or "parameters" in it)
+                ):
+                    continue
+                c = _coerce_call_item(it, len(calls))
+                if c and _accept_name(c["function"]["name"]):
+                    calls.append(c)
+        if calls:
+            note = clean[:fenced_tc.start()].strip() if fenced_tc else ""
+            return {"kind": "tools", "content": note, "calls": calls}
+        return {"kind": "final", "content": clean, "calls": []}
+
+    # 4. ReAct формат: Action: <tool> / Action Input: {...}
+    rm = _REACT_RE.search(clean)
+    if rm:
+        tname = rm.group(1).strip()
+        targs = _repair_json_candidate(rm.group(2)) or _balanced_object(rm.group(2)) or {}
+        c = _coerce_call_item({"name": tname, "arguments": targs}, 0)
+        if c and _accept_name(c["function"]["name"]):
+            prefix = clean[:rm.start()].strip()
+            prefix = re.sub(r"^\s*Thought\s*:\s*", "", prefix, flags=re.I).strip()
+            return {"kind": "tools", "content": prefix, "calls": [c]}
+
+    # 5. Fenced code blocks ```json / ```tool_call ИЛИ JSON-объекты/массивы прямо в тексте
+    fenced_blocks = list(re.finditer(r"```(?:json|tool_call|tool)?\s*(\{.*?\}|\[.*?\])\s*```", clean, re.S))
+    structs = []
+    if fenced_blocks:
+        for fm in fenced_blocks:
+            obj = _repair_json_candidate(fm.group(1))
+            if obj is None:
+                sub = _all_balanced_structures(fm.group(1), limit=4, allow_arrays=True)
+                for sobj, _, _ in sub:
+                    structs.append((sobj, fm.start(), fm.end()))
+            else:
+                structs.append((obj, fm.start(), fm.end()))
+    if not structs:
+        structs = _all_balanced_structures(clean, limit=6, allow_arrays=True)
+
+    if not structs:
+        return {"kind": "final", "content": clean, "calls": []}
+
+    notes = []
+    used_spans = []
+    for blob, s_pos, e_pos in structs:
+        if isinstance(blob, list):
+            for it in blob:
+                c = _coerce_call_item(it, len(calls))
+                if c and _accept_name(c["function"]["name"]):
+                    calls.append(c)
+                    used_spans.append((s_pos, e_pos))
             continue
-        args = item.get("args", item.get("arguments", {}))
-        if isinstance(args, str):
-            try:
-                args = json.loads(args)
-            except ValueError:
-                args = {"input": args}
-        calls.append({
-            "id": item.get("id") or ("json_%d_%d" % (int(time.time() * 1000), i)),
-            "type": "function",
-            "function": {"name": item["tool"], "arguments": json.dumps(args, ensure_ascii=False)},
-        })
+        if not isinstance(blob, dict):
+            continue
+        # Финальный ответ {"final": "..."}
+        if ("final" in blob or "final_answer" in blob) and not any(k in blob for k in ("tool", "tools", "calls", "tool_calls")):
+            fin_val = blob.get("final") if "final" in blob else blob.get("final_answer")
+            return {"kind": "final", "content": str(fin_val if fin_val is not None else clean), "calls": []}
+        if "content" in blob and not any(k in blob for k in ("tool", "tools", "calls", "tool_calls", "name", "function", "action")):
+            return {"kind": "final", "content": str(blob.get("content") or clean), "calls": []}
+
+        raw_calls = blob.get("tools") or blob.get("calls") or blob.get("tool_calls") or []
+        if isinstance(raw_calls, dict):
+            raw_calls = [raw_calls]
+        single = _coerce_call_item(blob, len(calls))
+        candidates = ([single] if single else []) + [
+            _coerce_call_item(it, len(calls) + idx + 1) for idx, it in enumerate(raw_calls)
+        ]
+        matched_here = False
+        for c in candidates:
+            if c and _accept_name(c["function"]["name"]):
+                calls.append(c)
+                matched_here = True
+        if matched_here:
+            used_spans.append((s_pos, e_pos))
+            if blob.get("note"):
+                notes.append(str(blob["note"]).strip())
+
     if not calls:
-        note = blob.get("note") or blob.get("answer") or clean
-        return {"kind": "final", "content": note, "calls": []}
-    return {"kind": "tools", "content": blob.get("note") or "", "calls": calls}
+        first_blob = structs[0][0]
+        if isinstance(first_blob, dict):
+            fallback = first_blob.get("note") or first_blob.get("answer") or first_blob.get("response") or clean
+            return {"kind": "final", "content": str(fallback), "calls": []}
+        return {"kind": "final", "content": clean, "calls": []}
+
+    if notes:
+        note_text = " ".join(notes)
+    else:
+        rem = clean
+        for s, e in sorted(set(used_spans), reverse=True):
+            rem = rem[:s] + " " + rem[e:]
+        note_text = rem.strip()
+    return {"kind": "tools", "content": note_text, "calls": calls}

@@ -41,6 +41,7 @@ def _obscura_status_safe(cfg):
         return {"available": False, "installed": False, "running": False, "exe": "", "cdp_url": "http://127.0.0.1:9223"}
 from .agent import Agent, Bridge
 from .config import (DATA_DIR, ROOT, LOCK as CONFIG_LOCK, load, save, _merge,
+                     config_path, data_dir,
                      as_int, normalize_context, MAX_TOKENS_MIN, MAX_TOKENS_MAX)
 
 RUNS = {}
@@ -155,9 +156,16 @@ def _lms_snapshot():
 
 
 def _lms_line(job, text):
-    for chunk in str(text).replace("\r", "\n").split("\n"):
+    import re
+    clean = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", str(text or ""))
+    for chunk in clean.replace("\r", "\n").split("\n"):
         chunk = chunk.strip()
-        if chunk:
+        if not chunk:
+            continue
+        # Схлопываем повторяющиеся кадры спиннера Loading ... % в одну живую строку
+        if job["lines"] and chunk.startswith("Loading ") and job["lines"][-1].startswith("Loading "):
+            job["lines"][-1] = chunk[:400]
+        else:
             job["lines"].append(chunk[:400])
     del job["lines"][:-80]
 
@@ -286,14 +294,32 @@ def lms_state(cfg):
     loaded, ps_err = lms_mod.loaded_models(cfg)
     hw = sizing_mod.get_hardware_profile()
     ctx_len = normalize_context(cfg.get("lms_context_length") or cfg.get("context_tokens"), 8192)
-    enriched_disk = [sizing_mod.enrich_model_item(m, context_length=ctx_len, hw=hw) for m in (disk or [])]
+    gpu_def = cfg.get("lms_gpu_offload", "max")
+    kv_def = cfg.get("lms_kv_quant", "f16")
+    enriched_disk = []
+    for m in (disk or []):
+        em = sizing_mod.enrich_model_item(m, context_length=ctx_len, hw=hw)
+        if isinstance(em, dict):
+            em["saved_preset"] = lms_mod.read_model_load_preset(m.get("path") or m.get("modelKey"), cfg)
+        enriched_disk.append(em)
     enriched_loaded = [sizing_mod.enrich_model_item(m, context_length=m.get("contextLength") or ctx_len, hw=hw)
                        for m in (loaded or [])]
+    runtimes = lms_mod.list_runtimes(cfg)
+    defaults = {
+        "context_length": ctx_len,
+        "gpu_offload": gpu_def,
+        "parallel": as_int(cfg.get("lms_parallel"), 1, 1, 16),
+        "flash_attention": bool(cfg.get("lms_flash_attention", True)),
+        "kv_quant": str(kv_def or "f16"),
+        "eval_batch_size": as_int(cfg.get("lms_eval_batch"), 512, 32, 8192),
+        "ttl": as_int(cfg.get("lms_ttl"), 0, 0, 864000),
+    }
     return {"base": base, "alive": alive, "disk": enriched_disk, "loaded": enriched_loaded,
-            "hardware": hw, "error": err or disk_err or ps_err or "", "job": _lms_snapshot()}
+            "hardware": hw, "runtimes": runtimes, "defaults": defaults,
+            "error": err or disk_err or ps_err or "", "job": _lms_snapshot()}
 
 
-def start_lms_job(kind, args, timeout=3600):
+def start_lms_job(kind, args, timeout=3600, after_ok=None):
     cli = lms_cli(load())
     if not cli:
         return {"ok": False, "error": "lms.exe не найден (config providers.lmstudio.lms_cli)"}
@@ -317,6 +343,11 @@ def start_lms_job(kind, args, timeout=3600):
                     _lms_line(LMS_JOB, "таймаут %s с — убил процесс" % timeout)
                     break
             rc = proc.wait(timeout=30)
+            if rc == 0 and callable(after_ok):
+                try:
+                    after_ok()
+                except Exception:
+                    pass
             with LMS_LOCK:
                 LMS_JOB["rc"] = rc
                 LMS_JOB["status"] = "done" if rc == 0 else "failed (код %s)" % rc
@@ -348,17 +379,61 @@ def provider_status(cfg):
         err = str(exc)[:300]
     chat = [m for m in api_models if m and "embedding" not in m.lower()]
     disk = []
+    loaded_list = []
     if cfg.get("provider") == "lmstudio":
         try:
             disk, _disk_err = lms_mod.disk_models(cfg, timeout=8)
         except Exception:
             disk = []
+        try:
+            loaded_list, _ps_err = lms_mod.loaded_models(cfg, timeout=6)
+        except Exception:
+            loaded_list = []
+    model_meta = {}
     for item in disk:
         key = lms_mod.model_key(item)
         if not key or item.get("type") == "embedding" or "embedding" in key.lower():
             continue
         if key not in chat:
             chat.append(key)
+        q_obj = item.get("quantization")
+        q_str = q_obj.get("name") if isinstance(q_obj, dict) else str(q_obj or "")
+        model_meta[key] = {
+            "modelKey": key,
+            "path": item.get("path") or key,
+            "displayName": item.get("displayName") or key,
+            "maxContextLength": item.get("maxContextLength") or 32768,
+            "sizeBytes": item.get("sizeBytes") or 0,
+            "paramsString": item.get("paramsString") or "",
+            "quantization": q_str,
+            "vision": bool(item.get("vision")),
+            "trainedForToolUse": bool(item.get("trainedForToolUse")),
+            "loaded": False,
+            "loadedContextLength": None,
+        }
+    for litem in (loaded_list or []):
+        for cand_key, meta in model_meta.items():
+            if any(lms_mod._match_alias(litem.get(k), cand_key)
+                   for k in ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")):
+                meta["loaded"] = True
+                meta["loadedContextLength"] = litem.get("contextLength")
+                meta["identifier"] = litem.get("identifier") or cand_key
+        lk = lms_mod.model_key(litem)
+        if lk and lk not in model_meta and "embedding" not in lk.lower():
+            model_meta[lk] = {
+                "modelKey": lk,
+                "path": litem.get("path") or lk,
+                "displayName": litem.get("displayName") or lk,
+                "maxContextLength": litem.get("maxContextLength") or litem.get("contextLength") or 32768,
+                "sizeBytes": litem.get("sizeBytes") or 0,
+                "paramsString": litem.get("paramsString") or "",
+                "quantization": "",
+                "vision": bool(litem.get("vision")),
+                "trainedForToolUse": bool(litem.get("trainedForToolUse")),
+                "loaded": True,
+                "loadedContextLength": litem.get("contextLength"),
+                "identifier": litem.get("identifier") or lk,
+            }
     current = cfg.get("model")
     if current and current not in chat and "embedding" not in current.lower():
         chat.insert(0, current)
@@ -378,7 +453,7 @@ def provider_status(cfg):
     ok = alive or bool(chat)
     return {"ok": ok, "label": client.label, "base": base, "alive": alive,
             "models": chat, "current": current, "vision_models": vision_models,
-            "error": "" if ok else err}
+            "model_meta": model_meta, "error": "" if ok else err}
 
 
 def ensure_provider(cfg, wait=45.0):
@@ -416,6 +491,51 @@ def bind_address(cfg=None):
     cfg = load() if cfg is None else cfg
     host = "0.0.0.0" if cfg.get("lan_access", False) else cfg.get("host", "127.0.0.1")
     return host, int(cfg.get("port", 7788))
+
+
+def _active_workspace(cfg):
+    """Возвращает путь активного рабочего пространства, либо '' если выбран общий режим без пространства."""
+    if not cfg.get("workspace_enabled", False):
+        return ""
+    return session_mod.normalize_ws(cfg.get("workspace") or "")
+
+
+def _collect_workspaces(cfg, sessions=None):
+    """Собирает список рабочих пространств из config.json + активного workspace + существующих сессий."""
+    active_ws = _active_workspace(cfg)
+    active_key = os.path.normcase(active_ws) if active_ws else ""
+    seen = {}
+    order = []
+
+    def _add(raw_p, raw_name=""):
+        p = session_mod.normalize_ws(raw_p)
+        if not p:
+            return
+        k = os.path.normcase(p)
+        label = str(raw_name or "").strip() or session_mod.workspace_label(p)
+        if k not in seen:
+            seen[k] = {
+                "path": p,
+                "name": label,
+                "exists": os.path.isdir(p),
+                "active": k == active_key,
+            }
+            order.append(k)
+        elif raw_name and str(raw_name).strip():
+            seen[k]["name"] = str(raw_name).strip()
+
+    for item in (cfg.get("workspaces") or []):
+        if isinstance(item, dict):
+            _add(item.get("path"), item.get("name"))
+        elif isinstance(item, str):
+            _add(item)
+    if active_ws:
+        _add(active_ws)
+    for row in (sessions if sessions is not None else session_mod.list_sessions()):
+        if isinstance(row, dict) and row.get("workspace"):
+            _add(row.get("workspace"), row.get("workspace_name") or "")
+
+    return [seen[k] for k in order]
 
 
 def make_server(cfg=None, handler=None):
@@ -512,6 +632,7 @@ class Handler(BaseHTTPRequestHandler):
             lms_loaded = [lms_mod.model_key(m) for m in (loaded_items or []) if lms_mod.model_key(m)]
             lan_ip = get_lan_ip()
             port = int(cfg.get("port", 7788))
+            sess_rows = session_mod.list_sessions()
             _json_response(self, {
                 "version": LOCALHARNESS,
                 "uptime": int(time.time() - STARTED),
@@ -525,8 +646,16 @@ class Handler(BaseHTTPRequestHandler):
                 "goal_rounds": cfg.get("goal_rounds"),
                 "context_tokens": cfg.get("context_tokens"),
                 "lms_context_length": cfg.get("lms_context_length"),
+                "lms_gpu_offload": cfg.get("lms_gpu_offload", "max"),
+                "lms_parallel": cfg.get("lms_parallel", 1),
+                "lms_flash_attention": cfg.get("lms_flash_attention", True),
+                "lms_kv_quant": cfg.get("lms_kv_quant", "f16"),
+                "lms_eval_batch": cfg.get("lms_eval_batch", 512),
                 "lms_ttl": cfg.get("lms_ttl"),
-                "workspace": cfg.get("workspace"),
+                "lms_runtimes": lms_mod.list_runtimes(cfg) if cfg.get("provider") == "lmstudio" else None,
+                "workspace": _active_workspace(cfg),
+                "workspace_enabled": bool(cfg.get("workspace_enabled", False)),
+                "workspaces": _collect_workspaces(cfg, sess_rows),
                 "system_prompt": cfg.get("system_prompt", ""),
                 "search_searxng": cfg.get("search_searxng", False),
                 "search_searxng_url": cfg.get("search_searxng_url", "http://127.0.0.1:8080"),
@@ -543,7 +672,7 @@ class Handler(BaseHTTPRequestHandler):
                 "lan_url": "http://%s:%d" % (lan_ip, port),
                 "game_failsafe": cfg.get("game_failsafe", True),
                 "virustotal_enabled": bool(cfg.get("virustotal_api_key")),
-                "sessions": session_mod.list_sessions(),
+                "sessions": sess_rows,
                 "tools": tools_list,
                 "plugins": pl,
                 "provider_status": ps,
@@ -755,7 +884,19 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path == "/api/new":
-            _json_response(self, {"session": session_mod.create("")})
+            cfg = load()
+            ws = session_mod.normalize_ws(query.get("workspace", [_active_workspace(cfg)])[0])
+            sid = session_mod.create("", workspace=ws)
+            _json_response(self, {"session": sid, "workspace": ws})
+            return
+
+        if path == "/api/workspaces":
+            cfg = load()
+            _json_response(self, {
+                "ok": True,
+                "active": _active_workspace(cfg),
+                "workspaces": _collect_workspaces(cfg),
+            })
             return
 
         if path == "/api/plugins":
@@ -834,6 +975,10 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, lms_state(load()))
             return
 
+        if path == "/api/lms/runtimes":
+            _json_response(self, lms_mod.list_runtimes(load()))
+            return
+
         if path == "/api/lms/job":
             _json_response(self, _lms_snapshot())
             return
@@ -907,6 +1052,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/style.css":
             self.serve_file("webui/style.css", "text/css")
             return
+        if path == "/favicon.ico":
+            svg = (
+                b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">'
+                b'<rect width="32" height="32" rx="8" fill="#38bdf8"/>'
+                b'<text x="16" y="21" text-anchor="middle" font-family="sans-serif" font-size="14" font-weight="800" fill="#0b0d12">LH</text>'
+                b'</svg>'
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "image/svg+xml")
+            self.send_header("Content-Length", str(len(svg)))
+            self.send_header("Cache-Control", "public, max-age=86400")
+            self.end_headers()
+            self.wfile.write(svg)
+            return
 
         self.send_response(404)
         self.end_headers()
@@ -943,6 +1102,10 @@ class Handler(BaseHTTPRequestHandler):
             "/api/stop": self.handle_stop,
             "/api/session/delete": self.handle_session_delete,
             "/api/session/rename": self.handle_session_rename,
+            "/api/session/workspace": self.handle_session_workspace,
+            "/api/workspace/select": self.handle_workspace_select,
+            "/api/workspace/remove": self.handle_workspace_remove,
+            "/api/workspace/browse": self.handle_workspace_browse,
             "/api/desktop/autostart": self.handle_autostart,
             "/api/config": self.handle_config,
             "/api/plugins/toggle": self.handle_plugin_toggle,
@@ -964,6 +1127,8 @@ class Handler(BaseHTTPRequestHandler):
             "/api/lms/download": self.handle_lms_download,
             "/api/lms/import": self.handle_lms_import,
             "/api/lms/estimate": self.handle_lms_estimate,
+            "/api/lms/runtime/select": self.handle_lms_runtime_select,
+            "/api/lms/runtime/install": self.handle_lms_runtime_install,
             "/api/remote/start": self.handle_remote_start,
             "/api/remote/stop": self.handle_remote_stop,
             "/api/remote/rotate": self.handle_remote_rotate,
@@ -1033,7 +1198,10 @@ class Handler(BaseHTTPRequestHandler):
             "/api/files/delete": self.handle_files_delete,
         }
         if path == "/api/new":
-            _json_response(self, {"session": session_mod.create(str(body.get("title") or ""))})
+            cfg = load()
+            ws = session_mod.normalize_ws(body.get("workspace")) if "workspace" in body else _active_workspace(cfg)
+            sid = session_mod.create(str(body.get("title") or ""), workspace=ws)
+            _json_response(self, {"session": sid, "workspace": ws})
             return
         if path == "/api/memory/add":
             _json_response(self, mem_mod.add_fact(body.get("text")))
@@ -1100,25 +1268,39 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(fh.read())
 
     def handle_chat(self, body):
-        sid = body.get("session") or session_mod.create("")
+        cfg = load()
+        req_ws = session_mod.normalize_ws(body.get("workspace")) if "workspace" in body else None
+        sid = body.get("session") or session_mod.create("", workspace=req_ws if req_ws is not None else _active_workspace(cfg))
         text = str(body.get("text") or "")
         image = body.get("image")
         images = [i for i in (body.get("images") or []) if i]
         if not text.strip() and not image and not images:
             _json_response(self, {"ok": False, "error": "пустой запрос"}, 400)
             return
-        cfg = load()
         history = []
+        sess_ws = _active_workspace(cfg)
         if body.get("session"):
             data = session_mod.load(sid)
             if data is None:
                 _json_response(self, {"ok": False, "error": "no such session"}, 404)
                 return
             history = data.get("messages") or []
+            meta = data.get("meta") or {}
+            if req_ws is not None:
+                sess_ws = req_ws
+                session_mod.set_workspace(sid, sess_ws)
+            elif "workspace" in meta:
+                sess_ws = session_mod.normalize_ws(meta.get("workspace") or "")
+            elif not history and sess_ws:
+                session_mod.set_workspace(sid, sess_ws)
+        elif req_ws is not None:
+            sess_ws = req_ws
+
+        run_cfg = dict(cfg, workspace=sess_ws, workspace_enabled=bool(sess_ws))
         run = Run(sid)
         bridge = SseBridge(run)
         run.bridge = bridge
-        agent = Agent(cfg, bridge, sid)
+        agent = Agent(run_cfg, bridge, sid)
         is_goal = body.get("mode") == "goal"
         criteria = str(body.get("criteria") or "")
         goal_objective = text
@@ -1209,6 +1391,167 @@ class Handler(BaseHTTPRequestHandler):
             _json_response(self, {"ok": False, "error": "no such session"}, 404)
             return
         _json_response(self, {"ok": True, "title": title.strip()})
+
+    def handle_session_workspace(self, body):
+        sid = str(body.get("session") or "").strip()
+        raw_ws = str(body.get("workspace") or "").strip()
+        ws = session_mod.normalize_ws(raw_ws)
+        if ws and not os.path.isdir(ws):
+            _json_response(self, {"ok": False, "error": "Папка не найдена: %s" % ws}, 400)
+            return
+        if not session_mod.set_workspace(sid, ws):
+            _json_response(self, {"ok": False, "error": "no such session"}, 404)
+            return
+        if ws:
+            with CONFIG_LOCK:
+                cfg = load()
+                items = [w for w in (cfg.get("workspaces") or []) if isinstance(w, dict) and w.get("path")]
+                if not any(os.path.normcase(session_mod.normalize_ws(w["path"])) == os.path.normcase(ws) for w in items):
+                    items.append({"path": ws, "name": session_mod.workspace_label(ws)})
+                    cfg["workspaces"] = items
+                    save(cfg)
+        _json_response(self, {"ok": True, "session": sid, "workspace": ws, "workspace_name": session_mod.workspace_label(ws)})
+
+    def handle_workspace_select(self, body):
+        raw_path = str(body.get("path") or "").strip()
+        custom_name = str(body.get("name") or "").strip()[:80]
+        create_dir = bool(body.get("create_dir", False))
+        sid = str(body.get("session") or "").strip()
+
+        if not raw_path:
+            # Выбор «Без рабочего пространства» (по желанию)
+            with CONFIG_LOCK:
+                cfg = load()
+                cfg["workspace_enabled"] = False
+                save(cfg)
+            if sid:
+                sdata = session_mod.load(sid)
+                if sdata and not (sdata.get("messages") or []):
+                    session_mod.set_workspace(sid, "")
+            _json_response(self, {"ok": True, "workspace": "", "workspace_name": "", "workspaces": _collect_workspaces(load())})
+            return
+
+        ws = session_mod.normalize_ws(raw_path)
+        protected = [os.path.realpath(config_path()), os.path.realpath(data_dir())]
+        real_ws = os.path.realpath(ws)
+        for p_item in protected:
+            try:
+                if os.path.commonpath([os.path.normcase(real_ws), os.path.normcase(p_item)]) == os.path.normcase(p_item):
+                    _json_response(self, {"ok": False, "error": "Нельзя выбирать служебную папку data / config.json как рабочее пространство"}, 400)
+                    return
+            except ValueError:
+                pass
+
+        if not os.path.isdir(ws):
+            if create_dir:
+                try:
+                    os.makedirs(ws, exist_ok=True)
+                except OSError as exc:
+                    _json_response(self, {"ok": False, "error": "Не удалось создать папку: %s" % exc}, 400)
+                    return
+            else:
+                _json_response(self, {"ok": False, "error": "Папка не существует: %s (включите «Создать папку» или выберите существующую)" % ws}, 400)
+                return
+
+        label = custom_name or session_mod.workspace_label(ws)
+        with CONFIG_LOCK:
+            cfg = load()
+            old_ws = _active_workspace(cfg)
+            items = []
+            found = False
+            for w in (cfg.get("workspaces") or []):
+                p = session_mod.normalize_ws(w.get("path") if isinstance(w, dict) else w)
+                if not p:
+                    continue
+                wname = (w.get("name") if isinstance(w, dict) else "") or session_mod.workspace_label(p)
+                if os.path.normcase(p) == os.path.normcase(ws):
+                    items.append({"path": ws, "name": custom_name or wname})
+                    found = True
+                else:
+                    items.append({"path": p, "name": wname})
+            if not found:
+                items.insert(0, {"path": ws, "name": label})
+            cfg["workspaces"] = items
+            cfg["workspace"] = ws
+            cfg["workspace_enabled"] = True
+            # Если корень вкладки «Файлы» совпадал со старым workspace или был пуст — синхронизируем
+            mf = cfg.get("mobile_files") if isinstance(cfg.get("mobile_files"), dict) else {}
+            mf_root = session_mod.normalize_ws(mf.get("root") or "")
+            if not mf_root or (old_ws and os.path.normcase(mf_root) == os.path.normcase(old_ws)):
+                mf = dict(mf, root="")
+                cfg["mobile_files"] = mf
+            save(cfg)
+
+        if sid:
+            sdata = session_mod.load(sid)
+            if sdata and not (sdata.get("messages") or []):
+                session_mod.set_workspace(sid, ws)
+
+        fresh = load()
+        _json_response(self, {
+            "ok": True,
+            "workspace": ws,
+            "workspace_name": label,
+            "workspaces": _collect_workspaces(fresh),
+        })
+
+    def handle_workspace_remove(self, body):
+        ws = session_mod.normalize_ws(body.get("path") or "")
+        detach = bool(body.get("detach_sessions", True))
+        if not ws:
+            _json_response(self, {"ok": False, "error": "не указан путь"}, 400)
+            return
+        with CONFIG_LOCK:
+            cfg = load()
+            kept = []
+            for w in (cfg.get("workspaces") or []):
+                p = session_mod.normalize_ws(w.get("path") if isinstance(w, dict) else w)
+                if p and os.path.normcase(p) != os.path.normcase(ws):
+                    kept.append(w if isinstance(w, dict) else {"path": p, "name": session_mod.workspace_label(p)})
+            cfg["workspaces"] = kept
+            if os.path.normcase(_active_workspace(cfg)) == os.path.normcase(ws):
+                cfg["workspace_enabled"] = False
+            save(cfg)
+        if detach:
+            for row in session_mod.list_sessions():
+                if row.get("workspace") and os.path.normcase(row["workspace"]) == os.path.normcase(ws):
+                    session_mod.set_workspace(row["id"], "")
+        fresh = load()
+        _json_response(self, {"ok": True, "workspace": _active_workspace(fresh), "workspaces": _collect_workspaces(fresh)})
+
+    def handle_workspace_browse(self, body):
+        if not files_mod.is_local(self.client_address[0]):
+            _json_response(self, {"ok": False, "error": "Диалог выбора папки доступен только локально на ПК"}, 403)
+            return
+        if os.name != "nt":
+            _json_response(self, {"ok": False, "error": "Диалог Проводника поддерживается на Windows; введите путь вручную"}, 400)
+            return
+        ps_script = (
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+            "Add-Type -AssemblyName System.Windows.Forms; "
+            "$f = New-Object System.Windows.Forms.Form; $f.TopMost = $true; $f.ShowInTaskbar = $false; "
+            "$f.Width = 1; $f.Height = 1; $f.Opacity = 0; $f.StartPosition = 'CenterScreen'; $f.Show(); $f.Activate(); "
+            "$d = New-Object System.Windows.Forms.FolderBrowserDialog; "
+            "$d.Description = 'Выберите папку рабочего пространства проекта (или нажмите Отмена)'; "
+            "$d.ShowNewFolderButton = $true; "
+            "if ($d.ShowDialog($f) -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $d.SelectedPath }; "
+            "$f.Close()"
+        )
+        try:
+            proc = subprocess.run(
+                ["powershell", "-NoProfile", "-Sta", "-ExecutionPolicy", "Bypass", "-Command", ps_script],
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=120,
+                creationflags=0x08000000,
+            )
+            chosen = (proc.stdout or b"").decode("utf-8", "replace").strip()
+            if not chosen:
+                _json_response(self, {"ok": True, "cancelled": True, "path": ""})
+                return
+            _json_response(self, {"ok": True, "cancelled": False, "path": session_mod.normalize_ws(chosen)})
+        except Exception as exc:
+            _json_response(self, {"ok": False, "error": "Не удалось открыть окно выбора папки: %s" % exc}, 500)
 
     def serve_remote_claim(self, token):
         info = remote.verify_token(token)
@@ -1353,29 +1696,140 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_lms_load(self, body):
         cfg = load()
-        model = body.get("model")
+        model = str(body.get("model") or "").strip()
         if not model:
             _json_response(self, {"ok": False, "error": "не указана модель"}, 400)
             return
+
+        warnings = []
+        # Опциональное переключение runtime-движка (например Vulkan) — только если выбран другой движок
+        req_runtime = str(body.get("runtime") or "").strip()
+        if req_runtime:
+            cur_rts = lms_mod.list_runtimes(cfg)
+            cur_active = str(cur_rts.get("active_name") or "").strip()
+            target_rt = lms_mod.default_vulkan_runtime_name() if req_runtime.lower() == "vulkan" else req_runtime
+            if target_rt != cur_active:
+                rt_res = lms_mod.select_runtime(req_runtime, body.get("runtime_version"), cfg)
+                if not rt_res.get("ok"):
+                    _json_response(self, rt_res, 400)
+                    return
+
+        # Находим метаданные модели на диске, чтобы не превысить реальный maxContextLength
+        disk, _ = lms_mod.disk_models(cfg)
+        target_disk = None
+        for item in (disk or []):
+            if any(lms_mod._match_alias(item.get(k), model)
+                   for k in ("modelKey", "path", "identifier", "indexedModelIdentifier", "displayName")):
+                target_disk = item
+                break
+
         context_length = normalize_context(
             body.get("context_length"), cfg.get("lms_context_length") or cfg.get("context_tokens") or 8192)
-        ttl = body.get("ttl", cfg.get("lms_ttl", 0))
-        args = ["load", model, "--context-length", str(context_length), "-y"]
-        try:
-            if int(ttl) >= 1:
-                args += ["--ttl", str(int(ttl))]
-        except (TypeError, ValueError):
-            pass
+        max_ctx = lms_mod._positive_int((target_disk or {}).get("maxContextLength"))
+        if max_ctx and context_length > max_ctx:
+            warnings.append("Окно контекста ограничено максимумом модели (%d → %d токенов)." % (context_length, max_ctx))
+            context_length = max(512, max_ctx)
+
+        raw_gpu = body.get("gpu") if "gpu" in body else body.get("gpu_offload", cfg.get("lms_gpu_offload", "max"))
+        cli_gpu, _ = lms_mod.normalize_gpu_offload(raw_gpu)
+        parallel = as_int(body.get("parallel", cfg.get("lms_parallel", 1)), 1, 1, 16)
+        ttl = as_int(body.get("ttl", cfg.get("lms_ttl", 0)), 0, 0, 864000)
+        flash_attn = bool(body.get("flash_attention", cfg.get("lms_flash_attention", True)))
+        kv_quant = str(body.get("kv_quant", cfg.get("lms_kv_quant", "f16")) or "f16").strip().lower()
+        if kv_quant not in ("f16", "q8_0", "q4_0"):
+            kv_quant = "f16"
+        eval_batch = as_int(body.get("eval_batch_size", cfg.get("lms_eval_batch", 512)), 512, 32, 8192)
+
+        # 1. Сохраняем индивидуальный пресет модели в LM Studio (Flash Attention, KV Quant, Offload, Context)
+        preset_key = (target_disk or {}).get("path") or model
+        lms_mod.apply_model_load_preset(
+            preset_key,
+            context_length=context_length,
+            gpu_offload=cli_gpu,
+            flash_attention=flash_attn,
+            kv_quant=kv_quant,
+            eval_batch_size=eval_batch,
+            parallel=parallel,
+            cfg=cfg,
+        )
+
+        # 2. Синхронизируем выбранную модель и окно контекста с конфигом LocalHarness
+        select_for_chat = body.get("select_for_chat", True) is not False
+        resolved_model_key = (target_disk or {}).get("modelKey") or model
+        with CONFIG_LOCK:
+            cur_cfg = load()
+            cur_cfg["lms_context_length"] = context_length
+            cur_cfg["lms_gpu_offload"] = cli_gpu
+            cur_cfg["lms_parallel"] = parallel
+            cur_cfg["lms_flash_attention"] = flash_attn
+            cur_cfg["lms_kv_quant"] = kv_quant
+            cur_cfg["lms_eval_batch"] = eval_batch
+            cur_cfg["lms_ttl"] = ttl
+            if req_runtime:
+                cur_cfg["lms_runtime"] = req_runtime
+            if select_for_chat and (target_disk or {}).get("type") != "embedding":
+                cur_cfg["provider"] = "lmstudio"
+                cur_cfg["model"] = resolved_model_key
+                cur_cfg["context_tokens"] = context_length
+            save(cur_cfg)
+            cfg = cur_cfg
+
+        # 3. Если эта же модель уже висит в памяти — выгружаем старый инстанс перед перезагрузкой с новым контекстом
         loaded, _ = lms_mod.loaded_models(cfg, force=True)
-        for m in loaded:
-            if any(lms_mod._match_alias(m.get(k), model) for k in ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")):
+        for m in (loaded or []):
+            if any(lms_mod._match_alias(m.get(k), model) or lms_mod._match_alias(m.get(k), resolved_model_key)
+                   for k in ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")):
                 lms_mod.run_cli(["unload", str(m.get("identifier") or model)], cfg, timeout=30)
                 lms_mod.invalidate()
                 break
-        result = start_lms_job("load", args)
+
+        args = lms_mod.build_load_cli_args(
+            resolved_model_key,
+            context_length=context_length,
+            gpu=cli_gpu,
+            parallel=parallel,
+            ttl=ttl,
+            identifier=body.get("identifier", ""),
+        )
+        need_server = False
+        if body.get("ensure_server", True) is not False:
+            try:
+                need_server = not llm_mod.LLM(cfg).alive()
+            except Exception:
+                need_server = False
+        if need_server:
+            result = start_lms_job("load", args, after_ok=lambda: lms_mod.server_start(cfg, 25))
+        else:
+            result = start_lms_job("load", args)
         if result.get("ok"):
             dashboard_mod.record_model_load()
+            result["model"] = resolved_model_key
+            result["context_length"] = context_length
+            result["gpu"] = cli_gpu
+            result["kv_quant"] = kv_quant
+            result["flash_attention"] = flash_attn
+            if warnings:
+                result["warnings"] = warnings
         _json_response(self, result)
+
+    def handle_lms_runtime_select(self, body):
+        cfg = load()
+        name = str(body.get("name") or "").strip()
+        version = str(body.get("version") or "").strip() or None
+        res = lms_mod.select_runtime(name, version=version, cfg=cfg)
+        if res.get("ok"):
+            with CONFIG_LOCK:
+                cur_cfg = load()
+                cur_cfg["lms_runtime"] = res.get("active_name") or name
+                save(cur_cfg)
+        _json_response(self, res, 200 if res.get("ok") else 400)
+
+    def handle_lms_runtime_install(self, body):
+        query = str(body.get("query") or "").strip()
+        args = lms_mod.install_or_update_runtime_args(query)
+        res = start_lms_job("runtime", args, timeout=3600)
+        res["query"] = args[2]
+        _json_response(self, res, 200 if res.get("ok") else 409)
 
     def handle_lms_unload(self, body):
         cfg = load()
@@ -1419,11 +1873,14 @@ class Handler(BaseHTTPRequestHandler):
         cfg = load()
         model_name = body.get("model")
         ctx = normalize_context(body.get("context_length"), cfg.get("lms_context_length") or 8192)
+        gpu_val = body.get("gpu") if "gpu" in body else body.get("gpu_offload", cfg.get("lms_gpu_offload", "max"))
+        kv_quant = str(body.get("kv_quant", cfg.get("lms_kv_quant", "f16")) or "f16")
         disk, _ = lms_mod.disk_models(cfg)
         loaded, _ = lms_mod.loaded_models(cfg)
         target = None
         for item in (loaded or []) + (disk or []):
-            if model_name in (item.get("modelKey"), item.get("path"), item.get("identifier"), item.get("displayName")):
+            if any(lms_mod._match_alias(item.get(k), model_name)
+                   for k in ("modelKey", "path", "identifier", "displayName", "indexedModelIdentifier")):
                 target = item
                 break
         if not target and isinstance(body.get("model_data"), dict):
@@ -1432,7 +1889,23 @@ class Handler(BaseHTTPRequestHandler):
             target = {"modelKey": model_name or "unknown", "paramsString": body.get("params", "8B"),
                       "sizeBytes": body.get("size_bytes", 0)}
         hw = sizing_mod.get_hardware_profile()
-        estimate = sizing_mod.estimate_model_fit(target, context_length=ctx, hw=hw)
+        estimate = sizing_mod.estimate_model_fit(
+            target, context_length=ctx, hw=hw, gpu_offload=gpu_val, kv_quant=kv_quant
+        )
+        if body.get("precise") and model_name:
+            cli_est, cli_err = lms_mod.estimate_load_cli(
+                (target or {}).get("modelKey") or model_name,
+                context_length=ctx,
+                gpu=gpu_val,
+                cfg=cfg,
+                timeout=12,
+            )
+            if cli_est:
+                estimate["cli_estimate"] = cli_est
+                estimate["est_gpu_gb"] = cli_est.get("gpu_memory_gb", estimate.get("est_gpu_gb"))
+                estimate["total_req_gb"] = cli_est.get("total_memory_gb", estimate.get("total_req_gb"))
+            elif cli_err:
+                estimate["cli_estimate_error"] = cli_err
         _json_response(self, {"ok": True, "model": model_name, "estimate": estimate})
 
     def handle_thermal_status(self, body):

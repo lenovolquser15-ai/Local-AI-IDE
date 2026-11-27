@@ -120,10 +120,30 @@ def native_tools(profile="core", cfg=None):
         out.append({"type":"function","function":{"name":s["name"],"description":s["desc"],"parameters":params}})
     return out
 
-def text_protocol_doc(profile="core", cfg=None):
-    return "\n".join("- %s(%s) — %s"%(s["name"],", ".join(s["params"]),s["desc"]) for s in entries(profile, cfg))
+def _fmt_param_sig(spec):
+    req = set(spec.get("required") or [])
+    parts = []
+    for k, v in (spec.get("params") or {}).items():
+        kind = str(v[0] or "string").rstrip("?")
+        mark = "*" if k in req else "?"
+        parts.append("%s%s:%s" % (k, mark, kind))
+    return ", ".join(parts)
 
-PROTOCOL_INSTRUCTION='''Работай через инструменты. Отвечай одним JSON-объектом без markdown: {"tool":"shell","args":{"cmd":"Get-ChildItem"},"note":"что делаю"}. Когда задача готова: {"final":"итог"}. Не выдумывай результат.'''
+def text_protocol_doc(profile="core", cfg=None):
+    return "\n".join("- %s(%s) — %s" % (s["name"], _fmt_param_sig(s), s["desc"]) for s in entries(profile, cfg))
+
+PROTOCOL_INSTRUCTION = '''РЕЖИМ ИНСТРУМЕНТОВ БЕЗ NATIVE TOOL_USE (ТЕКСТОВЫЙ ПРОТОКОЛ):
+У этой модели выключен или недоступен API tool_calls, поэтому вызывай инструменты прямо в тексте ответа.
+Правила:
+1. Чтобы вызвать один инструмент, выведи JSON-объект (можно внутри <tool_call>...</tool_call> или чисто JSON):
+   {"tool":"shell","args":{"cmd":"Get-ChildItem"},"note":"проверяю файлы"}
+2. Чтобы вызвать сразу несколько инструментов за один шаг:
+   {"tools":[{"tool":"read_file","args":{"path":"app.py"}},{"tool":"grep","args":{"pattern":"def main"}}],"note":"читаю код"}
+3. Параметры со звёздочкой (name*) обязательны. Строго экранируй кавычки и переносы строк (\\n) внутри JSON.
+4. НЕ выдумывай вывод команд — останови генерацию сразу после JSON вызова и дождись реального ответа системы вида `[имя_инструмента] -> {...}`.
+5. Когда задача полностью решена и проверена, ответь:
+   {"final":"Твой подробный итоговый ответ пользователю на русском языке"}
+   (или напиши чистый итоговый ответ без тегов <tool_call> и без поля "tool").'''
 GOAL_INSTRUCTION='''РЕЖИМ ЦЕЛИ:
 - Цель не закончена, пока не вызван finish_goal.
 - ЦЕЛЬ разбита на чеклист пунктов (он в сообщении). Проверяй КАЖДЫЙ пункт реальным инструментом (вывод команды, содержимое файла, скриншот), а не по памяти.
@@ -141,7 +161,8 @@ GOAL_INSTRUCTION='''РЕЖИМ ЦЕЛИ:
 def build_system_prompt(cfg, profile="core", vision=False, tools_doc=True):
     import os
     from .config import ROOT
-    env={"os":"Windows","home":os.path.expanduser("~"),"workspace":cfg.get("workspace"),"harness":ROOT}
+    ws_val = str(cfg.get("workspace") or "").strip()
+    env={"os":"Windows","home":os.path.expanduser("~"),"workspace":ws_val or "(не выбрано — общий режим без привязки к папке проекта)","harness":ROOT}
     profiles = cfg.get("ssh_profiles") or {}
     if profiles:
         env["vps_profiles"] = "; ".join("%s: %s@%s:%s" % (k, v.get("user") or "root", v.get("host"), v.get("port") or 22)

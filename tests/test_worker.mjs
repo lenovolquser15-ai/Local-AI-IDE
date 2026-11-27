@@ -7,11 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-const secret = process.argv[2];
-if (!secret) {
-  console.error("secret argument is required");
-  process.exit(2);
-}
+const secret = process.argv[2] || "lh-default-test-secret";
 const epochBase = Number(process.argv[3] || 1);
 
 const tmp = mkdtempSync(join(tmpdir(), "lh-worker-"));

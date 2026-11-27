@@ -14,13 +14,19 @@
 
 ## Скриншоты (v1.0.8)
 
-![Чат: сессии, персоны агента, датчик GPU, голосовой созвон и шкала контекста](docs/screenshots/ui-chat.png)
+![Чат: рабочие пространства и группировка чатов, персоны агента, датчик GPU, голосовой созвон и шкала контекста](docs/screenshots/ui-chat.png)
+
+![LM Studio + Vulkan: переключение движков Vulkan / CUDA / ROCm / CPU, статус RTX 50xx и управление моделями](docs/screenshots/ui-lmstudio.png)
+
+![Окно загрузки модели как в LM Studio: ползунок контекста до 262K, GPU Offload, KV-квантование FP16/Q8_0/Q4_0, Flash Attention и точный расчёт VRAM](docs/screenshots/ui-lms-loader.png)
+
+![Рабочие пространства по желанию: выбор папки проекта через Проводник, свободный режим без папки и подразделение чатов](docs/screenshots/ui-workspaces.png)
 
 ![Встроенный IDE Редактор файлов: дерево рабочей папки, поиск, Ctrl+S, отправка в чат/RAG и мобильный код сопряжения /files.html](docs/screenshots/ui-files.png)
 
-![LoRA & Unsloth Studio 3.0: дообучение Unsloth 4-bit QLoRA + Universal PEFT (CUDA/ROCm/CPU), инспектор слоёв, HF Hub и GGUF-квантизатор](docs/screenshots/ui-train.png)
+![LoRA & Unsloth Studio 3.2: дообучение Unsloth 4-bit QLoRA + Universal PEFT (CUDA/ROCm/CPU), чистка датасетов, HF Hub, llama-bench и GGUF-квантизатор](docs/screenshots/ui-train.png)
 
-![Голосовой созвон 2.0: студийный Edge Neural 24 кГц / XTTS v2, потоковая речь по предложениям и вызов любых инструментов](docs/screenshots/ui-voice-call.png)
+![Голосовой созвон 2.0: студийный Edge Neural 24 кГц / XTTS v2, потоковая речь по предложениям, Live STT и вызов любых инструментов](docs/screenshots/ui-voice-call.png)
 
 ![Дашборд системы 2.0: 60-минутные графики с тултипами, энергопотребление GPU, tok/s, сеть/диск, топ процессов и экспорт CSV](docs/screenshots/ui-dashboard.png)
 
@@ -33,6 +39,37 @@
 ![Планировщик и Автоматизации: расписание промптов агента и команд Shell](docs/screenshots/ui-schedule.png)
 
 ![Настройки в шторке: Голос 2.0 (запись WAV-клона с микрофона, скорость и тон), локальная база знаний RAG, MCP-серверы и термозащита GPU](docs/screenshots/ui-settings.png)
+
+## Что нового в v1.0.8
+
+- **🌋 Поддержка LM Studio Vulkan + окно загрузки модели как в LM Studio**: выбор движка (`Vulkan llama.cpp`, `CUDA`, `ROCm`, `CPU`) в 1 клик, скачивание/обновление Vulkan, тонкая загрузка моделей с ползунком контекста до `262 144` токенов, `GPU Offload (0–100%)`, `Flash Attention`, квантованием `KV-кэша (FP16 / Q8_0 / Q4_0)`, `--parallel`, TTL и точным замером памяти через `lms load --estimate-only`.
+- **📁 Рабочие пространства по желанию и группировка чатов**: можно работать с папками проектов (выбор через нативный Проводник Windows или вручную) или в свободном режиме **«🌐 Без пространства»**; все чаты в боковой панели автоматически подразделяются на сворачиваемые разделы по пространствам с изолированным выполнением инструментов.
+- **📄 Итоговая плашка `Review` после выполнения цели и правок + карточки действий в «Глубоких раздумьях»**: после завершения цели или редактирования файлов появляется сводка `N files changed +X -Y › [Review]` с просмотром цветного unified diff и чеклиста цели; внутри «Глубоких раздумий» шаги отображаются компактными строками (`Edit · файл 2KB +16 -2`, `Pwsh · ...` с терминальным выводом `$ `).
+- **🛠️ Идеальная работа инструментов без native `tool_use`**: универсальный парсер для любых локальных GGUF/abliterated/distill-моделей (JSON, `<tool_call>`, Qwen/Hermes, DeepSeek, Mistral `[TOOL_CALLS]`, Llama `<function=...>`, XML `<invoke>`, ReAct), автопочинка кривого JSON, умные алиасы инструментов/параметров и перехват текстовых вызовов даже в `native`-режиме.
+- **IDE Редактор файлов (`/files`), Unsloth & LoRA Studio 3.2, Голосовой созвон 2.0, Дашборд 2.0, Wi-Fi Кластер 2.0 + RPC и Плагины 2.0** — полный набор локальной AI-студии в одном приложении.
+
+<details>
+<summary>Архив: скриншоты версии 1.0.8-beta.1</summary>
+
+![Чат 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-chat.png)
+
+![IDE Файлы 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-files.png)
+
+![Обучение 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-train.png)
+
+![Голосовой созвон 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-voice-call.png)
+
+![Дашборд 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-dashboard.png)
+
+![Кластер 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-cluster.png)
+
+![Плагины 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-plugins.png)
+
+![Светлая тема 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-light.png)
+
+![Настройки 1.0.8-beta.1](docs/screenshots/v1.0.8-beta.1/ui-settings.png)
+
+</details>
 
 <details>
 <summary>Архив: скриншоты версии 1.0.5</summary>
