@@ -3521,6 +3521,79 @@ $('#plugInstallUrl').onclick = async () => {
   } catch (err) { alert(err.message); }
   $('#plugInstallUrl').disabled = false;
 };
+let _lmsReloadPollTimer = null;
+function watchLmsReloadProgress(info) {
+  if (!info || !info.reloading) return;
+  if (_lmsReloadPollTimer) {
+    clearInterval(_lmsReloadPollTimer);
+    _lmsReloadPollTimer = null;
+  }
+  const modelName = shortModel(info.model || (stateCache && stateCache.model) || 'модель');
+  const toCtx = Number(info.to_ctx || info.context_length || 0);
+  const fromCtx = Number(info.from_ctx || 0);
+  const startMsg = info.message
+    || ('🔄 Перезагружаю ' + modelName + (toCtx ? ' (' + (fromCtx ? fromCtx.toLocaleString('ru-RU') + ' → ' : '') + toCtx.toLocaleString('ru-RU') + ' ток.)…' : '…'));
+  pushNotice(startMsg, 'ok');
+  const box = $('#lmJobLog');
+  if (box && currentView === 'lm') {
+    box.hidden = false;
+    box.textContent = startMsg;
+  }
+  let ticks = 0;
+  _lmsReloadPollTimer = setInterval(async () => {
+    ticks += 1;
+    try {
+      const job = await api('/api/lms/job');
+      if (box && currentView === 'lm' && Array.isArray(job.lines) && job.lines.length) {
+        box.hidden = false;
+        box.textContent = job.lines.slice(-18).join('\n');
+        box.scrollTop = box.scrollHeight;
+      }
+      if (!job.running || ticks > 150) {
+        clearInterval(_lmsReloadPollTimer);
+        _lmsReloadPollTimer = null;
+        await refreshState();
+        if (currentView === 'lm') refreshLM();
+        if (job.running) {
+          pushNotice('⏳ Загрузка ' + modelName + ' всё ещё идёт в фоне…', 'warn');
+        } else if (job.status === 'done' || job.rc === 0) {
+          pushNotice('✅ Модель ' + modelName + ' готова' + (toCtx ? ' (контекст ' + toCtx.toLocaleString('ru-RU') + ' ток.)' : ''), 'ok');
+        } else {
+          const tail = Array.isArray(job.lines) && job.lines.length ? job.lines[job.lines.length - 1] : 'см. журнал LM Studio';
+          pushNotice('❌ Не удалось перезагрузить ' + modelName + ': ' + String(tail).slice(0, 140), 'bad');
+        }
+      }
+    } catch (_) {
+      if (ticks > 150) {
+        clearInterval(_lmsReloadPollTimer);
+        _lmsReloadPollTimer = null;
+      }
+    }
+  }, 1200);
+}
+
+async function applyContextChange(val, opts = {}) {
+  const res = await api('/api/config', {
+    config: { lms_context_length: val, context_tokens: val },
+    auto_reload: true,
+    reload_on_shrink: !!opts.reloadOnShrink,
+  });
+  if (Array.isArray(res.warnings)) {
+    res.warnings.forEach((w) => pushNotice(w, 'warn'));
+  }
+  await refreshState();
+  if (currentView === 'lm') refreshLM();
+  if (res.reloading_model && res.reloading_model.reloading) {
+    watchLmsReloadProgress(res.reloading_model);
+    return true;
+  }
+  if (opts.notifyIfNoReload) {
+    const applied = clampContext(res.config && (res.config.lms_context_length || res.config.context_tokens), val);
+    pushNotice('Окно контекста установлено: ' + applied.toLocaleString('ru-RU') + ' токенов', 'ok');
+  }
+  return false;
+}
+
 $('#lmContext').onchange = async (e) => {
   const prev = clampContext(stateCache && (stateCache.lms_context_length || stateCache.context_tokens), 16384);
   const next = clampContext(e.target.value, prev);
@@ -3529,8 +3602,7 @@ $('#lmContext').onchange = async (e) => {
   }
   e.target.value = next;
   if (next !== prev) {
-    await api('/api/config', { config: { lms_context_length: next, context_tokens: next } });
-    await refreshState();
+    await applyContextChange(next, { reloadOnShrink: false, notifyIfNoReload: true });
   }
 };
 if ($('#lmGpuQuick')) $('#lmGpuQuick').onchange = (e) => patchConfig('lms_gpu_offload', e.target.value);
@@ -3539,17 +3611,13 @@ document.querySelectorAll('#lmPageCtxChips .ctx-preset-pill').forEach((btn) => {
   btn.onclick = async () => {
     const val = clampContext(btn.dataset.ctx, 16384);
     if ($('#lmContext')) $('#lmContext').value = val;
-    await api('/api/config', { config: { lms_context_length: val, context_tokens: val } });
-    await refreshState();
-    if (currentView === 'lm') refreshLM();
+    await applyContextChange(val, { reloadOnShrink: true, notifyIfNoReload: true });
   };
 });
 if ($('#mmQuickCtx')) {
   $('#mmQuickCtx').onchange = async (e) => {
     const val = clampContext(e.target.value, 16384);
-    await api('/api/config', { config: { lms_context_length: val, context_tokens: val } });
-    await refreshState();
-    pushNotice('Окно контекста установлено: ' + val.toLocaleString('ru-RU') + ' токенов (перезагрузи модель кнопкой ⚡, если она уже в памяти)', 'ok');
+    await applyContextChange(val, { reloadOnShrink: true, notifyIfNoReload: true });
   };
 }
 if ($('#lmInstallVulkanBtn')) {
@@ -3574,14 +3642,18 @@ async function runVulkanGpuOneClick(btnEl, modelOverride) {
       }
       throw new Error(res.error || 'Не удалось включить Vulkan GPU');
     }
-    pushNotice(res.message || '🌋 Vulkan 100% GPU + защита CPU (≤50%) запущен!', 'ok');
     const box = $('#lmJobLog');
     if (box) {
       box.hidden = false;
       box.textContent = (res.message || 'Загрузка модели на 100% GPU через Vulkan…');
     }
+    watchLmsReloadProgress({
+      reloading: true,
+      model: res.model,
+      to_ctx: res.context_length,
+      message: res.message || '🌋 Vulkan 100% GPU + защита CPU (≤50%) запущен!',
+    });
     if (currentView === 'lm') refreshLM();
-    else setTimeout(() => refreshState(), 2500);
   } catch (err) {
     pushNotice(err.message, 'bad');
   } finally {

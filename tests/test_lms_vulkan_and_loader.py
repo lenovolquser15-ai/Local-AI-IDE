@@ -300,10 +300,98 @@ def test_http_lms_load_and_runtime_endpoints(tmp_path, monkeypatch):
         assert vk_res["gpu"] == "max"
         assert vk_res["cpu_cap_pct"] == 50
         assert 2 <= vk_res["cpu_threads"] <= 4
-        assert vk_res["context_length"] == 16384  # Safe 100% GPU context when previous ctx > 32K
+        assert vk_res["context_length"] == 65536  # Preserves <= 64K user context without silent downgrade
         assert captured_jobs and captured_jobs[0][1][:6] == [
-            "load", "huihui-qwen3-vl-2b", "--context-length", "16384", "--gpu", "max"
+            "load", "huihui-qwen3-vl-2b", "--context-length", "65536", "--gpu", "max"
         ]
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_auto_reload_model_when_context_increased(tmp_path, monkeypatch):
+    cfg_file = tmp_path / "config.json"
+    monkeypatch.setenv("LH_CONFIG", str(cfg_file))
+    monkeypatch.setattr(config_mod, "CONFIG_PATH", str(cfg_file))
+    config_mod.save({
+        **config_mod.DEFAULTS,
+        "provider": "lmstudio",
+        "model": "huihui-qwen3-vl-2b",
+        "context_tokens": 8192,
+        "lms_context_length": 8192,
+        "lms_gpu_offload": "max",
+    })
+
+    loaded_state = [{
+        "type": "llm",
+        "identifier": "huihui-qwen3-vl-2b",
+        "modelKey": "huihui-qwen3-vl-2b",
+        "contextLength": 8192,
+        "maxContextLength": 65536,
+    }]
+    monkeypatch.setattr(lms_mod, "loaded_models", lambda *a, **kw: (list(loaded_state), ""))
+    unloads = []
+    monkeypatch.setattr(lms_mod, "run_cli", lambda args, *a, **kw: (unloads.append(list(args)) or "", ""))
+    jobs = []
+
+    def fake_start_job(kind, args, timeout=3600, after_ok=None):
+        jobs.append((kind, list(args), after_ok is not None))
+        return {"ok": True, "job": {"id": "reload-1", "kind": kind, "running": False, "rc": 0, "lines": []}}
+
+    monkeypatch.setattr(server_mod, "start_lms_job", fake_start_job)
+
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), server_mod.Handler)
+    port = httpd.server_address[1]
+    t = threading.Thread(target=httpd.serve_forever, daemon=True)
+    t.start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        # 1. Increasing context 8192 -> 32768 must auto-unload & reload the loaded model!
+        req = urllib.request.Request(
+            base + "/api/config",
+            data=json.dumps({"config": {"context_tokens": 32768}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as r:
+            res = json.loads(r.read().decode("utf-8"))
+        assert res["ok"] is True
+        assert res["reloading_model"]["reloading"] is True
+        assert res["reloading_model"]["from_ctx"] == 8192
+        assert res["reloading_model"]["to_ctx"] == 32768
+        assert unloads == [["unload", "huihui-qwen3-vl-2b"]]
+        assert jobs and jobs[0][0] == "load"
+        assert jobs[0][1][:6] == ["load", "huihui-qwen3-vl-2b", "--context-length", "32768", "--gpu", "max"]
+        assert jobs[0][2] is True  # after_ok CPU cap callback attached
+
+        # 2. Shrinking context without reload_on_shrink should NOT trigger unnecessary reload
+        unloads.clear()
+        jobs.clear()
+        loaded_state[0]["contextLength"] = 32768
+        req2 = urllib.request.Request(
+            base + "/api/config",
+            data=json.dumps({"config": {"lms_context_length": 16384}}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req2, timeout=5) as r:
+            res2 = json.loads(r.read().decode("utf-8"))
+        assert res2["ok"] is True
+        assert "reloading_model" not in res2
+        assert jobs == []
+
+        # 3. Shrinking context WITH reload_on_shrink=True SHOULD reload
+        req3 = urllib.request.Request(
+            base + "/api/config",
+            data=json.dumps({"config": {"lms_context_length": 8192}, "reload_on_shrink": True}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req3, timeout=5) as r:
+            res3 = json.loads(r.read().decode("utf-8"))
+        assert res3["ok"] is True
+        assert res3["reloading_model"]["reloading"] is True
+        assert res3["reloading_model"]["to_ctx"] == 8192
     finally:
         httpd.shutdown()
         httpd.server_close()

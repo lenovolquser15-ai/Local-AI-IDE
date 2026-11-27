@@ -1605,19 +1605,116 @@ class Handler(BaseHTTPRequestHandler):
         except (OSError, RuntimeError) as exc:
             _json_response(self, {"ok": False, "error": str(exc)}, 400)
 
+    def _auto_reload_lm_for_context(self, cfg, old_ctx, new_ctx, force_on_shrink=False):
+        """Если в LM Studio сейчас загружена модель и пользователь увеличил контекст —
+        автоматически перезагружаем её с новым окном контекста (и защитой CPU <= 50%)."""
+        if str(cfg.get("provider") or "").strip().lower() != "lmstudio":
+            return None, []
+        loaded, _ = lms_mod.loaded_models(cfg, force=False)
+        chat_loaded = [
+            m for m in (loaded or [])
+            if m.get("type") != "embedding" and "embedding" not in str(m.get("modelKey") or m.get("identifier") or "").lower()
+        ]
+        if not chat_loaded:
+            return None, []
+        cur_model = str(cfg.get("model") or "").strip()
+        target = None
+        if cur_model:
+            for m in chat_loaded:
+                if any(lms_mod._match_alias(m.get(k), cur_model)
+                       for k in ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")):
+                    target = m
+                    break
+        if not target:
+            target = chat_loaded[0]
+
+        loaded_ctx = lms_mod._positive_int(target.get("contextLength")) or old_ctx or 0
+        if new_ctx <= loaded_ctx and not (force_on_shrink and new_ctx != loaded_ctx):
+            return None, []
+
+        warnings = []
+        max_ctx = lms_mod._positive_int(target.get("maxContextLength"))
+        target_ctx = new_ctx
+        if max_ctx and target_ctx > max_ctx:
+            warnings.append("Окно контекста ограничено максимумом модели (%d → %d токенов)." % (target_ctx, max_ctx))
+            target_ctx = max(512, max_ctx)
+            with CONFIG_LOCK:
+                cur_cfg = load()
+                cur_cfg["context_tokens"] = target_ctx
+                cur_cfg["lms_context_length"] = target_ctx
+                save(cur_cfg)
+                cfg = cur_cfg
+        if target_ctx == loaded_ctx:
+            return None, warnings
+
+        model_key = str(target.get("modelKey") or target.get("identifier") or cur_model).strip()
+        inst_id = str(target.get("identifier") or model_key).strip()
+        cli_gpu, _ = lms_mod.normalize_gpu_offload(cfg.get("lms_gpu_offload", "max"))
+        parallel = as_int(cfg.get("lms_parallel", 1), 1, 1, 16)
+        ttl = as_int(cfg.get("lms_ttl", 0), 0, 0, 864000)
+        cap = as_int(cfg.get("lms_cpu_cap_pct"), 50, 20, 100)
+
+        lms_mod.run_cli(["unload", inst_id], cfg, timeout=10)
+        lms_mod.invalidate()
+        args = lms_mod.build_load_cli_args(
+            model_key,
+            context_length=target_ctx,
+            gpu=cli_gpu,
+            parallel=parallel,
+            ttl=ttl,
+        )
+
+        def _after_reload():
+            if cap < 100:
+                lms_mod.enforce_cpu_cap(cap)
+            try:
+                if not llm_mod.LLM(cfg).alive():
+                    lms_mod.server_start(cfg, 20)
+            except Exception:
+                pass
+
+        job_res = start_lms_job("load", args, timeout=180, after_ok=_after_reload)
+        if not job_res.get("ok"):
+            warnings.append("Авто-перезагрузка модели не запустилась: " + str(job_res.get("error") or "занято"))
+            return {"ok": False, "reloading": False, "model": model_key, "error": job_res.get("error")}, warnings
+
+        dashboard_mod.record_model_load()
+        return {
+            "ok": True,
+            "reloading": True,
+            "model": model_key,
+            "from_ctx": loaded_ctx,
+            "to_ctx": target_ctx,
+            "gpu": cli_gpu,
+            "job": job_res.get("job"),
+            "message": "🔄 Контекст %d → %d: перезагружаю %s…" % (loaded_ctx, target_ctx, model_key),
+        }, warnings
+
     def handle_config(self, body):
         incoming = body.get("config") if isinstance(body.get("config"), dict) else {}
         warnings = []
+        ctx_changed = False
+        old_ctx = 8192
+        new_ctx = 8192
         with CONFIG_LOCK:
             old = load()
+            old_ctx = normalize_context(old.get("lms_context_length") or old.get("context_tokens"), 8192)
             cfg = _merge(old, incoming)
-            for key in ("context_tokens", "lms_context_length"):
-                if key in incoming:
-                    raw = cfg.get(key)
-                    fixed = normalize_context(raw, old.get(key) or 8192)
-                    if str(raw) != str(fixed):
-                        warnings.append("Контекст: %s → %d (допустимо 512–262144)" % (raw, fixed))
-                    cfg[key] = fixed
+            ctx_keys = [k for k in ("context_tokens", "lms_context_length") if k in incoming]
+            for key in ctx_keys:
+                raw = cfg.get(key)
+                fixed = normalize_context(raw, old.get(key) or 8192)
+                if str(raw) != str(fixed):
+                    warnings.append("Контекст: %s → %d (допустимо 512–262144)" % (raw, fixed))
+                cfg[key] = fixed
+            # Синхронизируем context_tokens и lms_context_length, если поменяли только одно поле
+            if len(ctx_keys) == 1:
+                synced = cfg[ctx_keys[0]]
+                cfg["context_tokens"] = synced
+                cfg["lms_context_length"] = synced
+            if ctx_keys:
+                new_ctx = normalize_context(cfg.get("lms_context_length") or cfg.get("context_tokens"), old_ctx)
+                ctx_changed = True
             if "max_tokens" in incoming:
                 raw = cfg.get("max_tokens")
                 fixed = as_int(raw, old.get("max_tokens") or 1500, MAX_TOKENS_MIN, MAX_TOKENS_MAX)
@@ -1629,6 +1726,15 @@ class Handler(BaseHTTPRequestHandler):
         with _PROBE["lock"]:
             _PROBE["at"] = 0.0
         payload = {"ok": True, "config": cfg}
+        if ctx_changed and body.get("auto_reload", True) is not False:
+            reload_info, reload_warns = self._auto_reload_lm_for_context(
+                cfg, old_ctx, new_ctx, force_on_shrink=bool(body.get("reload_on_shrink", False))
+            )
+            if reload_warns:
+                warnings.extend(reload_warns)
+            if reload_info:
+                payload["reloading_model"] = reload_info
+                payload["config"] = load()
         if warnings:
             payload["warnings"] = warnings
         if bind_address(old) != bind_address(cfg):
@@ -1835,10 +1941,7 @@ class Handler(BaseHTTPRequestHandler):
             if need_server:
                 lms_mod.server_start(cfg, 20)
 
-        if need_server:
-            result = start_lms_job("load", args, timeout=180, after_ok=_after_load)
-        else:
-            result = start_lms_job("load", args)
+        result = start_lms_job("load", args, timeout=180, after_ok=_after_load)
         if result.get("ok"):
             dashboard_mod.record_model_load()
             result["model"] = resolved_model_key
@@ -1888,12 +1991,12 @@ class Handler(BaseHTTPRequestHandler):
 
         model_key = (target_disk or {}).get("modelKey") or req_model
         max_ctx = lms_mod._positive_int((target_disk or {}).get("maxContextLength")) or 32768
-        # Безопасное окно для 100% GPU без сброса в CPU/ОЗУ (по умолчанию 16384 или указанное, не выше 32768 если не передано явно)
+        # Сохраняем выбранное пользователем окно (до 64K), не сбрасывая 32K/64K молча на 16K
         if body.get("context_length"):
             ctx_len = min(max_ctx, normalize_context(body.get("context_length"), 16384))
         else:
             cur_ctx = normalize_context(cfg.get("lms_context_length") or cfg.get("context_tokens"), 16384)
-            ctx_len = min(max_ctx, cur_ctx if cur_ctx <= 32768 else 16384)
+            ctx_len = min(max_ctx, cur_ctx if cur_ctx <= 65536 else 32768)
 
         cpu_cap_pct = as_int(body.get("cpu_cap_pct", cfg.get("lms_cpu_cap_pct", 50)), 50, 20, 50)
         safe_threads = as_int(body.get("cpu_threads"), lms_mod.recommended_safe_cpu_threads(cpu_cap_pct), 1, 6)
