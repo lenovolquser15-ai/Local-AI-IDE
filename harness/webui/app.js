@@ -1285,6 +1285,13 @@ function renderModelMenu(st) {
           openLmsLoadModal(currentModel);
         };
       }
+      const vkQuickBtn = $('#mmVulkanOneClickBtn');
+      if (vkQuickBtn) {
+        vkQuickBtn.onclick = () => {
+          setModelMenu(false);
+          runVulkanGpuOneClick(vkQuickBtn, currentModel);
+        };
+      }
     }
   }
 
@@ -3547,6 +3554,46 @@ if ($('#mmQuickCtx')) {
 }
 if ($('#lmInstallVulkanBtn')) {
   $('#lmInstallVulkanBtn').onclick = () => installLmsRuntime('vulkan', $('#lmInstallVulkanBtn'));
+}
+async function runVulkanGpuOneClick(btnEl, modelOverride) {
+  const prevText = btnEl ? btnEl.textContent : '';
+  if (btnEl) {
+    btnEl.disabled = true;
+    btnEl.textContent = '⏳ Включаю Vulkan GPU…';
+  }
+  try {
+    const res = await api('/api/lms/vulkan_gpu_preset', {
+      model: modelOverride || (stateCache && stateCache.model) || '',
+      cpu_cap_pct: 50,
+    });
+    if (!res.ok) {
+      if (res.need_install) {
+        pushNotice('Движок Vulkan ещё не скачан — запускаю установку…', 'warn');
+        await installLmsRuntime(res.install_query || 'vulkan', null);
+        return;
+      }
+      throw new Error(res.error || 'Не удалось включить Vulkan GPU');
+    }
+    pushNotice(res.message || '🌋 Vulkan 100% GPU + защита CPU (≤50%) запущен!', 'ok');
+    const box = $('#lmJobLog');
+    if (box) {
+      box.hidden = false;
+      box.textContent = (res.message || 'Загрузка модели на 100% GPU через Vulkan…');
+    }
+    if (currentView === 'lm') refreshLM();
+    else setTimeout(() => refreshState(), 2500);
+  } catch (err) {
+    pushNotice(err.message, 'bad');
+  } finally {
+    if (btnEl) {
+      btnEl.disabled = false;
+      btnEl.textContent = prevText;
+    }
+  }
+}
+
+if ($('#lmsVulkanOneClickBtn')) {
+  $('#lmsVulkanOneClickBtn').onclick = () => runVulkanGpuOneClick($('#lmsVulkanOneClickBtn'));
 }
 if ($('#lmsOpenLoaderTopBtn')) {
   $('#lmsOpenLoaderTopBtn').onclick = () => openLmsLoadModal(stateCache && stateCache.model);
@@ -6971,6 +7018,8 @@ if ($('#trainEvalBtn')) {
 
 /* ---------- LM Studio Native Load Modal (Context Window, GPU Offload, Vulkan, KV Quant) ---------- */
 let lmsModalEstTimer = null;
+let lmsModalPreciseTimer = null;
+let lmsModalEstSeq = 0;
 let lmsModalPollTimer = null;
 
 function _gpuPctFromVal(val) {
@@ -7093,42 +7142,65 @@ function renderModalEstimate(est, isPrecise) {
   const stats = $('#lmsLoadEstStats');
   const hw = est.hardware || (lmsStateCache && lmsStateCache.hardware) || {};
   const vramTotal = Number(hw.vram_total_gb || 0);
+  const vramFree = Number(hw.vram_free_gb || vramTotal || 0);
   const ramTotal = Number(hw.ram_total_gb || 16);
-  const estGpu = Number(est.est_gpu_gb != null ? est.est_gpu_gb : est.total_req_gb || 0);
-  const estTot = Number(est.total_req_gb || 0);
+  const hasCli = !!(isPrecise && est.cli_estimate);
+  const estGpu = Number(hasCli ? est.cli_estimate.gpu_memory_gb : (est.est_gpu_gb != null ? est.est_gpu_gb : est.total_req_gb || 0));
+  const estTot = Number(hasCli ? est.cli_estimate.total_memory_gb : (est.total_req_gb || 0));
+  const estRam = Math.max(0, estTot - estGpu);
+  const autoHybridOn = !!($('#lmsLoadAutoHybridCheck') && $('#lmsLoadAutoHybridCheck').checked);
+  const fitsHybrid = (vramTotal + ramTotal) > (estTot + 1.5);
+  const gpuOom = vramTotal > 0 && estGpu > (vramTotal - 0.15);
+  const gpuTight = !gpuOom && vramFree > 0 && estGpu > (vramFree + 0.35);
 
   if (verdict) {
-    const tag = isPrecise && est.cli_estimate ? '✓ Точный расчёт lms: ' : '⚡ Оценка: ';
-    const cliVerdict = est.cli_estimate && est.cli_estimate.verdict ? ' · ' + est.cli_estimate.verdict : '';
-    verdict.textContent = tag + (est.fit_label || '') + (est.tok_per_sec ? ' · ' + est.tok_per_sec : '') + cliVerdict;
+    if (gpuOom && autoHybridOn && fitsHybrid) {
+      verdict.textContent = `🔄 Авто-гибрид (VRAM + ОЗУ): для ${estTot.toFixed(2)} ГБ часть слоёв автоматически уйдёт в ОЗУ`;
+      verdict.style.color = 'var(--warn)';
+    } else if (gpuOom) {
+      verdict.textContent = `⚠️ Не влезет в 100% VRAM (${estGpu.toFixed(2)} > ${vramTotal.toFixed(2)} ГБ) — сдвиньте GPU Offload на 25–50% (в ОЗУ) или включите Авто-гибрид!`;
+      verdict.style.color = 'var(--fail)';
+    } else if (gpuTight) {
+      verdict.textContent = `⚠️ На пределе свободной VRAM (${estGpu.toFixed(2)} ГБ) — остаток можно выгрузить в ОЗУ`;
+      verdict.style.color = 'var(--warn)';
+    } else {
+      verdict.style.color = '';
+      const tag = hasCli ? '✓ Точный расчёт LM Studio: ' : '⚡ Оценка: ';
+      const hybLbl = estRam >= 0.3 ? `Гибрид (${estGpu.toFixed(1)} ГБ VRAM + ${estRam.toFixed(1)} ГБ ОЗУ)` : (est.fit_label || 'Помещается');
+      verdict.textContent = tag + hybLbl + (est.tok_per_sec ? ' · ' + est.tok_per_sec : '');
+    }
   }
   if (bar) {
     const denom = vramTotal > 0 && estGpu > 0 ? vramTotal : ramTotal;
     const numer = vramTotal > 0 && estGpu > 0 ? estGpu : estTot;
     const pct = Math.min(100, Math.max(4, Math.round((numer / Math.max(1, denom)) * 100)));
     bar.style.width = pct + '%';
-    bar.className = 'lms-est-bar-fill' + (est.fit === 'oom' ? ' bad' : (est.fit === 'tight' || est.fit === 'hybrid' ? ' warn' : ''));
+    bar.className = 'lms-est-bar-fill' + ((gpuOom && !autoHybridOn) || est.fit === 'oom' ? ' bad' : ((gpuOom || gpuTight || estRam >= 0.3 || est.fit === 'tight' || est.fit === 'hybrid') ? ' warn' : ''));
   }
   if (stats) {
     const vramPart = vramTotal > 0
       ? `VRAM: ${estGpu.toFixed(2)} / ${vramTotal.toFixed(2)} ГБ`
-      : `GPU не используется`;
-    stats.textContent = `${vramPart} · Общая память: ${estTot.toFixed(2)} ГБ (веса ${est.weights_gb || '—'} ГБ + KV-кэш ${est.kv_cache_gb || '—'} ГБ)`;
+      : `GPU выкл.`;
+    const ramPart = `ОЗУ (RAM): ${estRam.toFixed(2)} / ${ramTotal.toFixed(1)} ГБ`;
+    stats.textContent = `${vramPart} · ${ramPart} · Всего: ${estTot.toFixed(2)} ГБ`;
   }
 }
 
-function scheduleModalEstimate(precise) {
+function scheduleModalEstimate(preciseOnly) {
   if (lmsModalEstTimer) clearTimeout(lmsModalEstTimer);
-  lmsModalEstTimer = setTimeout(async () => {
+  if (lmsModalPreciseTimer) clearTimeout(lmsModalPreciseTimer);
+
+  const runEstimate = async (precise) => {
     const m = _selectedModalDiskModel();
     if (!m) return;
+    const seq = ++lmsModalEstSeq;
     const ctx = clampContext($('#lmsLoadCtxInput') && $('#lmsLoadCtxInput').value, 16384);
     const gpuFlag = _gpuFlagFromPct($('#lmsLoadGpuRange') && $('#lmsLoadGpuRange').value);
     const kv = ($('#lmsLoadKvSelect') && $('#lmsLoadKvSelect').value) || 'f16';
     const btn = $('#lmsLoadPreciseBtn');
     if (precise && btn) {
       btn.disabled = true;
-      btn.textContent = '⏳ Считаю…';
+      btn.textContent = '⏳ Точный расчёт…';
     }
     try {
       const res = await api('/api/lms/estimate', {
@@ -7138,16 +7210,25 @@ function scheduleModalEstimate(precise) {
         kv_quant: kv,
         precise: !!precise,
       });
-      if (res && res.estimate) renderModalEstimate(res.estimate, !!precise);
+      if (seq === lmsModalEstSeq && res && res.estimate) {
+        renderModalEstimate(res.estimate, !!precise);
+      }
     } catch (err) {
-      if (precise) pushNotice('Ошибка расчёта памяти: ' + err.message, 'warn');
+      if (preciseOnly) pushNotice('Ошибка расчёта памяти: ' + err.message, 'warn');
     } finally {
       if (precise && btn) {
         btn.disabled = false;
         btn.textContent = '🔍 Точный расчёт LM Studio';
       }
     }
-  }, precise ? 10 : 120);
+  };
+
+  if (preciseOnly) {
+    lmsModalPreciseTimer = setTimeout(() => runEstimate(true), 10);
+  } else {
+    // Только мгновенная локальная оценка — не спамим демон lms.exe при движении ползунка!
+    lmsModalEstTimer = setTimeout(() => runEstimate(false), 100);
+  }
 }
 
 async function openLmsLoadModal(preferredModelKey) {
@@ -7267,6 +7348,7 @@ async function openLmsLoadModal(preferredModelKey) {
     });
   });
   $('#lmsLoadKvSelect')?.addEventListener('change', () => scheduleModalEstimate(false));
+  $('#lmsLoadAutoHybridCheck')?.addEventListener('change', () => scheduleModalEstimate(false));
   $('#lmsLoadPreciseBtn')?.addEventListener('click', () => scheduleModalEstimate(true));
 
   $('#lmsLoadSubmitBtn')?.addEventListener('click', async () => {
@@ -7282,12 +7364,13 @@ async function openLmsLoadModal(preferredModelKey) {
     const parallel = Math.max(1, Math.min(16, Number($('#lmsLoadParallelInput').value) || 1));
     const ttl = Math.max(0, Number($('#lmsLoadTtlInput').value) || 0);
     const select_for_chat = !!($('#lmsLoadSyncChatCheck') && $('#lmsLoadSyncChatCheck').checked);
+    const auto_hybrid = !!($('#lmsLoadAutoHybridCheck') && $('#lmsLoadAutoHybridCheck').checked);
 
     submitBtn.disabled = true;
     submitBtn.textContent = '⏳ Загружаю в память…';
     if (liveLog) {
       liveLog.hidden = false;
-      liveLog.textContent = `Запуск lms load ${m.modelKey || m.path} --context-length ${ctx} --gpu ${gpu}…`;
+      liveLog.textContent = `Запуск lms load ${m.modelKey || m.path} --context-length ${ctx} --gpu ${gpu}${auto_hybrid ? ' (авто-гибрид VRAM+ОЗУ)' : ''}…`;
     }
 
     try {
@@ -7296,6 +7379,7 @@ async function openLmsLoadModal(preferredModelKey) {
         runtime,
         context_length: ctx,
         gpu,
+        auto_hybrid,
         kv_quant,
         flash_attention,
         parallel,
@@ -7323,9 +7407,13 @@ async function openLmsLoadModal(preferredModelKey) {
             pushNotice(`✅ Модель «${m.displayName || m.modelKey}» загружена (контекст ${ctx.toLocaleString('ru-RU')} токенов)!`, 'ok');
             closeModal();
           } else {
+            if (liveLog) {
+              liveLog.textContent += '\n\n💡 Совет: скорее всего, выбранное окно контекста (' + ctx.toLocaleString('ru-RU') + ' ток.) не поместилось в VRAM видеокарты. Уменьшите контекст (например 32K–64K) или снизьте GPU Offload и нажмите «Повторить загрузку».';
+              liveLog.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            }
             submitBtn.disabled = false;
             submitBtn.textContent = '🔄 Повторить загрузку';
-            pushNotice('Загрузка модели завершилась с ошибкой — проверь лог в окне и попробуй уменьшить контекст или GPU Offload.', 'bad');
+            pushNotice('Не удалось загрузить модель (вероятно не хватило VRAM под выбранный контекст) — снизьте контекст или GPU Offload.', 'bad');
           }
         } catch (pollErr) {
           submitBtn.disabled = false;

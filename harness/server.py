@@ -1129,6 +1129,7 @@ class Handler(BaseHTTPRequestHandler):
             "/api/lms/estimate": self.handle_lms_estimate,
             "/api/lms/runtime/select": self.handle_lms_runtime_select,
             "/api/lms/runtime/install": self.handle_lms_runtime_install,
+            "/api/lms/vulkan_gpu_preset": self.handle_lms_vulkan_gpu_preset,
             "/api/remote/start": self.handle_remote_start,
             "/api/remote/stop": self.handle_remote_stop,
             "/api/remote/rotate": self.handle_remote_rotate,
@@ -1731,7 +1732,36 @@ class Handler(BaseHTTPRequestHandler):
             context_length = max(512, max_ctx)
 
         raw_gpu = body.get("gpu") if "gpu" in body else body.get("gpu_offload", cfg.get("lms_gpu_offload", "max"))
-        cli_gpu, _ = lms_mod.normalize_gpu_offload(raw_gpu)
+        auto_hybrid = bool(body.get("auto_hybrid", False))
+        if str(raw_gpu or "").strip().lower() == "auto":
+            cli_gpu, _est, hyb_note = lms_mod.auto_fit_gpu_offload(
+                (target_disk or {}).get("modelKey") or model,
+                context_length=context_length,
+                cfg=cfg,
+            )
+            if hyb_note:
+                warnings.append("⚡ " + hyb_note)
+        else:
+            cli_gpu, _ = lms_mod.normalize_gpu_offload(raw_gpu)
+            if auto_hybrid and cli_gpu == "max":
+                hw_now = sizing_mod.get_hardware_profile()
+                est_max, _ = lms_mod.estimate_load_cli(
+                    (target_disk or {}).get("modelKey") or model,
+                    context_length=context_length,
+                    gpu="max",
+                    cfg=cfg,
+                    timeout=10,
+                )
+                vram_cap = float(hw_now.get("vram_total_gb") or 0.0)
+                if est_max and vram_cap > 0 and float(est_max.get("gpu_memory_gb") or 0.0) > (vram_cap * 0.90):
+                    cli_gpu, _est2, hyb_note = lms_mod.auto_fit_gpu_offload(
+                        (target_disk or {}).get("modelKey") or model,
+                        context_length=context_length,
+                        cfg=cfg,
+                        hw=hw_now,
+                    )
+                    if hyb_note:
+                        warnings.append("⚡ " + hyb_note)
         parallel = as_int(body.get("parallel", cfg.get("lms_parallel", 1)), 1, 1, 16)
         ttl = as_int(body.get("ttl", cfg.get("lms_ttl", 0)), 0, 0, 864000)
         flash_attn = bool(body.get("flash_attention", cfg.get("lms_flash_attention", True)))
@@ -1740,18 +1770,19 @@ class Handler(BaseHTTPRequestHandler):
             kv_quant = "f16"
         eval_batch = as_int(body.get("eval_batch_size", cfg.get("lms_eval_batch", 512)), 512, 32, 8192)
 
-        # 1. Сохраняем индивидуальный пресет модели в LM Studio (Flash Attention, KV Quant, Offload, Context)
-        preset_key = (target_disk or {}).get("path") or model
-        lms_mod.apply_model_load_preset(
-            preset_key,
-            context_length=context_length,
-            gpu_offload=cli_gpu,
-            flash_attention=flash_attn,
-            kv_quant=kv_quant,
-            eval_batch_size=eval_batch,
-            parallel=parallel,
-            cfg=cfg,
-        )
+        # 1. Сохраняем пресет LM Studio только если пользователь включил нестандартное KV-квантование (q8_0/q4_0)
+        if kv_quant != "f16":
+            preset_key = (target_disk or {}).get("path") or model
+            lms_mod.apply_model_load_preset(
+                preset_key,
+                context_length=context_length,
+                gpu_offload=cli_gpu,
+                flash_attention=flash_attn,
+                kv_quant=kv_quant,
+                eval_batch_size=eval_batch,
+                parallel=parallel,
+                cfg=cfg,
+            )
 
         # 2. Синхронизируем выбранную модель и окно контекста с конфигом LocalHarness
         select_for_chat = body.get("select_for_chat", True) is not False
@@ -1774,12 +1805,12 @@ class Handler(BaseHTTPRequestHandler):
             save(cur_cfg)
             cfg = cur_cfg
 
-        # 3. Если эта же модель уже висит в памяти — выгружаем старый инстанс перед перезагрузкой с новым контекстом
-        loaded, _ = lms_mod.loaded_models(cfg, force=True)
+        # 3. Если эта же модель уже висит в памяти — выгружаем старый инстанс (быстрый таймаут 10с)
+        loaded, _ = lms_mod.loaded_models(cfg, force=False)
         for m in (loaded or []):
             if any(lms_mod._match_alias(m.get(k), model) or lms_mod._match_alias(m.get(k), resolved_model_key)
                    for k in ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")):
-                lms_mod.run_cli(["unload", str(m.get("identifier") or model)], cfg, timeout=30)
+                lms_mod.run_cli(["unload", str(m.get("identifier") or model)], cfg, timeout=10)
                 lms_mod.invalidate()
                 break
 
@@ -1797,8 +1828,15 @@ class Handler(BaseHTTPRequestHandler):
                 need_server = not llm_mod.LLM(cfg).alive()
             except Exception:
                 need_server = False
+        def _after_load():
+            cap = as_int(cfg.get("lms_cpu_cap_pct"), 50, 20, 100)
+            if cap < 100:
+                lms_mod.enforce_cpu_cap(cap)
+            if need_server:
+                lms_mod.server_start(cfg, 20)
+
         if need_server:
-            result = start_lms_job("load", args, after_ok=lambda: lms_mod.server_start(cfg, 25))
+            result = start_lms_job("load", args, timeout=180, after_ok=_after_load)
         else:
             result = start_lms_job("load", args)
         if result.get("ok"):
@@ -1810,6 +1848,117 @@ class Handler(BaseHTTPRequestHandler):
             result["flash_attention"] = flash_attn
             if warnings:
                 result["warnings"] = warnings
+        _json_response(self, result)
+
+    def handle_lms_vulkan_gpu_preset(self, body):
+        """1-клик настройка: Vulkan 100% на видеокарте + жёсткое ограничение нагрузки CPU <= 50%."""
+        cfg = load()
+        rt_info = lms_mod.list_runtimes(cfg)
+        if not rt_info.get("vulkan_installed"):
+            _json_response(self, {
+                "ok": False,
+                "need_install": True,
+                "install_query": rt_info.get("vulkan_pack") or lms_mod.default_vulkan_runtime_name(),
+                "error": "Движок Vulkan ещё не установлен. Нажмите «Скачать / Обновить Vulkan».",
+            }, 400)
+            return
+
+        # 1. Активируем Vulkan, если ещё не активен
+        if not rt_info.get("vulkan_active"):
+            sel_res = lms_mod.select_runtime("vulkan", cfg=cfg)
+            if not sel_res.get("ok"):
+                _json_response(self, sel_res, 400)
+                return
+
+        # 2. Выбираем целевую модель (указанная -> текущая -> первая чат-модель на диске)
+        disk, _ = lms_mod.disk_models(cfg)
+        chat_disk = [m for m in (disk or []) if m.get("type") != "embedding" and "embedding" not in str(m.get("modelKey") or "").lower()]
+        req_model = str(body.get("model") or cfg.get("model") or "").strip()
+        target_disk = None
+        for item in chat_disk:
+            if req_model and any(lms_mod._match_alias(item.get(k), req_model)
+                                 for k in ("modelKey", "path", "identifier", "indexedModelIdentifier", "displayName")):
+                target_disk = item
+                break
+        if not target_disk and chat_disk:
+            target_disk = chat_disk[0]
+        if not target_disk and not req_model:
+            _json_response(self, {"ok": False, "error": "На диске LM Studio нет чат-моделей. Сначала скачайте модель."}, 400)
+            return
+
+        model_key = (target_disk or {}).get("modelKey") or req_model
+        max_ctx = lms_mod._positive_int((target_disk or {}).get("maxContextLength")) or 32768
+        # Безопасное окно для 100% GPU без сброса в CPU/ОЗУ (по умолчанию 16384 или указанное, не выше 32768 если не передано явно)
+        if body.get("context_length"):
+            ctx_len = min(max_ctx, normalize_context(body.get("context_length"), 16384))
+        else:
+            cur_ctx = normalize_context(cfg.get("lms_context_length") or cfg.get("context_tokens"), 16384)
+            ctx_len = min(max_ctx, cur_ctx if cur_ctx <= 32768 else 16384)
+
+        cpu_cap_pct = as_int(body.get("cpu_cap_pct", cfg.get("lms_cpu_cap_pct", 50)), 50, 20, 50)
+        safe_threads = as_int(body.get("cpu_threads"), lms_mod.recommended_safe_cpu_threads(cpu_cap_pct), 1, 6)
+
+        # 3. Записываем щадящий для CPU + 100% GPU Vulkan пресет в LM Studio
+        preset_key = (target_disk or {}).get("path") or model_key
+        lms_mod.apply_model_load_preset(
+            preset_key,
+            context_length=ctx_len,
+            gpu_offload="max",
+            flash_attention=True,
+            kv_quant="f16",
+            cpu_threads=safe_threads,
+            offload_kv_gpu=True,
+            parallel=1,
+            cfg=cfg,
+        )
+
+        # 4. Сохраняем в config.json LocalHarness
+        with CONFIG_LOCK:
+            cur_cfg = load()
+            cur_cfg["provider"] = "lmstudio"
+            cur_cfg["model"] = model_key
+            cur_cfg["lms_runtime"] = rt_info.get("vulkan_pack") or lms_mod.default_vulkan_runtime_name()
+            cur_cfg["lms_gpu_offload"] = "max"
+            cur_cfg["lms_context_length"] = ctx_len
+            cur_cfg["context_tokens"] = ctx_len
+            cur_cfg["lms_flash_attention"] = True
+            cur_cfg["lms_kv_quant"] = "f16"
+            cur_cfg["lms_cpu_threads"] = safe_threads
+            cur_cfg["lms_cpu_cap_pct"] = cpu_cap_pct
+            save(cur_cfg)
+            cfg = cur_cfg
+
+        # 5. Выгружаем старый инстанс (если был) и грузим чисто на 100% GPU Vulkan + ставим CPU affinity cap <= 50%
+        loaded, _ = lms_mod.loaded_models(cfg, force=False)
+        for m in (loaded or []):
+            if any(lms_mod._match_alias(m.get(k), model_key)
+                   for k in ("identifier", "modelKey", "path", "id", "displayName", "indexedModelIdentifier")):
+                lms_mod.run_cli(["unload", str(m.get("identifier") or model_key)], cfg, timeout=10)
+                lms_mod.invalidate()
+                break
+
+        args = lms_mod.build_load_cli_args(model_key, context_length=ctx_len, gpu="max", parallel=1, ttl=cfg.get("lms_ttl", 0))
+
+        def _after_vulkan_load():
+            lms_mod.enforce_cpu_cap(cpu_cap_pct)
+            try:
+                if not llm_mod.LLM(cfg).alive():
+                    lms_mod.server_start(cfg, 20)
+            except Exception:
+                pass
+
+        result = start_lms_job("load", args, timeout=180, after_ok=_after_vulkan_load)
+        if result.get("ok"):
+            dashboard_mod.record_model_load()
+            result.update({
+                "model": model_key,
+                "runtime": "vulkan",
+                "context_length": ctx_len,
+                "gpu": "max",
+                "cpu_threads": safe_threads,
+                "cpu_cap_pct": cpu_cap_pct,
+                "message": "🌋 Vulkan 100%% GPU + защита CPU (≤%d%%, %d потока, контекст %d)" % (cpu_cap_pct, safe_threads, ctx_len),
+            })
         _json_response(self, result)
 
     def handle_lms_runtime_select(self, body):

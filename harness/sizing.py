@@ -192,9 +192,12 @@ def estimate_model_fit(model_item, context_length=8192, hw=None, gpu_offload="ma
         weights_gb = round((params_b * 1e9 * (bits_per_param / 8.0)) / (1024 ** 3), 2)
 
     # 2. KV-кэш контекста в памяти (ГБ) с учетом квантования K/V кэша (f16 / q8_0 / q4_0)
+    # У компактных 2B-4B моделей (Qwen3/Qwen3-VL/Llama-3.2) слоёв почти столько же (28-36),
+    # поэтому KV-кэш не падает линейно ниже ~0.55x от 8B модели.
     kv_q = str(kv_quant or "f16").strip().lower()
     kv_mult = 0.55 if "q8" in kv_q else (0.32 if "q4" in kv_q else 1.0)
-    kv_factor = 0.000105 * (params_b / 8.0) * kv_mult
+    kv_scale = max(0.58, params_b / 8.0)
+    kv_factor = 0.000105 * kv_scale * kv_mult
     kv_cache_gb = round(max(0.10, ctx_len * kv_factor), 2)
 
     # Пользовательский лимит выгрузки на GPU (off / 0.0..1.0 / max)

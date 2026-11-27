@@ -236,7 +236,7 @@ def test_http_lms_load_and_runtime_endpoints(tmp_path, monkeypatch):
 
     captured_jobs = []
 
-    def fake_start_job(kind, args, timeout=3600):
+    def fake_start_job(kind, args, timeout=3600, after_ok=None):
         captured_jobs.append((kind, list(args)))
         return {"ok": True, "job": {"id": "load-1", "kind": kind, "running": False, "rc": 0, "lines": []}}
 
@@ -285,6 +285,25 @@ def test_http_lms_load_and_runtime_endpoints(tmp_path, monkeypatch):
         assert saved_cfg["lms_context_length"] == 65536
         assert saved_cfg["context_tokens"] == 65536
         assert lms_mod.list_runtimes({})["vulkan_active"] is True
+
+        # Test 1-click Vulkan GPU + CPU <= 50% preset endpoint
+        captured_jobs.clear()
+        vk_req = urllib.request.Request(
+            base + "/api/lms/vulkan_gpu_preset",
+            data=json.dumps({"model": "huihui-qwen3-vl-2b", "cpu_cap_pct": 50}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(vk_req, timeout=5) as r:
+            vk_res = json.loads(r.read().decode("utf-8"))
+        assert vk_res["ok"] is True
+        assert vk_res["gpu"] == "max"
+        assert vk_res["cpu_cap_pct"] == 50
+        assert 2 <= vk_res["cpu_threads"] <= 4
+        assert vk_res["context_length"] == 16384  # Safe 100% GPU context when previous ctx > 32K
+        assert captured_jobs and captured_jobs[0][1][:6] == [
+            "load", "huihui-qwen3-vl-2b", "--context-length", "16384", "--gpu", "max"
+        ]
     finally:
         httpd.shutdown()
         httpd.server_close()

@@ -735,6 +735,8 @@ def read_model_load_preset(model_path_or_key, cfg=None):
             out["kv_quant"] = str(kv.get("value") or "f16") if kv.get("checked") else "f16"
         if "llm.load.llama.evalBatchSize" in fmap:
             out["eval_batch_size"] = _positive_int(fmap["llm.load.llama.evalBatchSize"])
+        if "llm.load.llama.cpuThreadPoolSize" in fmap:
+            out["cpu_threads"] = _positive_int(fmap["llm.load.llama.cpuThreadPoolSize"])
         if "llm.load.numParallelSessions" in fmap:
             out["parallel"] = _positive_int(fmap["llm.load.numParallelSessions"])
     except Exception:
@@ -742,9 +744,46 @@ def read_model_load_preset(model_path_or_key, cfg=None):
     return out
 
 
+def recommended_safe_cpu_threads(max_cpu_pct=50):
+    """Безопасное число потоков CPU для llama.cpp (бережём процессор: <= 50% физических ядер / <= 25% логических)."""
+    logical = os.cpu_count() or 8
+    try:
+        import psutil
+        physical = psutil.cpu_count(logical=False) or max(2, logical // 2)
+    except Exception:
+        physical = max(2, logical // 2)
+    cap_ratio = max(0.15, min(0.5, float(max_cpu_pct or 50) / 100.0))
+    return max(2, min(4, int(round(physical * cap_ratio))))
+
+
+def enforce_cpu_cap(max_cpu_pct=50):
+    """Ограничивает процессы llama-server (движок LM Studio) по приоритету и CPU affinity <= max_cpu_pct%,
+    чтобы видеокарта Vulkan работала на 100%, а процессор никогда не грузился выше половины."""
+    try:
+        import psutil
+        logical = os.cpu_count() or 4
+        pct = max(20, min(80, int(max_cpu_pct or 50)))
+        allowed_cnt = max(2, min(logical, int(round(logical * pct / 100.0))))
+        cores = list(range(allowed_cnt))
+        touched = 0
+        for proc in psutil.process_iter(["name"]):
+            pname = str((proc.info or {}).get("name") or "").lower()
+            if "llama-server" in pname or "llm_engine" in pname:
+                try:
+                    proc.cpu_affinity(cores)
+                    if os.name == "nt":
+                        proc.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+                    touched += 1
+                except Exception:
+                    pass
+        return {"ok": True, "touched": touched, "cores": allowed_cnt, "logical": logical}
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+
+
 def apply_model_load_preset(model_path_or_key, context_length=None, gpu_offload=None,
                             flash_attention=None, kv_quant=None, eval_batch_size=None,
-                            parallel=None, cfg=None):
+                            parallel=None, cpu_threads=None, offload_kv_gpu=None, cfg=None):
     """Сохраняет параметры загрузки (контекст, GPU offload, Flash Attention, KV-квантование)
     в per-model конфиг LM Studio перед вызовом `lms load`, чтобы движок (вкл. Vulkan) их применил."""
     cfg_file = _resolve_model_config_path(model_path_or_key, cfg)
@@ -791,6 +830,12 @@ def apply_model_load_preset(model_path_or_key, context_length=None, gpu_offload=
         par = _positive_int(parallel)
         if par:
             updates["llm.load.numParallelSessions"] = par
+    if cpu_threads is not None:
+        ct = _positive_int(cpu_threads)
+        if ct:
+            updates["llm.load.llama.cpuThreadPoolSize"] = ct
+    if offload_kv_gpu is not None:
+        updates["llm.load.llama.offloadKVCacheToGpuMemory"] = bool(offload_kv_gpu)
 
     if not updates:
         return True
@@ -865,7 +910,10 @@ def parse_estimate_cli_output(text):
     }
 
 
-def estimate_load_cli(model, context_length=8192, gpu="max", cfg=None, timeout=15):
+_EST_LOCK = threading.Lock()
+
+
+def estimate_load_cli(model, context_length=8192, gpu="max", cfg=None, timeout=12):
     """Запрашивает у самого LM Studio (`--estimate-only`) точный расчёт VRAM и общей памяти."""
     if not model:
         return None, "не указана модель"
@@ -874,6 +922,8 @@ def estimate_load_cli(model, context_length=8192, gpu="max", cfg=None, timeout=1
         return None, "lms.exe не найден"
     ctx = max(512, min(int(context_length or 8192), 262144))
     cli_gpu, _ = normalize_gpu_offload(gpu)
+    if not _EST_LOCK.acquire(blocking=False):
+        return None, "расчёт памяти уже выполняется"
     try:
         proc = subprocess.run(
             [cli, "load", str(model), "--context-length", str(ctx), "--gpu", cli_gpu, "--estimate-only"],
@@ -889,7 +939,44 @@ def estimate_load_cli(model, context_length=8192, gpu="max", cfg=None, timeout=1
         return None, "таймаут расчёта памяти lms"
     except Exception as exc:
         return None, str(exc)[:300]
+    finally:
+        _EST_LOCK.release()
     parsed = parse_estimate_cli_output(combined)
     if parsed:
         return parsed, ""
     return None, combined[:300] or "не удалось получить оценку памяти от lms"
+
+
+def auto_fit_gpu_offload(model, context_length=8192, cfg=None, hw=None):
+    """Подбирает максимальный безопасный процент выгрузки слоёв на GPU с догрузкой остатка в ОЗУ (RAM).
+    Возвращает (gpu_flag, estimate_dict_or_None, note_str)."""
+    from . import sizing as sizing_mod
+    if hw is None:
+        hw = sizing_mod.get_hardware_profile()
+    vram_total = float(hw.get("vram_total_gb") or 0.0)
+    vram_free = float(hw.get("vram_free_gb") or vram_total)
+    if not hw.get("has_gpu") or vram_total <= 0.5:
+        est, _ = estimate_load_cli(model, context_length=context_length, gpu="off", cfg=cfg, timeout=10)
+        return "off", est, "GPU не обнаружен — загрузка в системную ОЗУ (RAM)."
+
+    # Безопасный потолок VRAM: оставляем небольшой запас для ОС/драйвера Vulkan
+    safe_vram = max(1.0, min(vram_total * 0.88, max(vram_free + 0.6, vram_total * 0.65)))
+    candidates = ("max", "0.75", "0.6", "0.5", "0.4", "0.3", "0.2", "off")
+    last_est = None
+    for cand in candidates:
+        est, _ = estimate_load_cli(model, context_length=context_length, gpu=cand, cfg=cfg, timeout=10)
+        if not est:
+            continue
+        last_est = est
+        gpu_gb = float(est.get("gpu_memory_gb") or 0.0)
+        tot_gb = float(est.get("total_memory_gb") or gpu_gb)
+        ram_gb = max(0.0, round(tot_gb - gpu_gb, 2))
+        if gpu_gb <= safe_vram:
+            if cand == "max":
+                return "max", est, "100%% GPU (%.2f ГБ VRAM)" % gpu_gb
+            if cand == "off":
+                return "off", est, "Загрузка в ОЗУ (RAM): %.2f ГБ ОЗУ + %.2f ГБ VRAM" % (ram_gb, gpu_gb)
+            pct = int(round(float(cand) * 100))
+            return cand, est, "Авто-гибрид (VRAM + ОЗУ): %d%% на GPU (%.2f ГБ VRAM + %.2f ГБ в ОЗУ)" % (pct, gpu_gb, ram_gb)
+
+    return "off", last_est, "Не хватило VRAM даже при частичной выгрузке — переключено на загрузку в ОЗУ (off)."

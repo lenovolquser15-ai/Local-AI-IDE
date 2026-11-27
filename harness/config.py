@@ -46,6 +46,8 @@ DEFAULTS = {
     "lms_flash_attention": True,
     "lms_kv_quant": "f16",
     "lms_eval_batch": 512,
+    "lms_cpu_threads": 4,
+    "lms_cpu_cap_pct": 50,
     "lms_runtime": "",
     "lms_ttl": 0,
     "tool_profile": "full",

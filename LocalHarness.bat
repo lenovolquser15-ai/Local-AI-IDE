@@ -1,7 +1,7 @@
 @echo off
 chcp 65001 >nul
 setlocal EnableExtensions
-title LocalHarness v1.0.8 (Vulkan + Workspaces + Goal Review)
+title LocalHarness v1.0.8.1 (Vulkan GPU + CPU Guard + Workspaces)
 
 set "ROOT=C:\LocalHarness"
 set "PORT=7788"

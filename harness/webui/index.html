@@ -372,6 +372,7 @@
             <div class="page-sub" id="lmBase">сервер: …</div>
           </div>
           <span class="grow"></span>
+          <button id="lmsVulkanOneClickBtn" class="vulkan-oneclick-btn" type="button" title="В 1 клик: включить Vulkan на 100% видеокарте, перенести KV-кэш в VRAM и жёстко ограничить нагрузку на процессор ≤ 50%">🌋 1 клик: Vulkan GPU (CPU ≤ 50%)</button>
           <button id="lmsOpenLoaderTopBtn" class="primary small-btn" type="button" title="Открыть окно тонкой загрузки модели как в LM Studio">⚙️ Загрузить модель…</button>
           <button id="lmsUnloadAll" class="ghost" title="Выгрузить все модели из памяти LM Studio">выгрузить всё</button>
           <button id="lmsWake" class="ghost">разбудить сервер</button>
@@ -1075,6 +1076,7 @@
                 <option value="131072">128K (131 072)</option>
               </select>
             </label>
+            <button id="mmVulkanOneClickBtn" class="vulkan-oneclick-btn small-btn mm-loader-btn" type="button" title="В 1 клик запустить модель на 100% видеокарте через Vulkan с защитой процессора (CPU ≤ 50%)">🌋 GPU ≤50% CPU</button>
             <button id="mmOpenLoaderBtn" class="ghost small-btn mm-loader-btn" type="button" title="Открыть окно загрузки модели как в LM Studio (ползунок контекста, GPU Offload, Vulkan, KV-кэш)">⚙️ Загрузить…</button>
           </div>
         </div>
@@ -1664,6 +1666,10 @@
     </div>
 
     <div class="lms-check-row">
+      <label class="check-pill">
+        <input type="checkbox" id="lmsLoadAutoHybridCheck">
+        <span>🔄 Авто-гибрид (VRAM + ОЗУ) — только если хотите автоматически сбрасывать слои в ОЗУ (медленнее, чем 100% GPU)</span>
+      </label>
       <label class="check-pill">
         <input type="checkbox" id="lmsLoadFlashCheck" checked>
         <span>⚡ Flash Attention (ускоряет длинный контекст и снижает расход VRAM)</span>
